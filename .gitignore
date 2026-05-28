@@ -1,0 +1,27 @@
+# Virtual environment
+.venv/
+
+# Output artifacts
+output/
+*.gguf
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# Model weights (don't commit these)
+*.safetensors
+*.bin
+*.msgpack
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db

@@ -1,0 +1,9 @@
+torch>=2.4.0
+transformers>=4.57.0
+accelerate>=1.0.0
+safetensors
+gguf>=0.13.0
+numpy
+tqdm
+datasets
+huggingface_hub
