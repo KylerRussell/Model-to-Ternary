@@ -72,9 +72,13 @@ QUANTIZE_PATTERNS = [
     ".self_attn.k_proj.weight",
     ".self_attn.v_proj.weight",
     ".self_attn.o_proj.weight",
-    # DeltaNet-specific projections
-    ".self_attn.q_norm.weight",   # may exist, check and skip if norm
-    ".self_attn.k_norm.weight",   # may exist, check and skip if norm
+    # DeltaNet-specific projections (linear attention)
+    ".linear_attn.in_proj_a.weight",
+    ".linear_attn.in_proj_b.weight",
+    ".linear_attn.in_proj_qkv.weight",
+    ".linear_attn.in_proj_z.weight",
+    ".linear_attn.in_proj_qkvz.weight",
+    ".linear_attn.out_proj.weight",
     # MLP projections
     ".mlp.gate_proj.weight",
     ".mlp.up_proj.weight",
@@ -95,6 +99,45 @@ KEEP_FP16_PATTERNS = [
     ".bias",              # any biases (usually small)
 ]
 
+# ── DeltaNet isolation experiment (DIAGNOSTIC) ──────────────────────────────
+# (Experiment 1 — collapsed; set False now.) When True, all 48 DeltaNet attention
+# projections (linear_attn.*) stay FP16 (rotated, not ternarized).
+ISOLATE_DELTANET_FP16 = False
+if ISOLATE_DELTANET_FP16:
+    KEEP_FP16_PATTERNS = KEEP_FP16_PATTERNS + [".linear_attn"]
+# ────────────────────────────────────────────────────────────────────────────
+
+# ── Experiment 2: protect UN-ROTATED-input projections (DIAGNOSTIC) ─────────
+# (Experiment 2 — collapsed; set False now.) When True (with experiment 1), only the
+# rotated-input projections {q,k,v,gate,up} are ternarized.
+PROTECT_UNROTATED_INPUTS = False
+if PROTECT_UNROTATED_INPUTS:
+    KEEP_FP16_PATTERNS = KEEP_FP16_PATTERNS + [".o_proj", ".down_proj"]
+# ────────────────────────────────────────────────────────────────────────────
+
+# ── Experiment 3: bug-vs-ceiling — quantize ONLY a few layers (DIAGNOSTIC) ──
+# Quantize the normal target tensors ONLY in these layer indices; every other layer
+# stays FP16-rotated. Ternarizing a few standard (full-attention) layers out of 64
+# should cause only minor degradation in a HEALTHY model. If even this small set
+# collapses generation into garbage, a handful of tensors is destroying the whole
+# model — a bug in the quantization/save path, not a quality ceiling. If it stays
+# coherent, widen the set ({3,7,11} → first 8 → first 16 → …) to map the compounding
+# cliff. Set to None to quantize all layers.
+QUANTIZE_ONLY_LAYERS = None   # None = all layers (production). {3,7,11} etc. = diagnostic only.
+
+
+def _layer_index(name: str):
+    """Extract integer layer index from '...layers.<i>...', else None."""
+    parts = name.split(".")
+    for i, p in enumerate(parts):
+        if p == "layers" and i + 1 < len(parts):
+            try:
+                return int(parts[i + 1])
+            except ValueError:
+                return None
+    return None
+# ────────────────────────────────────────────────────────────────────────────
+
 
 def should_quantize(tensor_name: str) -> bool:
     """Determine if a tensor should be quantized to ternary."""
@@ -105,8 +148,23 @@ def should_quantize(tensor_name: str) -> bool:
     # Then check if it matches a quantization target
     for pattern in QUANTIZE_PATTERNS:
         if pattern in tensor_name:
+            # Experiment-3 gate: restrict quantization to specific layers if set
+            if QUANTIZE_ONLY_LAYERS is not None:
+                li = _layer_index(tensor_name)
+                if li is None or li not in QUANTIZE_ONLY_LAYERS:
+                    return False
             return True
     return False
+
+
+def is_rotatable_projection(tensor_name: str) -> bool:
+    """A 2D residual-stream projection (q/k/v/o, in_proj_*, out_proj, gate/up/down) that
+    must ALWAYS be Hadamard-rotated + norm-absorbed for transparency — even when we keep
+    it FP16 (not ternarized). This is INDEPENDENT of the quantization toggles/layer gate:
+    rotation governs correctness of the residual stream; quantization is a separate choice.
+    Matches the base projection list only — embeddings, lm_head, norms, conv1d, biases do
+    NOT match QUANTIZE_PATTERNS and are handled in the FP16 path instead."""
+    return any(pattern in tensor_name for pattern in QUANTIZE_PATTERNS)
 
 
 def get_layer_type(layer_idx: int) -> str:
@@ -130,6 +188,7 @@ class ConversionConfig:
     # Quantization
     block_size: int = BLOCK_SIZE
     apply_hadamard: bool = True    # Phase 1: Hadamard rotation before quantization
+    rotation_only: bool = False    # Phase 1: rotation+norm absorption only, no ternary quantization
     use_calibration: bool = False  # Phase 2: calibration-aware quantization
 
     # Calibration (Phase 2)

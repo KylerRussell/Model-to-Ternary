@@ -1,0 +1,848 @@
+=== Start Pipeline: Fri May 29 05:53:04 AM CDT 2026 ===
+=== 1) Clean rotated FP16 model (Phase 1) ===
+📥 Downloading Qwen/Qwen3.6-27B...
+Fetching 29 files:   0%|          | 0/29 [00:00<?, ?it/s]Fetching 29 files: 100%|██████████| 29/29 [00:00<00:00, 4368.13it/s]
+
+======================================================================
+TERNARY CONVERSION PIPELINE — Phase 1 (RTN)
+======================================================================
+  Source model:  /home/kyler/.cache/huggingface/hub/models--Qwen--Qwen3.6-27B/snapshots/6a9e13bd6fc8f0983b9b99948120bc37f49c13e9
+  Output dir:    output
+  Block size:    128
+  Hadamard:      ON
+  Device:        cuda:0
+
+  Total tensors: 1199
+  Shard files:   15
+
+  Pre-loading LayerNorm weights for offline QuaRot rotation...
+  Loading norms:   0%|          | 0/1199 [00:00<?, ?it/s]  Loading norms: 100%|██████████| 1199/1199 [00:00<00:00, 30728.35it/s]
+  Loaded 215 LayerNorm weights.
+
+📦 Processing shard 1/15: model-00001-of-00015.safetensors
+   Contains 9 tensors
+   Shard 1:   0%|          | 0/9 [00:00<?, ?it/s]   Shard 1:  11%|█         | 1/9 [00:01<00:14,  1.78s/it]   Shard 1:  22%|██▏       | 2/9 [00:01<00:05,  1.17it/s]   Shard 1:  33%|███▎      | 3/9 [00:02<00:03,  1.88it/s]   Shard 1:  44%|████▍     | 4/9 [00:02<00:01,  2.65it/s]   Shard 1:  56%|█████▌    | 5/9 [00:02<00:01,  3.50it/s]   Shard 1:  67%|██████▋   | 6/9 [00:02<00:00,  4.25it/s]   Shard 1:  78%|███████▊  | 7/9 [00:02<00:00,  4.98it/s]   Shard 1:  89%|████████▉ | 8/9 [00:02<00:00,  5.58it/s]   Shard 1: 100%|██████████| 9/9 [00:02<00:00,  6.06it/s]   Shard 1: 100%|██████████| 9/9 [00:02<00:00,  3.07it/s]
+   Applying batched rotation for model.language_model.embed_tokens.weight...
+   💾 Saving modified shard: output/modified_model/model-00001-of-00015.safetensors
+
+📦 Processing shard 2/15: model-00002-of-00015.safetensors
+   Contains 22 tensors
+   Shard 2:   0%|          | 0/22 [00:00<?, ?it/s]   Shard 2:   5%|▍         | 1/22 [00:00<00:02,  7.91it/s]   Shard 2:   9%|▉         | 2/22 [00:00<00:02,  7.58it/s]   Shard 2:  14%|█▎        | 3/22 [00:00<00:02,  7.58it/s]   Shard 2:  18%|█▊        | 4/22 [00:00<00:02,  7.64it/s]   Shard 2:  23%|██▎       | 5/22 [00:00<00:02,  7.74it/s]   Shard 2:  27%|██▋       | 6/22 [00:00<00:02,  7.78it/s]   Shard 2:  32%|███▏      | 7/22 [00:00<00:01,  7.74it/s]   Shard 2:  36%|███▋      | 8/22 [00:01<00:01,  7.82it/s]   Shard 2:  41%|████      | 9/22 [00:01<00:01,  7.84it/s]   Shard 2:  45%|████▌     | 10/22 [00:01<00:01,  7.99it/s]   Shard 2:  50%|█████     | 11/22 [00:01<00:01,  8.13it/s]   Shard 2:  55%|█████▍    | 12/22 [00:01<00:01,  8.17it/s]   Shard 2:  59%|█████▉    | 13/22 [00:01<00:01,  8.17it/s]   Shard 2:  64%|██████▎   | 14/22 [00:01<00:00,  8.35it/s]   Shard 2:  68%|██████▊   | 15/22 [00:01<00:00,  8.28it/s]   Shard 2:  73%|███████▎  | 16/22 [00:01<00:00,  8.30it/s]   Shard 2:  77%|███████▋  | 17/22 [00:02<00:00,  8.39it/s]   Shard 2:  82%|████████▏ | 18/22 [00:02<00:00,  8.38it/s]   Shard 2:  86%|████████▋ | 19/22 [00:02<00:00,  8.28it/s]   Shard 2:  91%|█████████ | 20/22 [00:02<00:00,  8.37it/s]   Shard 2:  95%|█████████▌| 21/22 [00:02<00:00,  8.24it/s]   Shard 2: 100%|██████████| 22/22 [00:02<00:00,  8.36it/s]   Shard 2: 100%|██████████| 22/22 [00:02<00:00,  8.10it/s]
+   💾 Saving modified shard: output/modified_model/model-00002-of-00015.safetensors
+
+📦 Processing shard 3/15: model-00003-of-00015.safetensors
+   Contains 22 tensors
+   Shard 3:   0%|          | 0/22 [00:00<?, ?it/s]   Shard 3:   5%|▍         | 1/22 [00:00<00:02,  9.06it/s]   Shard 3:   9%|▉         | 2/22 [00:00<00:02,  8.26it/s]   Shard 3:  14%|█▎        | 3/22 [00:00<00:02,  8.04it/s]   Shard 3:  18%|█▊        | 4/22 [00:00<00:02,  8.09it/s]   Shard 3:  23%|██▎       | 5/22 [00:00<00:02,  7.92it/s]   Shard 3:  27%|██▋       | 6/22 [00:00<00:02,  7.90it/s]   Shard 3:  32%|███▏      | 7/22 [00:00<00:01,  7.97it/s]   Shard 3:  36%|███▋      | 8/22 [00:00<00:01,  7.95it/s]   Shard 3:  41%|████      | 9/22 [00:01<00:01,  7.87it/s]   Shard 3:  45%|████▌     | 10/22 [00:01<00:01,  8.01it/s]   Shard 3:  50%|█████     | 11/22 [00:01<00:01,  7.90it/s]   Shard 3:  55%|█████▍    | 12/22 [00:01<00:01,  7.86it/s]   Shard 3:  59%|█████▉    | 13/22 [00:01<00:01,  8.01it/s]   Shard 3:  64%|██████▎   | 14/22 [00:01<00:01,  7.97it/s]   Shard 3:  68%|██████▊   | 15/22 [00:01<00:00,  7.91it/s]   Shard 3:  73%|███████▎  | 16/22 [00:02<00:00,  8.01it/s]   Shard 3:  77%|███████▋  | 17/22 [00:02<00:00,  7.99it/s]   Shard 3:  82%|████████▏ | 18/22 [00:02<00:00,  7.86it/s]   Shard 3:  86%|████████▋ | 19/22 [00:02<00:00,  7.99it/s]   Shard 3:  91%|█████████ | 20/22 [00:02<00:00,  7.94it/s]   Shard 3:  95%|█████████▌| 21/22 [00:02<00:00,  7.91it/s]   Shard 3: 100%|██████████| 22/22 [00:02<00:00,  7.95it/s]   Shard 3: 100%|██████████| 22/22 [00:02<00:00,  7.97it/s]
+   💾 Saving modified shard: output/modified_model/model-00003-of-00015.safetensors
+
+📦 Processing shard 4/15: model-00004-of-00015.safetensors
+   Contains 22 tensors
+   Shard 4:   0%|          | 0/22 [00:00<?, ?it/s]   Shard 4:   5%|▍         | 1/22 [00:00<00:02,  7.30it/s]   Shard 4:   9%|▉         | 2/22 [00:00<00:02,  7.18it/s]   Shard 4:  14%|█▎        | 3/22 [00:00<00:02,  7.83it/s]   Shard 4:  18%|█▊        | 4/22 [00:00<00:02,  7.96it/s]   Shard 4:  23%|██▎       | 5/22 [00:00<00:02,  8.14it/s]   Shard 4:  27%|██▋       | 6/22 [00:00<00:01,  8.34it/s]   Shard 4:  32%|███▏      | 7/22 [00:00<00:01,  8.33it/s]   Shard 4:  36%|███▋      | 8/22 [00:00<00:01,  8.33it/s]   Shard 4:  41%|████      | 9/22 [00:01<00:01,  8.46it/s]   Shard 4:  45%|████▌     | 10/22 [00:01<00:01,  8.39it/s]   Shard 4:  50%|█████     | 11/22 [00:01<00:01,  8.40it/s]   Shard 4:  55%|█████▍    | 12/22 [00:01<00:01,  8.47it/s]   Shard 4:  59%|█████▉    | 13/22 [00:01<00:01,  8.37it/s]   Shard 4:  64%|██████▎   | 14/22 [00:01<00:00,  8.39it/s]   Shard 4:  68%|██████▊   | 15/22 [00:01<00:00,  8.47it/s]   Shard 4:  73%|███████▎  | 16/22 [00:01<00:00,  8.45it/s]   Shard 4:  77%|███████▋  | 17/22 [00:02<00:00,  8.43it/s]   Shard 4:  82%|████████▏ | 18/22 [00:02<00:00,  8.55it/s]   Shard 4:  86%|████████▋ | 19/22 [00:02<00:00,  8.52it/s]   Shard 4:  91%|█████████ | 20/22 [00:02<00:00,  8.51it/s]   Shard 4:  95%|█████████▌| 21/22 [00:02<00:00,  8.49it/s]   Shard 4: 100%|██████████| 22/22 [00:02<00:00,  8.26it/s]   Shard 4: 100%|██████████| 22/22 [00:02<00:00,  8.31it/s]
+   💾 Saving modified shard: output/modified_model/model-00004-of-00015.safetensors
+
+📦 Processing shard 5/15: model-00005-of-00015.safetensors
+   Contains 22 tensors
+   Shard 5:   0%|          | 0/22 [00:00<?, ?it/s]   Shard 5:   5%|▍         | 1/22 [00:00<00:02,  8.52it/s]   Shard 5:   9%|▉         | 2/22 [00:00<00:02,  8.09it/s]   Shard 5:  14%|█▎        | 3/22 [00:00<00:02,  8.21it/s]   Shard 5:  18%|█▊        | 4/22 [00:00<00:02,  8.00it/s]   Shard 5:  23%|██▎       | 5/22 [00:00<00:02,  8.09it/s]   Shard 5:  27%|██▋       | 6/22 [00:00<00:02,  7.94it/s]   Shard 5:  32%|███▏      | 7/22 [00:00<00:01,  7.91it/s]   Shard 5:  36%|███▋      | 8/22 [00:00<00:01,  7.98it/s]   Shard 5:  41%|████      | 9/22 [00:01<00:01,  7.91it/s]   Shard 5:  45%|████▌     | 10/22 [00:01<00:01,  7.97it/s]   Shard 5:  50%|█████     | 11/22 [00:01<00:01,  8.08it/s]   Shard 5:  55%|█████▍    | 12/22 [00:01<00:01,  7.98it/s]   Shard 5:  59%|█████▉    | 13/22 [00:01<00:01,  8.00it/s]   Shard 5:  64%|██████▎   | 14/22 [00:01<00:00,  8.00it/s]   Shard 5:  68%|██████▊   | 15/22 [00:01<00:00,  7.93it/s]   Shard 5:  73%|███████▎  | 16/22 [00:02<00:00,  7.90it/s]   Shard 5:  77%|███████▋  | 17/22 [00:02<00:00,  7.87it/s]   Shard 5:  82%|████████▏ | 18/22 [00:02<00:00,  7.90it/s]   Shard 5:  86%|████████▋ | 19/22 [00:02<00:00,  7.93it/s]   Shard 5:  91%|█████████ | 20/22 [00:02<00:00,  8.09it/s]   Shard 5:  95%|█████████▌| 21/22 [00:02<00:00,  8.13it/s]   Shard 5: 100%|██████████| 22/22 [00:02<00:00,  8.02it/s]   Shard 5: 100%|██████████| 22/22 [00:02<00:00,  8.00it/s]
+   💾 Saving modified shard: output/modified_model/model-00005-of-00015.safetensors
+
+📦 Processing shard 6/15: model-00006-of-00015.safetensors
+   Contains 60 tensors
+   Shard 6:   0%|          | 0/60 [00:00<?, ?it/s]   Shard 6:   3%|▎         | 2/60 [00:00<00:04, 13.50it/s]   Shard 6:   7%|▋         | 4/60 [00:00<00:03, 14.80it/s]   Shard 6:  10%|█         | 6/60 [00:00<00:03, 16.20it/s]   Shard 6:  13%|█▎        | 8/60 [00:00<00:03, 16.52it/s]   Shard 6:  20%|██        | 12/60 [00:00<00:02, 19.13it/s]   Shard 6:  25%|██▌       | 15/60 [00:00<00:02, 20.44it/s]   Shard 6:  30%|███       | 18/60 [00:00<00:02, 19.79it/s]   Shard 6:  33%|███▎      | 20/60 [00:01<00:02, 19.21it/s]   Shard 6:  40%|████      | 24/60 [00:01<00:01, 22.20it/s]   Shard 6:  45%|████▌     | 27/60 [00:01<00:01, 20.64it/s]   Shard 6:  50%|█████     | 30/60 [00:01<00:01, 20.15it/s]   Shard 6:  55%|█████▌    | 33/60 [00:01<00:01, 19.90it/s]   Shard 6:  62%|██████▏   | 37/60 [00:01<00:01, 22.51it/s]   Shard 6:  67%|██████▋   | 40/60 [00:02<00:00, 21.28it/s]   Shard 6:  72%|███████▏  | 43/60 [00:02<00:00, 20.63it/s]   Shard 6:  78%|███████▊  | 47/60 [00:02<00:00, 21.40it/s]   Shard 6:  85%|████████▌ | 51/60 [00:02<00:00, 24.68it/s]   Shard 6:  90%|█████████ | 54/60 [00:02<00:00, 25.84it/s]   Shard 6:  95%|█████████▌| 57/60 [00:02<00:00, 26.84it/s]   Shard 6: 100%|██████████| 60/60 [00:02<00:00, 21.89it/s]
+   💾 Saving modified shard: output/modified_model/model-00006-of-00015.safetensors
+
+📦 Processing shard 7/15: model-00007-of-00015.safetensors
+   Contains 107 tensors
+   Shard 7:   0%|          | 0/107 [00:00<?, ?it/s]   Shard 7:   2%|▏         | 2/107 [00:00<00:06, 16.10it/s]   Shard 7:   4%|▎         | 4/107 [00:00<00:06, 15.99it/s]   Shard 7:   7%|▋         | 7/107 [00:00<00:05, 18.02it/s]   Shard 7:   8%|▊         | 9/107 [00:00<00:05, 16.91it/s]   Shard 7:  10%|█         | 11/107 [00:00<00:05, 16.58it/s]   Shard 7:  13%|█▎        | 14/107 [00:00<00:05, 16.96it/s]   Shard 7:  16%|█▌        | 17/107 [00:00<00:04, 18.73it/s]   Shard 7:  18%|█▊        | 19/107 [00:01<00:04, 18.50it/s]   Shard 7:  20%|█▉        | 21/107 [00:01<00:04, 18.30it/s]   Shard 7:  22%|██▏       | 24/107 [00:01<00:04, 19.77it/s]   Shard 7:  24%|██▍       | 26/107 [00:01<00:04, 19.33it/s]   Shard 7:  27%|██▋       | 29/107 [00:01<00:04, 19.44it/s]   Shard 7:  30%|██▉       | 32/107 [00:01<00:03, 19.50it/s]   Shard 7:  33%|███▎      | 35/107 [00:01<00:03, 19.40it/s]   Shard 7:  36%|███▌      | 38/107 [00:02<00:03, 20.43it/s]   Shard 7:  38%|███▊      | 41/107 [00:02<00:03, 20.26it/s]   Shard 7:  41%|████      | 44/107 [00:02<00:03, 19.82it/s]   Shard 7:  69%|██████▉   | 74/107 [00:02<00:00, 82.86it/s]   Shard 7:  94%|█████████▍| 101/107 [00:02<00:00, 127.69it/s]   Shard 7: 100%|██████████| 107/107 [00:02<00:00, 41.64it/s] 
+   💾 Saving modified shard: output/modified_model/model-00007-of-00015.safetensors
+
+📦 Processing shard 8/15: model-00008-of-00015.safetensors
+   Contains 501 tensors
+   Shard 8:   0%|          | 0/501 [00:00<?, ?it/s]   Shard 8:   0%|          | 1/501 [00:01<11:19,  1.36s/it]   Shard 8:  18%|█▊        | 88/501 [00:01<00:04, 83.38it/s]   Shard 8:  36%|███▌      | 181/501 [00:01<00:01, 184.59it/s]   Shard 8:  50%|█████     | 252/501 [00:02<00:01, 128.85it/s]   Shard 8:  87%|████████▋ | 438/501 [00:02<00:00, 289.50it/s]   Shard 8: 100%|██████████| 501/501 [00:02<00:00, 200.01it/s]
+   Applying batched rotation for lm_head.weight...
+   💾 Saving modified shard: output/modified_model/model-00008-of-00015.safetensors
+
+📦 Processing shard 9/15: model-00009-of-00015.safetensors
+   Contains 22 tensors
+   Shard 9:   0%|          | 0/22 [00:00<?, ?it/s]   Shard 9:   5%|▍         | 1/22 [00:00<00:02,  7.47it/s]   Shard 9:   9%|▉         | 2/22 [00:00<00:02,  8.03it/s]   Shard 9:  14%|█▎        | 3/22 [00:00<00:02,  8.24it/s]   Shard 9:  18%|█▊        | 4/22 [00:00<00:02,  8.44it/s]   Shard 9:  23%|██▎       | 5/22 [00:00<00:02,  8.34it/s]   Shard 9:  27%|██▋       | 6/22 [00:00<00:01,  8.36it/s]   Shard 9:  32%|███▏      | 7/22 [00:00<00:01,  8.31it/s]   Shard 9:  36%|███▋      | 8/22 [00:00<00:01,  8.33it/s]   Shard 9:  41%|████      | 9/22 [00:01<00:01,  8.40it/s]   Shard 9:  45%|████▌     | 10/22 [00:01<00:01,  8.56it/s]   Shard 9:  50%|█████     | 11/22 [00:01<00:01,  8.51it/s]   Shard 9:  55%|█████▍    | 12/22 [00:01<00:01,  8.54it/s]   Shard 9:  59%|█████▉    | 13/22 [00:01<00:01,  8.63it/s]   Shard 9:  64%|██████▎   | 14/22 [00:01<00:00,  8.57it/s]   Shard 9:  68%|██████▊   | 15/22 [00:01<00:00,  8.54it/s]   Shard 9:  73%|███████▎  | 16/22 [00:01<00:00,  8.51it/s]   Shard 9:  77%|███████▋  | 17/22 [00:02<00:00,  8.46it/s]   Shard 9:  82%|████████▏ | 18/22 [00:02<00:00,  8.45it/s]   Shard 9:  86%|████████▋ | 19/22 [00:02<00:00,  8.56it/s]   Shard 9:  91%|█████████ | 20/22 [00:02<00:00,  8.49it/s]   Shard 9:  95%|█████████▌| 21/22 [00:02<00:00,  8.42it/s]   Shard 9: 100%|██████████| 22/22 [00:02<00:00,  8.06it/s]   Shard 9: 100%|██████████| 22/22 [00:02<00:00,  8.37it/s]
+   💾 Saving modified shard: output/modified_model/model-00009-of-00015.safetensors
+
+📦 Processing shard 10/15: model-00010-of-00015.safetensors
+   Contains 22 tensors
+   Shard 10:   0%|          | 0/22 [00:00<?, ?it/s]   Shard 10:   5%|▍         | 1/22 [00:00<00:02,  7.23it/s]   Shard 10:   9%|▉         | 2/22 [00:00<00:02,  7.49it/s]   Shard 10:  14%|█▎        | 3/22 [00:00<00:02,  7.99it/s]   Shard 10:  18%|█▊        | 4/22 [00:00<00:02,  8.13it/s]   Shard 10:  23%|██▎       | 5/22 [00:00<00:02,  8.27it/s]   Shard 10:  27%|██▋       | 6/22 [00:00<00:01,  8.50it/s]   Shard 10:  32%|███▏      | 7/22 [00:00<00:01,  8.51it/s]   Shard 10:  36%|███▋      | 8/22 [00:00<00:01,  8.50it/s]   Shard 10:  41%|████      | 9/22 [00:01<00:01,  8.58it/s]   Shard 10:  45%|████▌     | 10/22 [00:01<00:01,  8.57it/s]   Shard 10:  50%|█████     | 11/22 [00:01<00:01,  8.58it/s]   Shard 10:  55%|█████▍    | 12/22 [00:01<00:01,  8.66it/s]   Shard 10:  59%|█████▉    | 13/22 [00:01<00:01,  8.59it/s]   Shard 10:  64%|██████▎   | 14/22 [00:01<00:00,  8.58it/s]   Shard 10:  68%|██████▊   | 15/22 [00:01<00:00,  8.57it/s]   Shard 10:  73%|███████▎  | 16/22 [00:01<00:00,  8.64it/s]   Shard 10:  77%|███████▋  | 17/22 [00:02<00:00,  8.63it/s]   Shard 10:  82%|████████▏ | 18/22 [00:02<00:00,  8.68it/s]   Shard 10:  86%|████████▋ | 19/22 [00:02<00:00,  8.62it/s]   Shard 10:  91%|█████████ | 20/22 [00:02<00:00,  8.57it/s]   Shard 10:  95%|█████████▌| 21/22 [00:02<00:00,  8.56it/s]   Shard 10: 100%|██████████| 22/22 [00:02<00:00,  8.63it/s]   Shard 10: 100%|██████████| 22/22 [00:02<00:00,  8.49it/s]
+   💾 Saving modified shard: output/modified_model/model-00010-of-00015.safetensors
+
+📦 Processing shard 11/15: model-00011-of-00015.safetensors
+   Contains 22 tensors
+   Shard 11:   0%|          | 0/22 [00:00<?, ?it/s]   Shard 11:   5%|▍         | 1/22 [00:00<00:02,  8.71it/s]   Shard 11:   9%|▉         | 2/22 [00:00<00:02,  8.15it/s]   Shard 11:  14%|█▎        | 3/22 [00:00<00:02,  8.17it/s]   Shard 11:  18%|█▊        | 4/22 [00:00<00:02,  8.03it/s]   Shard 11:  23%|██▎       | 5/22 [00:00<00:02,  8.12it/s]   Shard 11:  27%|██▋       | 6/22 [00:00<00:02,  7.88it/s]   Shard 11:  32%|███▏      | 7/22 [00:00<00:01,  7.94it/s]   Shard 11:  36%|███▋      | 8/22 [00:00<00:01,  8.03it/s]   Shard 11:  41%|████      | 9/22 [00:01<00:01,  8.17it/s]   Shard 11:  45%|████▌     | 10/22 [00:01<00:01,  8.28it/s]   Shard 11:  50%|█████     | 11/22 [00:01<00:01,  8.47it/s]   Shard 11:  55%|█████▍    | 12/22 [00:01<00:01,  8.51it/s]   Shard 11:  59%|█████▉    | 13/22 [00:01<00:01,  8.52it/s]   Shard 11:  64%|██████▎   | 14/22 [00:01<00:00,  8.61it/s]   Shard 11:  68%|██████▊   | 15/22 [00:01<00:00,  8.47it/s]   Shard 11:  73%|███████▎  | 16/22 [00:01<00:00,  8.50it/s]   Shard 11:  77%|███████▋  | 17/22 [00:02<00:00,  8.60it/s]   Shard 11:  82%|████████▏ | 18/22 [00:02<00:00,  8.56it/s]   Shard 11:  86%|████████▋ | 19/22 [00:02<00:00,  8.52it/s]   Shard 11:  91%|█████████ | 20/22 [00:02<00:00,  8.61it/s]   Shard 11:  95%|█████████▌| 21/22 [00:02<00:00,  8.56it/s]   Shard 11: 100%|██████████| 22/22 [00:02<00:00,  8.57it/s]   Shard 11: 100%|██████████| 22/22 [00:02<00:00,  8.38it/s]
+   💾 Saving modified shard: output/modified_model/model-00011-of-00015.safetensors
+
+📦 Processing shard 12/15: model-00012-of-00015.safetensors
+   Contains 22 tensors
+   Shard 12:   0%|          | 0/22 [00:00<?, ?it/s]   Shard 12:   5%|▍         | 1/22 [00:00<00:02,  7.06it/s]   Shard 12:   9%|▉         | 2/22 [00:00<00:02,  7.08it/s]   Shard 12:  14%|█▎        | 3/22 [00:00<00:02,  7.07it/s]   Shard 12:  18%|█▊        | 4/22 [00:00<00:02,  7.16it/s]   Shard 12:  23%|██▎       | 5/22 [00:00<00:02,  6.91it/s]   Shard 12:  27%|██▋       | 6/22 [00:00<00:02,  6.96it/s]   Shard 12:  32%|███▏      | 7/22 [00:00<00:02,  7.49it/s]   Shard 12:  36%|███▋      | 8/22 [00:01<00:01,  7.78it/s]   Shard 12:  41%|████      | 9/22 [00:01<00:01,  7.99it/s]   Shard 12:  45%|████▌     | 10/22 [00:01<00:01,  8.23it/s]   Shard 12:  50%|█████     | 11/22 [00:01<00:01,  8.33it/s]   Shard 12:  55%|█████▍    | 12/22 [00:01<00:01,  8.45it/s]   Shard 12:  59%|█████▉    | 13/22 [00:01<00:01,  8.55it/s]   Shard 12:  64%|██████▎   | 14/22 [00:01<00:00,  8.49it/s]   Shard 12:  68%|██████▊   | 15/22 [00:01<00:00,  8.54it/s]   Shard 12:  73%|███████▎  | 16/22 [00:02<00:00,  8.67it/s]   Shard 12:  77%|███████▋  | 17/22 [00:02<00:00,  8.58it/s]   Shard 12:  82%|████████▏ | 18/22 [00:02<00:00,  8.56it/s]   Shard 12:  86%|████████▋ | 19/22 [00:02<00:00,  8.67it/s]   Shard 12:  91%|█████████ | 20/22 [00:02<00:00,  8.63it/s]   Shard 12:  95%|█████████▌| 21/22 [00:02<00:00,  8.59it/s]   Shard 12: 100%|██████████| 22/22 [00:02<00:00,  8.57it/s]   Shard 12: 100%|██████████| 22/22 [00:02<00:00,  8.12it/s]
+   💾 Saving modified shard: output/modified_model/model-00012-of-00015.safetensors
+
+📦 Processing shard 13/15: model-00013-of-00015.safetensors
+   Contains 55 tensors
+   Shard 13:   0%|          | 0/55 [00:00<?, ?it/s]   Shard 13:   4%|▎         | 2/55 [00:00<00:03, 15.95it/s]   Shard 13:   7%|▋         | 4/55 [00:00<00:03, 16.77it/s]   Shard 13:  11%|█         | 6/55 [00:00<00:02, 17.65it/s]   Shard 13:  15%|█▍        | 8/55 [00:00<00:02, 16.60it/s]   Shard 13:  20%|██        | 11/55 [00:00<00:02, 20.10it/s]   Shard 13:  25%|██▌       | 14/55 [00:00<00:02, 18.86it/s]   Shard 13:  31%|███       | 17/55 [00:00<00:02, 18.35it/s]   Shard 13:  36%|███▋      | 20/55 [00:01<00:01, 18.01it/s]   Shard 13:  42%|████▏     | 23/55 [00:01<00:01, 20.36it/s]   Shard 13:  47%|████▋     | 26/55 [00:01<00:01, 20.54it/s]   Shard 13:  53%|█████▎    | 29/55 [00:01<00:01, 21.28it/s]   Shard 13:  58%|█████▊    | 32/55 [00:01<00:01, 22.67it/s]   Shard 13:  64%|██████▎   | 35/55 [00:01<00:00, 24.12it/s]   Shard 13:  69%|██████▉   | 38/55 [00:01<00:00, 25.22it/s]   Shard 13:  75%|███████▍  | 41/55 [00:01<00:00, 26.24it/s]   Shard 13:  80%|████████  | 44/55 [00:02<00:00, 21.78it/s]   Shard 13:  85%|████████▌ | 47/55 [00:02<00:00, 18.59it/s]   Shard 13:  91%|█████████ | 50/55 [00:02<00:00, 19.01it/s]   Shard 13:  96%|█████████▋| 53/55 [00:02<00:00, 16.01it/s]   Shard 13: 100%|██████████| 55/55 [00:02<00:00, 16.73it/s]   Shard 13: 100%|██████████| 55/55 [00:02<00:00, 19.41it/s]
+   💾 Saving modified shard: output/modified_model/model-00013-of-00015.safetensors
+
+📦 Processing shard 14/15: model-00014-of-00015.safetensors
+   Contains 52 tensors
+   Shard 14:   0%|          | 0/52 [00:00<?, ?it/s]   Shard 14:   4%|▍         | 2/52 [00:00<00:03, 15.41it/s]   Shard 14:   8%|▊         | 4/52 [00:00<00:02, 17.11it/s]   Shard 14:  12%|█▏        | 6/52 [00:00<00:02, 15.67it/s]   Shard 14:  15%|█▌        | 8/52 [00:00<00:02, 16.75it/s]   Shard 14:  19%|█▉        | 10/52 [00:00<00:02, 16.40it/s]   Shard 14:  23%|██▎       | 12/52 [00:00<00:02, 16.27it/s]   Shard 14:  29%|██▉       | 15/52 [00:00<00:02, 16.67it/s]   Shard 14:  35%|███▍      | 18/52 [00:01<00:01, 17.88it/s]   Shard 14:  38%|███▊      | 20/52 [00:01<00:01, 17.31it/s]   Shard 14:  42%|████▏     | 22/52 [00:01<00:01, 16.91it/s]   Shard 14:  46%|████▌     | 24/52 [00:01<00:01, 17.58it/s]   Shard 14:  50%|█████     | 26/52 [00:01<00:01, 17.00it/s]   Shard 14:  56%|█████▌    | 29/52 [00:01<00:01, 17.59it/s]   Shard 14:  62%|██████▏   | 32/52 [00:01<00:01, 18.20it/s]   Shard 14:  67%|██████▋   | 35/52 [00:02<00:00, 18.58it/s]   Shard 14:  73%|███████▎  | 38/52 [00:02<00:00, 19.75it/s]   Shard 14:  77%|███████▋  | 40/52 [00:02<00:00, 19.33it/s]   Shard 14:  81%|████████  | 42/52 [00:02<00:00, 19.03it/s]   Shard 14:  87%|████████▋ | 45/52 [00:02<00:00, 18.92it/s]   Shard 14:  92%|█████████▏| 48/52 [00:02<00:00, 20.05it/s]   Shard 14:  98%|█████████▊| 51/52 [00:02<00:00, 19.59it/s]   Shard 14: 100%|██████████| 52/52 [00:02<00:00, 17.97it/s]
+   💾 Saving modified shard: output/modified_model/model-00014-of-00015.safetensors
+
+📦 Processing shard 15/15: model-00015-of-00015.safetensors
+   Contains 239 tensors
+   Shard 15:   0%|          | 0/239 [00:00<?, ?it/s]   Shard 15:  88%|████████▊ | 211/239 [00:00<00:00, 1545.27it/s]   Shard 15: 100%|██████████| 239/239 [00:00<00:00, 514.70it/s] 
+   💾 Saving modified shard: output/modified_model/model-00015-of-00015.safetensors
+
+======================================================================
+CONVERSION SUMMARY
+======================================================================
+  Quantized tensors:  0
+  FP16 tensors:       1199
+  Params quantized:   0
+  Params FP16:        27,781,427,952
+
+  📊 Error report saved to: output/quantization_report.json
+
+⏱️  Conversion took 59s (1.0min)
+
+   Modified model saved to: output/modified_model
+   Run GGUF conversion manually with:
+   convert_hf_to_gguf.py output/modified_model --outfile output.gguf --outtype f16
+   llama-quantize output.gguf output-tq2_0.gguf tq2_0
+=== 2) Calibration data (ungated wikitext/c4 to validate the path) ===
+📚 Loading calibration data (64 samples, 2048 tokens each)
+   Loading tokenizer: Qwen/Qwen3.6-27B
+
+   Loading 32 samples from: wikitext (config: wikitext-2-raw-v1)
+   ⚠️ Failed to load wikitext: Invalid HF URI 'hf://datasets/wikitext@b08601e04326c79dfdd32d625aee71d232d685c3/.huggingface.yaml'. Repository id must be 'namespace/name', got 'wikitext'.
+
+   Loading 32 samples from: allenai/c4 (config: en)
+
+   ✅ Loaded 64 calibration samples (131,072 tokens total)
+   💾 Calibration data cached to: output_calib/calibration_data.json
+=== 3) GPTQ calibration ON THE ROTATED MODEL → new output dir (no collision) ===
+[transformers] The fast path is not available because one of the required library is not installed. Falling back to torch implementation. To install follow https://github.com/fla-org/flash-linear-attention#installation and https://github.com/Dao-AILab/causal-conv1d
+📚 Loaded 64 calibration samples from output_calib/calibration_data.json
+⚙️ Loading model config...
+📦 Instantiating model shell on PyTorch META device (Zero RAM)...
+🖥️ Using active device: cuda:0
+🧪 Created 16 batches of size 4
+
+🚀 Step 1: Capture initial activations from Layer 0 inputs...
+   Loading embed_tokens...
+   Materializing temporary Layer 0 to capture args/kwargs...
+Running embed_tokens pass:   0%|          | 0/16 [00:00<?, ?it/s]Running embed_tokens pass:   6%|▋         | 1/16 [00:00<00:03,  5.00it/s]Running embed_tokens pass:  12%|█▎        | 2/16 [00:00<00:02,  6.90it/s]Running embed_tokens pass:  19%|█▉        | 3/16 [00:00<00:01,  6.98it/s]Running embed_tokens pass:  25%|██▌       | 4/16 [00:00<00:01,  7.02it/s]Running embed_tokens pass:  31%|███▏      | 5/16 [00:00<00:01,  7.03it/s]Running embed_tokens pass:  38%|███▊      | 6/16 [00:00<00:01,  7.04it/s]Running embed_tokens pass:  44%|████▍     | 7/16 [00:01<00:01,  7.04it/s]Running embed_tokens pass:  50%|█████     | 8/16 [00:01<00:01,  7.01it/s]Running embed_tokens pass:  56%|█████▋    | 9/16 [00:01<00:00,  7.02it/s]Running embed_tokens pass:  62%|██████▎   | 10/16 [00:01<00:00,  7.02it/s]Running embed_tokens pass:  69%|██████▉   | 11/16 [00:01<00:00,  7.03it/s]Running embed_tokens pass:  75%|███████▌  | 12/16 [00:01<00:00,  7.03it/s]Running embed_tokens pass:  81%|████████▏ | 13/16 [00:01<00:00,  7.04it/s]Running embed_tokens pass:  88%|████████▊ | 14/16 [00:02<00:00,  7.04it/s]Running embed_tokens pass:  94%|█████████▍| 15/16 [00:02<00:00,  7.04it/s]Running embed_tokens pass: 100%|██████████| 16/16 [00:02<00:00,  7.03it/s]Running embed_tokens pass: 100%|██████████| 16/16 [00:02<00:00,  6.97it/s]
+   Extracting embedding hidden states...
+   Collected 16 input activation batches.
+
+🚀 Step 2: Running layer-by-layer GPTQ ternary calibration...
+
+⚡ Quantizing layer 1/64...
+   Layer 0 forward pass:   0%|          | 0/16 [00:00<?, ?it/s]   Layer 0 forward pass:   6%|▋         | 1/16 [00:00<00:06,  2.17it/s]   Layer 0 forward pass:  12%|█▎        | 2/16 [00:00<00:06,  2.16it/s]   Layer 0 forward pass:  19%|█▉        | 3/16 [00:01<00:06,  2.16it/s]   Layer 0 forward pass:  25%|██▌       | 4/16 [00:01<00:05,  2.16it/s]   Layer 0 forward pass:  31%|███▏      | 5/16 [00:02<00:05,  2.16it/s]   Layer 0 forward pass:  38%|███▊      | 6/16 [00:02<00:04,  2.16it/s]   Layer 0 forward pass:  44%|████▍     | 7/16 [00:03<00:04,  2.16it/s]   Layer 0 forward pass:  50%|█████     | 8/16 [00:03<00:03,  2.15it/s]   Layer 0 forward pass:  56%|█████▋    | 9/16 [00:04<00:03,  2.15it/s]   Layer 0 forward pass:  62%|██████▎   | 10/16 [00:04<00:02,  2.15it/s]   Layer 0 forward pass:  69%|██████▉   | 11/16 [00:05<00:02,  2.15it/s]   Layer 0 forward pass:  75%|███████▌  | 12/16 [00:05<00:01,  2.15it/s]   Layer 0 forward pass:  81%|████████▏ | 13/16 [00:06<00:01,  2.15it/s]   Layer 0 forward pass:  88%|████████▊ | 14/16 [00:06<00:00,  2.15it/s]   Layer 0 forward pass:  94%|█████████▍| 15/16 [00:06<00:00,  2.15it/s]   Layer 0 forward pass: 100%|██████████| 16/16 [00:07<00:00,  2.15it/s]   Layer 0 forward pass: 100%|██████████| 16/16 [00:07<00:00,  2.15it/s]
+   Quantizing: model.layers.0.linear_attn.out_proj.weight (torch.Size([5120, 6144])) on device cuda:0
+   Quantizing: model.layers.0.linear_attn.in_proj_qkv.weight (torch.Size([10240, 5120])) on device cuda:0
+   Quantizing: model.layers.0.linear_attn.in_proj_z.weight (torch.Size([6144, 5120])) on device cuda:0
+   Quantizing: model.layers.0.linear_attn.in_proj_b.weight (torch.Size([48, 5120])) on device cuda:0
+   Quantizing: model.layers.0.linear_attn.in_proj_a.weight (torch.Size([48, 5120])) on device cuda:0
+   Quantizing: model.layers.0.mlp.gate_proj.weight (torch.Size([17408, 5120])) on device cuda:1
+   Quantizing: model.layers.0.mlp.up_proj.weight (torch.Size([17408, 5120])) on device cuda:1
+   Quantizing: model.layers.0.mlp.down_proj.weight (torch.Size([5120, 17408])) on device cuda:1
+
+⚡ Quantizing layer 2/64...
+   Layer 1 forward pass:   0%|          | 0/16 [00:00<?, ?it/s]   Layer 1 forward pass:   6%|▋         | 1/16 [00:00<00:07,  2.09it/s]   Layer 1 forward pass:  12%|█▎        | 2/16 [00:00<00:06,  2.11it/s]   Layer 1 forward pass:  19%|█▉        | 3/16 [00:01<00:06,  2.11it/s]   Layer 1 forward pass:  25%|██▌       | 4/16 [00:01<00:05,  2.11it/s]   Layer 1 forward pass:  31%|███▏      | 5/16 [00:02<00:05,  2.12it/s]   Layer 1 forward pass:  38%|███▊      | 6/16 [00:02<00:04,  2.12it/s]   Layer 1 forward pass:  44%|████▍     | 7/16 [00:03<00:04,  2.12it/s]   Layer 1 forward pass:  50%|█████     | 8/16 [00:03<00:03,  2.12it/s]   Layer 1 forward pass:  56%|█████▋    | 9/16 [00:04<00:03,  2.11it/s]   Layer 1 forward pass:  62%|██████▎   | 10/16 [00:04<00:02,  2.11it/s]   Layer 1 forward pass:  69%|██████▉   | 11/16 [00:05<00:02,  2.11it/s]   Layer 1 forward pass:  75%|███████▌  | 12/16 [00:05<00:01,  2.11it/s]   Layer 1 forward pass:  81%|████████▏ | 13/16 [00:06<00:01,  2.11it/s]   Layer 1 forward pass:  88%|████████▊ | 14/16 [00:06<00:00,  2.11it/s]   Layer 1 forward pass:  94%|█████████▍| 15/16 [00:07<00:00,  2.12it/s]   Layer 1 forward pass: 100%|██████████| 16/16 [00:07<00:00,  2.12it/s]   Layer 1 forward pass: 100%|██████████| 16/16 [00:07<00:00,  2.11it/s]
+   Quantizing: model.layers.1.linear_attn.out_proj.weight (torch.Size([5120, 6144])) on device cuda:0
+   Quantizing: model.layers.1.linear_attn.in_proj_qkv.weight (torch.Size([10240, 5120])) on device cuda:0
+   Quantizing: model.layers.1.linear_attn.in_proj_z.weight (torch.Size([6144, 5120])) on device cuda:0
+   Quantizing: model.layers.1.linear_attn.in_proj_b.weight (torch.Size([48, 5120])) on device cuda:0
+   Quantizing: model.layers.1.linear_attn.in_proj_a.weight (torch.Size([48, 5120])) on device cuda:0
+   Quantizing: model.layers.1.mlp.gate_proj.weight (torch.Size([17408, 5120])) on device cuda:1
+   Quantizing: model.layers.1.mlp.up_proj.weight (torch.Size([17408, 5120])) on device cuda:1
+   Quantizing: model.layers.1.mlp.down_proj.weight (torch.Size([5120, 17408])) on device cuda:1
+
+⚡ Quantizing layer 3/64...
+   Layer 2 forward pass:   0%|          | 0/16 [00:00<?, ?it/s]   Layer 2 forward pass:   6%|▋         | 1/16 [00:00<00:06,  2.14it/s]   Layer 2 forward pass:  12%|█▎        | 2/16 [00:00<00:06,  2.14it/s]   Layer 2 forward pass:  19%|█▉        | 3/16 [00:01<00:06,  2.14it/s]   Layer 2 forward pass:  25%|██▌       | 4/16 [00:01<00:05,  2.14it/s]   Layer 2 forward pass:  31%|███▏      | 5/16 [00:02<00:05,  2.14it/s]   Layer 2 forward pass:  38%|███▊      | 6/16 [00:02<00:04,  2.14it/s]   Layer 2 forward pass:  44%|████▍     | 7/16 [00:03<00:04,  2.14it/s]   Layer 2 forward pass:  50%|█████     | 8/16 [00:03<00:03,  2.14it/s]   Layer 2 forward pass:  56%|█████▋    | 9/16 [00:04<00:03,  2.14it/s]   Layer 2 forward pass:  62%|██████▎   | 10/16 [00:04<00:02,  2.13it/s]   Layer 2 forward pass:  69%|██████▉   | 11/16 [00:05<00:02,  2.12it/s]   Layer 2 forward pass:  75%|███████▌  | 12/16 [00:05<00:01,  2.12it/s]   Layer 2 forward pass:  81%|████████▏ | 13/16 [00:06<00:01,  2.12it/s]   Layer 2 forward pass:  88%|████████▊ | 14/16 [00:06<00:00,  2.11it/s]   Layer 2 forward pass:  94%|█████████▍| 15/16 [00:07<00:00,  2.11it/s]   Layer 2 forward pass: 100%|██████████| 16/16 [00:07<00:00,  2.11it/s]   Layer 2 forward pass: 100%|██████████| 16/16 [00:07<00:00,  2.13it/s]
+   Quantizing: model.layers.2.linear_attn.out_proj.weight (torch.Size([5120, 6144])) on device cuda:0
+   Quantizing: model.layers.2.linear_attn.in_proj_qkv.weight (torch.Size([10240, 5120])) on device cuda:0
+   Quantizing: model.layers.2.linear_attn.in_proj_z.weight (torch.Size([6144, 5120])) on device cuda:0
+   Quantizing: model.layers.2.linear_attn.in_proj_b.weight (torch.Size([48, 5120])) on device cuda:0
+   Quantizing: model.layers.2.linear_attn.in_proj_a.weight (torch.Size([48, 5120])) on device cuda:0
+   Quantizing: model.layers.2.mlp.gate_proj.weight (torch.Size([17408, 5120])) on device cuda:1
+   Quantizing: model.layers.2.mlp.up_proj.weight (torch.Size([17408, 5120])) on device cuda:1
+   Quantizing: model.layers.2.mlp.down_proj.weight (torch.Size([5120, 17408])) on device cuda:1
+
+⚡ Quantizing layer 4/64...
+   Layer 3 forward pass:   0%|          | 0/16 [00:00<?, ?it/s]   Layer 3 forward pass:   6%|▋         | 1/16 [00:00<00:06,  2.41it/s]   Layer 3 forward pass:  12%|█▎        | 2/16 [00:00<00:05,  2.43it/s]   Layer 3 forward pass:  19%|█▉        | 3/16 [00:01<00:05,  2.44it/s]   Layer 3 forward pass:  25%|██▌       | 4/16 [00:01<00:04,  2.44it/s]   Layer 3 forward pass:  31%|███▏      | 5/16 [00:02<00:04,  2.44it/s]   Layer 3 forward pass:  38%|███▊      | 6/16 [00:02<00:04,  2.43it/s]   Layer 3 forward pass:  44%|████▍     | 7/16 [00:02<00:03,  2.42it/s]   Layer 3 forward pass:  50%|█████     | 8/16 [00:03<00:03,  2.42it/s]   Layer 3 forward pass:  56%|█████▋    | 9/16 [00:03<00:02,  2.42it/s]   Layer 3 forward pass:  62%|██████▎   | 10/16 [00:04<00:02,  2.43it/s]   Layer 3 forward pass:  69%|██████▉   | 11/16 [00:04<00:02,  2.42it/s]   Layer 3 forward pass:  75%|███████▌  | 12/16 [00:04<00:01,  2.43it/s]   Layer 3 forward pass:  81%|████████▏ | 13/16 [00:05<00:01,  2.43it/s]   Layer 3 forward pass:  88%|████████▊ | 14/16 [00:05<00:00,  2.43it/s]   Layer 3 forward pass:  94%|█████████▍| 15/16 [00:06<00:00,  2.44it/s]   Layer 3 forward pass: 100%|██████████| 16/16 [00:06<00:00,  2.43it/s]   Layer 3 forward pass: 100%|██████████| 16/16 [00:06<00:00,  2.43it/s]
+   Quantizing: model.layers.3.self_attn.q_proj.weight (torch.Size([12288, 5120])) on device cuda:0
+   Quantizing: model.layers.3.self_attn.k_proj.weight (torch.Size([1024, 5120])) on device cuda:0
+   Quantizing: model.layers.3.self_attn.v_proj.weight (torch.Size([1024, 5120])) on device cuda:0
+   Quantizing: model.layers.3.self_attn.o_proj.weight (torch.Size([5120, 6144])) on device cuda:0
+   Quantizing: model.layers.3.mlp.gate_proj.weight (torch.Size([17408, 5120])) on device cuda:1
+   Quantizing: model.layers.3.mlp.up_proj.weight (torch.Size([17408, 5120])) on device cuda:1
+   Quantizing: model.layers.3.mlp.down_proj.weight (torch.Size([5120, 17408])) on device cuda:1
+
+⚡ Quantizing layer 5/64...
+   Layer 4 forward pass:   0%|          | 0/16 [00:00<?, ?it/s]   Layer 4 forward pass:   6%|▋         | 1/16 [00:00<00:07,  2.11it/s]   Layer 4 forward pass:  12%|█▎        | 2/16 [00:00<00:06,  2.12it/s]   Layer 4 forward pass:  19%|█▉        | 3/16 [00:01<00:06,  2.12it/s]   Layer 4 forward pass:  25%|██▌       | 4/16 [00:01<00:05,  2.13it/s]   Layer 4 forward pass:  31%|███▏      | 5/16 [00:02<00:05,  2.13it/s]   Layer 4 forward pass:  38%|███▊      | 6/16 [00:02<00:04,  2.12it/s]   Layer 4 forward pass:  44%|████▍     | 7/16 [00:03<00:04,  2.13it/s]   Layer 4 forward pass:  50%|█████     | 8/16 [00:03<00:03,  2.13it/s]   Layer 4 forward pass:  56%|█████▋    | 9/16 [00:04<00:03,  2.13it/s]   Layer 4 forward pass:  62%|██████▎   | 10/16 [00:04<00:02,  2.12it/s]   Layer 4 forward pass:  69%|██████▉   | 11/16 [00:05<00:02,  2.13it/s]   Layer 4 forward pass:  75%|███████▌  | 12/16 [00:05<00:01,  2.13it/s]   Layer 4 forward pass:  81%|████████▏ | 13/16 [00:06<00:01,  2.13it/s]   Layer 4 forward pass:  88%|████████▊ | 14/16 [00:06<00:00,  2.12it/s]   Layer 4 forward pass:  94%|█████████▍| 15/16 [00:07<00:00,  2.12it/s]   Layer 4 forward pass: 100%|██████████| 16/16 [00:07<00:00,  2.12it/s]   Layer 4 forward pass: 100%|██████████| 16/16 [00:07<00:00,  2.12it/s]
+   Quantizing: model.layers.4.linear_attn.out_proj.weight (torch.Size([5120, 6144])) on device cuda:0
+   Quantizing: model.layers.4.linear_attn.in_proj_qkv.weight (torch.Size([10240, 5120])) on device cuda:0
+   Quantizing: model.layers.4.linear_attn.in_proj_z.weight (torch.Size([6144, 5120])) on device cuda:0
+   Quantizing: model.layers.4.linear_attn.in_proj_b.weight (torch.Size([48, 5120])) on device cuda:0
+   Quantizing: model.layers.4.linear_attn.in_proj_a.weight (torch.Size([48, 5120])) on device cuda:0
+   Quantizing: model.layers.4.mlp.gate_proj.weight (torch.Size([17408, 5120])) on device cuda:1
+   Quantizing: model.layers.4.mlp.up_proj.weight (torch.Size([17408, 5120])) on device cuda:1
+   Quantizing: model.layers.4.mlp.down_proj.weight (torch.Size([5120, 17408])) on device cuda:1
+
+⚡ Quantizing layer 6/64...
+   Layer 5 forward pass:   0%|          | 0/16 [00:00<?, ?it/s]   Layer 5 forward pass:   6%|▋         | 1/16 [00:00<00:07,  2.11it/s]   Layer 5 forward pass:  12%|█▎        | 2/16 [00:00<00:06,  2.12it/s]   Layer 5 forward pass:  19%|█▉        | 3/16 [00:01<00:06,  2.12it/s]   Layer 5 forward pass:  25%|██▌       | 4/16 [00:01<00:05,  2.13it/s]   Layer 5 forward pass:  31%|███▏      | 5/16 [00:02<00:05,  2.12it/s]   Layer 5 forward pass:  38%|███▊      | 6/16 [00:02<00:04,  2.12it/s]   Layer 5 forward pass:  44%|████▍     | 7/16 [00:03<00:04,  2.12it/s]   Layer 5 forward pass:  50%|█████     | 8/16 [00:03<00:03,  2.12it/s]   Layer 5 forward pass:  56%|█████▋    | 9/16 [00:04<00:03,  2.12it/s]   Layer 5 forward pass:  62%|██████▎   | 10/16 [00:04<00:02,  2.12it/s]   Layer 5 forward pass:  69%|██████▉   | 11/16 [00:05<00:02,  2.11it/s]   Layer 5 forward pass:  75%|███████▌  | 12/16 [00:05<00:01,  2.11it/s]   Layer 5 forward pass:  81%|████████▏ | 13/16 [00:06<00:01,  2.11it/s]   Layer 5 forward pass:  88%|████████▊ | 14/16 [00:06<00:00,  2.11it/s]   Layer 5 forward pass:  94%|█████████▍| 15/16 [00:07<00:00,  2.11it/s]   Layer 5 forward pass: 100%|██████████| 16/16 [00:07<00:00,  2.11it/s]   Layer 5 forward pass: 100%|██████████| 16/16 [00:07<00:00,  2.11it/s]
+   Quantizing: model.layers.5.linear_attn.out_proj.weight (torch.Size([5120, 6144])) on device cuda:0
+   Quantizing: model.layers.5.linear_attn.in_proj_qkv.weight (torch.Size([10240, 5120])) on device cuda:0
+   Quantizing: model.layers.5.linear_attn.in_proj_z.weight (torch.Size([6144, 5120])) on device cuda:0
+   Quantizing: model.layers.5.linear_attn.in_proj_b.weight (torch.Size([48, 5120])) on device cuda:0
+   Quantizing: model.layers.5.linear_attn.in_proj_a.weight (torch.Size([48, 5120])) on device cuda:0
+   Quantizing: model.layers.5.mlp.gate_proj.weight (torch.Size([17408, 5120])) on device cuda:1
+   Quantizing: model.layers.5.mlp.up_proj.weight (torch.Size([17408, 5120])) on device cuda:1
+   Quantizing: model.layers.5.mlp.down_proj.weight (torch.Size([5120, 17408])) on device cuda:1
+
+⚡ Quantizing layer 7/64...
+   Layer 6 forward pass:   0%|          | 0/16 [00:00<?, ?it/s]   Layer 6 forward pass:   6%|▋         | 1/16 [00:00<00:07,  2.12it/s]   Layer 6 forward pass:  12%|█▎        | 2/16 [00:00<00:06,  2.13it/s]   Layer 6 forward pass:  19%|█▉        | 3/16 [00:01<00:06,  2.12it/s]   Layer 6 forward pass:  25%|██▌       | 4/16 [00:01<00:05,  2.12it/s]   Layer 6 forward pass:  31%|███▏      | 5/16 [00:02<00:05,  2.11it/s]   Layer 6 forward pass:  38%|███▊      | 6/16 [00:02<00:04,  2.11it/s]   Layer 6 forward pass:  44%|████▍     | 7/16 [00:03<00:04,  2.11it/s]   Layer 6 forward pass:  50%|█████     | 8/16 [00:03<00:03,  2.11it/s]   Layer 6 forward pass:  56%|█████▋    | 9/16 [00:04<00:03,  2.11it/s]   Layer 6 forward pass:  62%|██████▎   | 10/16 [00:04<00:02,  2.11it/s]   Layer 6 forward pass:  69%|██████▉   | 11/16 [00:05<00:02,  2.11it/s]   Layer 6 forward pass:  75%|███████▌  | 12/16 [00:05<00:01,  2.11it/s]   Layer 6 forward pass:  81%|████████▏ | 13/16 [00:06<00:01,  2.11it/s]   Layer 6 forward pass:  88%|████████▊ | 14/16 [00:06<00:00,  2.11it/s]   Layer 6 forward pass:  94%|█████████▍| 15/16 [00:07<00:00,  2.10it/s]   Layer 6 forward pass: 100%|██████████| 16/16 [00:07<00:00,  2.10it/s]   Layer 6 forward pass: 100%|██████████| 16/16 [00:07<00:00,  2.11it/s]
+   Quantizing: model.layers.6.linear_attn.out_proj.weight (torch.Size([5120, 6144])) on device cuda:0
+   Quantizing: model.layers.6.linear_attn.in_proj_qkv.weight (torch.Size([10240, 5120])) on device cuda:0
+   Quantizing: model.layers.6.linear_attn.in_proj_z.weight (torch.Size([6144, 5120])) on device cuda:0
+   Quantizing: model.layers.6.linear_attn.in_proj_b.weight (torch.Size([48, 5120])) on device cuda:0
+   Quantizing: model.layers.6.linear_attn.in_proj_a.weight (torch.Size([48, 5120])) on device cuda:0
+   Quantizing: model.layers.6.mlp.gate_proj.weight (torch.Size([17408, 5120])) on device cuda:1
+   Quantizing: model.layers.6.mlp.up_proj.weight (torch.Size([17408, 5120])) on device cuda:1
+   Quantizing: model.layers.6.mlp.down_proj.weight (torch.Size([5120, 17408])) on device cuda:1
+
+⚡ Quantizing layer 8/64...
+   Layer 7 forward pass:   0%|          | 0/16 [00:00<?, ?it/s]   Layer 7 forward pass:   6%|▋         | 1/16 [00:00<00:06,  2.44it/s]   Layer 7 forward pass:  12%|█▎        | 2/16 [00:00<00:05,  2.42it/s]   Layer 7 forward pass:  19%|█▉        | 3/16 [00:01<00:05,  2.42it/s]   Layer 7 forward pass:  25%|██▌       | 4/16 [00:01<00:04,  2.42it/s]   Layer 7 forward pass:  31%|███▏      | 5/16 [00:02<00:04,  2.42it/s]   Layer 7 forward pass:  38%|███▊      | 6/16 [00:02<00:04,  2.42it/s]   Layer 7 forward pass:  44%|████▍     | 7/16 [00:02<00:03,  2.43it/s]   Layer 7 forward pass:  50%|█████     | 8/16 [00:03<00:03,  2.42it/s]   Layer 7 forward pass:  56%|█████▋    | 9/16 [00:03<00:02,  2.42it/s]   Layer 7 forward pass:  62%|██████▎   | 10/16 [00:04<00:02,  2.42it/s]   Layer 7 forward pass:  69%|██████▉   | 11/16 [00:04<00:02,  2.42it/s]   Layer 7 forward pass:  75%|███████▌  | 12/16 [00:04<00:01,  2.42it/s]   Layer 7 forward pass:  81%|████████▏ | 13/16 [00:05<00:01,  2.42it/s]   Layer 7 forward pass:  88%|████████▊ | 14/16 [00:05<00:00,  2.42it/s]   Layer 7 forward pass:  94%|█████████▍| 15/16 [00:06<00:00,  2.41it/s]   Layer 7 forward pass: 100%|██████████| 16/16 [00:06<00:00,  2.42it/s]   Layer 7 forward pass: 100%|██████████| 16/16 [00:06<00:00,  2.42it/s]
+   Quantizing: model.layers.7.self_attn.q_proj.weight (torch.Size([12288, 5120])) on device cuda:0
+   Quantizing: model.layers.7.self_attn.k_proj.weight (torch.Size([1024, 5120])) on device cuda:0
+   Quantizing: model.layers.7.self_attn.v_proj.weight (torch.Size([1024, 5120])) on device cuda:0
+   Quantizing: model.layers.7.self_attn.o_proj.weight (torch.Size([5120, 6144])) on device cuda:0
+   Quantizing: model.layers.7.mlp.gate_proj.weight (torch.Size([17408, 5120])) on device cuda:1
+   Quantizing: model.layers.7.mlp.up_proj.weight (torch.Size([17408, 5120])) on device cuda:1
+   Quantizing: model.layers.7.mlp.down_proj.weight (torch.Size([5120, 17408])) on device cuda:1
+
+⚡ Quantizing layer 9/64...
+   Layer 8 forward pass:   0%|          | 0/16 [00:00<?, ?it/s]   Layer 8 forward pass:   6%|▋         | 1/16 [00:00<00:07,  2.12it/s]   Layer 8 forward pass:  12%|█▎        | 2/16 [00:00<00:06,  2.11it/s]   Layer 8 forward pass:  19%|█▉        | 3/16 [00:01<00:06,  2.12it/s]   Layer 8 forward pass:  25%|██▌       | 4/16 [00:01<00:05,  2.11it/s]   Layer 8 forward pass:  31%|███▏      | 5/16 [00:02<00:05,  2.11it/s]   Layer 8 forward pass:  38%|███▊      | 6/16 [00:02<00:04,  2.11it/s]   Layer 8 forward pass:  44%|████▍     | 7/16 [00:03<00:04,  2.11it/s]   Layer 8 forward pass:  50%|█████     | 8/16 [00:03<00:03,  2.11it/s]   Layer 8 forward pass:  56%|█████▋    | 9/16 [00:04<00:03,  2.10it/s]   Layer 8 forward pass:  62%|██████▎   | 10/16 [00:04<00:02,  2.10it/s]   Layer 8 forward pass:  69%|██████▉   | 11/16 [00:05<00:02,  2.10it/s]   Layer 8 forward pass:  75%|███████▌  | 12/16 [00:05<00:01,  2.10it/s]   Layer 8 forward pass:  81%|████████▏ | 13/16 [00:06<00:01,  2.10it/s]   Layer 8 forward pass:  88%|████████▊ | 14/16 [00:06<00:00,  2.10it/s]   Layer 8 forward pass:  94%|█████████▍| 15/16 [00:07<00:00,  2.10it/s]   Layer 8 forward pass: 100%|██████████| 16/16 [00:07<00:00,  2.10it/s]   Layer 8 forward pass: 100%|██████████| 16/16 [00:07<00:00,  2.10it/s]
+   Quantizing: model.layers.8.linear_attn.out_proj.weight (torch.Size([5120, 6144])) on device cuda:0
+   Quantizing: model.layers.8.linear_attn.in_proj_qkv.weight (torch.Size([10240, 5120])) on device cuda:0
+   Quantizing: model.layers.8.linear_attn.in_proj_z.weight (torch.Size([6144, 5120])) on device cuda:0
+   Quantizing: model.layers.8.linear_attn.in_proj_b.weight (torch.Size([48, 5120])) on device cuda:0
+   Quantizing: model.layers.8.linear_attn.in_proj_a.weight (torch.Size([48, 5120])) on device cuda:0
+   Quantizing: model.layers.8.mlp.gate_proj.weight (torch.Size([17408, 5120])) on device cuda:1
+   Quantizing: model.layers.8.mlp.up_proj.weight (torch.Size([17408, 5120])) on device cuda:1
+   Quantizing: model.layers.8.mlp.down_proj.weight (torch.Size([5120, 17408])) on device cuda:1
+
+⚡ Quantizing layer 10/64...
+   Layer 9 forward pass:   0%|          | 0/16 [00:00<?, ?it/s]   Layer 9 forward pass:   6%|▋         | 1/16 [00:00<00:07,  2.13it/s]   Layer 9 forward pass:  12%|█▎        | 2/16 [00:00<00:06,  2.12it/s]   Layer 9 forward pass:  19%|█▉        | 3/16 [00:01<00:06,  2.10it/s]   Layer 9 forward pass:  25%|██▌       | 4/16 [00:01<00:05,  2.10it/s]   Layer 9 forward pass:  31%|███▏      | 5/16 [00:02<00:05,  2.10it/s]   Layer 9 forward pass:  38%|███▊      | 6/16 [00:02<00:04,  2.10it/s]   Layer 9 forward pass:  44%|████▍     | 7/16 [00:03<00:04,  2.10it/s]   Layer 9 forward pass:  50%|█████     | 8/16 [00:03<00:03,  2.10it/s]   Layer 9 forward pass:  56%|█████▋    | 9/16 [00:04<00:03,  2.10it/s]   Layer 9 forward pass:  62%|██████▎   | 10/16 [00:04<00:02,  2.10it/s]   Layer 9 forward pass:  69%|██████▉   | 11/16 [00:05<00:02,  2.10it/s]   Layer 9 forward pass:  75%|███████▌  | 12/16 [00:05<00:01,  2.10it/s]   Layer 9 forward pass:  81%|████████▏ | 13/16 [00:06<00:01,  2.10it/s]   Layer 9 forward pass:  88%|████████▊ | 14/16 [00:06<00:00,  2.10it/s]   Layer 9 forward pass:  94%|█████████▍| 15/16 [00:07<00:00,  2.10it/s]   Layer 9 forward pass: 100%|██████████| 16/16 [00:07<00:00,  2.09it/s]   Layer 9 forward pass: 100%|██████████| 16/16 [00:07<00:00,  2.10it/s]
+   Quantizing: model.layers.9.linear_attn.out_proj.weight (torch.Size([5120, 6144])) on device cuda:0
+   Quantizing: model.layers.9.linear_attn.in_proj_qkv.weight (torch.Size([10240, 5120])) on device cuda:0
+   Quantizing: model.layers.9.linear_attn.in_proj_z.weight (torch.Size([6144, 5120])) on device cuda:0
+   Quantizing: model.layers.9.linear_attn.in_proj_b.weight (torch.Size([48, 5120])) on device cuda:0
+   Quantizing: model.layers.9.linear_attn.in_proj_a.weight (torch.Size([48, 5120])) on device cuda:0
+   Quantizing: model.layers.9.mlp.gate_proj.weight (torch.Size([17408, 5120])) on device cuda:1
+   Quantizing: model.layers.9.mlp.up_proj.weight (torch.Size([17408, 5120])) on device cuda:1
+   Quantizing: model.layers.9.mlp.down_proj.weight (torch.Size([5120, 17408])) on device cuda:1
+
+⚡ Quantizing layer 11/64...
+   Layer 10 forward pass:   0%|          | 0/16 [00:00<?, ?it/s]   Layer 10 forward pass:   6%|▋         | 1/16 [00:00<00:07,  2.10it/s]   Layer 10 forward pass:  12%|█▎        | 2/16 [00:00<00:06,  2.10it/s]   Layer 10 forward pass:  19%|█▉        | 3/16 [00:01<00:06,  2.10it/s]   Layer 10 forward pass:  25%|██▌       | 4/16 [00:01<00:05,  2.10it/s]   Layer 10 forward pass:  31%|███▏      | 5/16 [00:02<00:05,  2.10it/s]   Layer 10 forward pass:  38%|███▊      | 6/16 [00:02<00:04,  2.10it/s]   Layer 10 forward pass:  44%|████▍     | 7/16 [00:03<00:04,  2.10it/s]   Layer 10 forward pass:  50%|█████     | 8/16 [00:03<00:03,  2.10it/s]   Layer 10 forward pass:  56%|█████▋    | 9/16 [00:04<00:03,  2.10it/s]   Layer 10 forward pass:  62%|██████▎   | 10/16 [00:04<00:02,  2.10it/s]   Layer 10 forward pass:  69%|██████▉   | 11/16 [00:05<00:02,  2.10it/s]   Layer 10 forward pass:  75%|███████▌  | 12/16 [00:05<00:01,  2.10it/s]   Layer 10 forward pass:  81%|████████▏ | 13/16 [00:06<00:01,  2.10it/s]   Layer 10 forward pass:  88%|████████▊ | 14/16 [00:06<00:00,  2.09it/s]   Layer 10 forward pass:  94%|█████████▍| 15/16 [00:07<00:00,  2.09it/s]   Layer 10 forward pass: 100%|██████████| 16/16 [00:07<00:00,  2.09it/s]   Layer 10 forward pass: 100%|██████████| 16/16 [00:07<00:00,  2.10it/s]
+   Quantizing: model.layers.10.linear_attn.out_proj.weight (torch.Size([5120, 6144])) on device cuda:0
+   Quantizing: model.layers.10.linear_attn.in_proj_qkv.weight (torch.Size([10240, 5120])) on device cuda:0
+   Quantizing: model.layers.10.linear_attn.in_proj_z.weight (torch.Size([6144, 5120])) on device cuda:0
+   Quantizing: model.layers.10.linear_attn.in_proj_b.weight (torch.Size([48, 5120])) on device cuda:0
+   Quantizing: model.layers.10.linear_attn.in_proj_a.weight (torch.Size([48, 5120])) on device cuda:0
+   Quantizing: model.layers.10.mlp.gate_proj.weight (torch.Size([17408, 5120])) on device cuda:1
+   Quantizing: model.layers.10.mlp.up_proj.weight (torch.Size([17408, 5120])) on device cuda:1
+   Quantizing: model.layers.10.mlp.down_proj.weight (torch.Size([5120, 17408])) on device cuda:1
+
+⚡ Quantizing layer 12/64...
+   Layer 11 forward pass:   0%|          | 0/16 [00:00<?, ?it/s]   Layer 11 forward pass:   6%|▋         | 1/16 [00:00<00:06,  2.42it/s]   Layer 11 forward pass:  12%|█▎        | 2/16 [00:00<00:05,  2.42it/s]   Layer 11 forward pass:  19%|█▉        | 3/16 [00:01<00:05,  2.41it/s]   Layer 11 forward pass:  25%|██▌       | 4/16 [00:01<00:04,  2.41it/s]   Layer 11 forward pass:  31%|███▏      | 5/16 [00:02<00:04,  2.41it/s]   Layer 11 forward pass:  38%|███▊      | 6/16 [00:02<00:04,  2.41it/s]   Layer 11 forward pass:  44%|████▍     | 7/16 [00:02<00:03,  2.41it/s]   Layer 11 forward pass:  50%|█████     | 8/16 [00:03<00:03,  2.40it/s]   Layer 11 forward pass:  56%|█████▋    | 9/16 [00:03<00:02,  2.40it/s]   Layer 11 forward pass:  62%|██████▎   | 10/16 [00:04<00:02,  2.40it/s]   Layer 11 forward pass:  69%|██████▉   | 11/16 [00:04<00:02,  2.40it/s]   Layer 11 forward pass:  75%|███████▌  | 12/16 [00:04<00:01,  2.40it/s]   Layer 11 forward pass:  81%|████████▏ | 13/16 [00:05<00:01,  2.40it/s]   Layer 11 forward pass:  88%|████████▊ | 14/16 [00:05<00:00,  2.40it/s]   Layer 11 forward pass:  94%|█████████▍| 15/16 [00:06<00:00,  2.40it/s]   Layer 11 forward pass: 100%|██████████| 16/16 [00:06<00:00,  2.40it/s]   Layer 11 forward pass: 100%|██████████| 16/16 [00:06<00:00,  2.40it/s]
+   Quantizing: model.layers.11.self_attn.q_proj.weight (torch.Size([12288, 5120])) on device cuda:0
+   Quantizing: model.layers.11.self_attn.k_proj.weight (torch.Size([1024, 5120])) on device cuda:0
+   Quantizing: model.layers.11.self_attn.v_proj.weight (torch.Size([1024, 5120])) on device cuda:0
+   Quantizing: model.layers.11.self_attn.o_proj.weight (torch.Size([5120, 6144])) on device cuda:0
+   Quantizing: model.layers.11.mlp.gate_proj.weight (torch.Size([17408, 5120])) on device cuda:1
+   Quantizing: model.layers.11.mlp.up_proj.weight (torch.Size([17408, 5120])) on device cuda:1
+   Quantizing: model.layers.11.mlp.down_proj.weight (torch.Size([5120, 17408])) on device cuda:1
+
+⚡ Quantizing layer 13/64...
+   Layer 12 forward pass:   0%|          | 0/16 [00:00<?, ?it/s]   Layer 12 forward pass:   6%|▋         | 1/16 [00:00<00:07,  2.10it/s]   Layer 12 forward pass:  12%|█▎        | 2/16 [00:00<00:06,  2.10it/s]   Layer 12 forward pass:  19%|█▉        | 3/16 [00:01<00:06,  2.10it/s]   Layer 12 forward pass:  25%|██▌       | 4/16 [00:01<00:05,  2.10it/s]   Layer 12 forward pass:  31%|███▏      | 5/16 [00:02<00:05,  2.10it/s]   Layer 12 forward pass:  38%|███▊      | 6/16 [00:02<00:04,  2.09it/s]   Layer 12 forward pass:  44%|████▍     | 7/16 [00:03<00:04,  2.10it/s]   Layer 12 forward pass:  50%|█████     | 8/16 [00:03<00:03,  2.10it/s]   Layer 12 forward pass:  56%|█████▋    | 9/16 [00:04<00:03,  2.09it/s]   Layer 12 forward pass:  62%|██████▎   | 10/16 [00:04<00:02,  2.09it/s]   Layer 12 forward pass:  69%|██████▉   | 11/16 [00:05<00:02,  2.09it/s]   Layer 12 forward pass:  75%|███████▌  | 12/16 [00:05<00:01,  2.09it/s]   Layer 12 forward pass:  81%|████████▏ | 13/16 [00:06<00:01,  2.09it/s]   Layer 12 forward pass:  88%|████████▊ | 14/16 [00:06<00:00,  2.09it/s]   Layer 12 forward pass:  94%|█████████▍| 15/16 [00:07<00:00,  2.09it/s]   Layer 12 forward pass: 100%|██████████| 16/16 [00:07<00:00,  2.09it/s]   Layer 12 forward pass: 100%|██████████| 16/16 [00:07<00:00,  2.09it/s]
+   Quantizing: model.layers.12.linear_attn.out_proj.weight (torch.Size([5120, 6144])) on device cuda:0
+   Quantizing: model.layers.12.linear_attn.in_proj_qkv.weight (torch.Size([10240, 5120])) on device cuda:0
+   Quantizing: model.layers.12.linear_attn.in_proj_z.weight (torch.Size([6144, 5120])) on device cuda:0
+   Quantizing: model.layers.12.linear_attn.in_proj_b.weight (torch.Size([48, 5120])) on device cuda:0
+   Quantizing: model.layers.12.linear_attn.in_proj_a.weight (torch.Size([48, 5120])) on device cuda:0
+   Quantizing: model.layers.12.mlp.gate_proj.weight (torch.Size([17408, 5120])) on device cuda:1
+   Quantizing: model.layers.12.mlp.up_proj.weight (torch.Size([17408, 5120])) on device cuda:1
+   Quantizing: model.layers.12.mlp.down_proj.weight (torch.Size([5120, 17408])) on device cuda:1
+
+⚡ Quantizing layer 14/64...
+   Layer 13 forward pass:   0%|          | 0/16 [00:00<?, ?it/s]   Layer 13 forward pass:   6%|▋         | 1/16 [00:00<00:07,  2.11it/s]   Layer 13 forward pass:  12%|█▎        | 2/16 [00:00<00:06,  2.10it/s]   Layer 13 forward pass:  19%|█▉        | 3/16 [00:01<00:06,  2.10it/s]   Layer 13 forward pass:  25%|██▌       | 4/16 [00:01<00:05,  2.10it/s]   Layer 13 forward pass:  31%|███▏      | 5/16 [00:02<00:05,  2.09it/s]   Layer 13 forward pass:  38%|███▊      | 6/16 [00:02<00:04,  2.09it/s]   Layer 13 forward pass:  44%|████▍     | 7/16 [00:03<00:04,  2.10it/s]   Layer 13 forward pass:  50%|█████     | 8/16 [00:03<00:03,  2.10it/s]   Layer 13 forward pass:  56%|█████▋    | 9/16 [00:04<00:03,  2.10it/s]   Layer 13 forward pass:  62%|██████▎   | 10/16 [00:04<00:02,  2.10it/s]   Layer 13 forward pass:  69%|██████▉   | 11/16 [00:05<00:02,  2.09it/s]   Layer 13 forward pass:  75%|███████▌  | 12/16 [00:05<00:01,  2.09it/s]   Layer 13 forward pass:  81%|████████▏ | 13/16 [00:06<00:01,  2.09it/s]   Layer 13 forward pass:  88%|████████▊ | 14/16 [00:06<00:00,  2.09it/s]   Layer 13 forward pass:  94%|█████████▍| 15/16 [00:07<00:00,  2.08it/s]   Layer 13 forward pass: 100%|██████████| 16/16 [00:07<00:00,  2.08it/s]   Layer 13 forward pass: 100%|██████████| 16/16 [00:07<00:00,  2.09it/s]
+   Quantizing: model.layers.13.linear_attn.out_proj.weight (torch.Size([5120, 6144])) on device cuda:0
+   Quantizing: model.layers.13.linear_attn.in_proj_qkv.weight (torch.Size([10240, 5120])) on device cuda:0
+   Quantizing: model.layers.13.linear_attn.in_proj_z.weight (torch.Size([6144, 5120])) on device cuda:0
+   Quantizing: model.layers.13.linear_attn.in_proj_b.weight (torch.Size([48, 5120])) on device cuda:0
+   Quantizing: model.layers.13.linear_attn.in_proj_a.weight (torch.Size([48, 5120])) on device cuda:0
+   Quantizing: model.layers.13.mlp.gate_proj.weight (torch.Size([17408, 5120])) on device cuda:1
+   Quantizing: model.layers.13.mlp.up_proj.weight (torch.Size([17408, 5120])) on device cuda:1
+   Quantizing: model.layers.13.mlp.down_proj.weight (torch.Size([5120, 17408])) on device cuda:1
+
+⚡ Quantizing layer 15/64...
+   Layer 14 forward pass:   0%|          | 0/16 [00:00<?, ?it/s]   Layer 14 forward pass:   6%|▋         | 1/16 [00:00<00:07,  2.09it/s]   Layer 14 forward pass:  12%|█▎        | 2/16 [00:00<00:06,  2.09it/s]   Layer 14 forward pass:  19%|█▉        | 3/16 [00:01<00:06,  2.10it/s]   Layer 14 forward pass:  25%|██▌       | 4/16 [00:01<00:05,  2.09it/s]   Layer 14 forward pass:  31%|███▏      | 5/16 [00:02<00:05,  2.09it/s]   Layer 14 forward pass:  38%|███▊      | 6/16 [00:02<00:04,  2.09it/s]   Layer 14 forward pass:  44%|████▍     | 7/16 [00:03<00:04,  2.09it/s]   Layer 14 forward pass:  50%|█████     | 8/16 [00:03<00:03,  2.09it/s]   Layer 14 forward pass:  56%|█████▋    | 9/16 [00:04<00:03,  2.09it/s]   Layer 14 forward pass:  62%|██████▎   | 10/16 [00:04<00:02,  2.09it/s]   Layer 14 forward pass:  69%|██████▉   | 11/16 [00:05<00:02,  2.09it/s]   Layer 14 forward pass:  75%|███████▌  | 12/16 [00:05<00:01,  2.08it/s]   Layer 14 forward pass:  81%|████████▏ | 13/16 [00:06<00:01,  2.08it/s]   Layer 14 forward pass:  88%|████████▊ | 14/16 [00:06<00:00,  2.08it/s]   Layer 14 forward pass:  94%|█████████▍| 15/16 [00:07<00:00,  2.08it/s]   Layer 14 forward pass: 100%|██████████| 16/16 [00:07<00:00,  2.08it/s]   Layer 14 forward pass: 100%|██████████| 16/16 [00:07<00:00,  2.09it/s]
+   Quantizing: model.layers.14.linear_attn.out_proj.weight (torch.Size([5120, 6144])) on device cuda:0
+   Quantizing: model.layers.14.linear_attn.in_proj_qkv.weight (torch.Size([10240, 5120])) on device cuda:0
+   Quantizing: model.layers.14.linear_attn.in_proj_z.weight (torch.Size([6144, 5120])) on device cuda:0
+   Quantizing: model.layers.14.linear_attn.in_proj_b.weight (torch.Size([48, 5120])) on device cuda:0
+   Quantizing: model.layers.14.linear_attn.in_proj_a.weight (torch.Size([48, 5120])) on device cuda:0
+   Quantizing: model.layers.14.mlp.gate_proj.weight (torch.Size([17408, 5120])) on device cuda:1
+   Quantizing: model.layers.14.mlp.up_proj.weight (torch.Size([17408, 5120])) on device cuda:1
+   Quantizing: model.layers.14.mlp.down_proj.weight (torch.Size([5120, 17408])) on device cuda:1
+
+⚡ Quantizing layer 16/64...
+   Layer 15 forward pass:   0%|          | 0/16 [00:00<?, ?it/s]   Layer 15 forward pass:   6%|▋         | 1/16 [00:00<00:06,  2.41it/s]   Layer 15 forward pass:  12%|█▎        | 2/16 [00:00<00:05,  2.40it/s]   Layer 15 forward pass:  19%|█▉        | 3/16 [00:01<00:05,  2.40it/s]   Layer 15 forward pass:  25%|██▌       | 4/16 [00:01<00:04,  2.40it/s]   Layer 15 forward pass:  31%|███▏      | 5/16 [00:02<00:04,  2.40it/s]   Layer 15 forward pass:  38%|███▊      | 6/16 [00:02<00:04,  2.40it/s]   Layer 15 forward pass:  44%|████▍     | 7/16 [00:02<00:03,  2.39it/s]   Layer 15 forward pass:  50%|█████     | 8/16 [00:03<00:03,  2.39it/s]   Layer 15 forward pass:  56%|█████▋    | 9/16 [00:03<00:02,  2.39it/s]   Layer 15 forward pass:  62%|██████▎   | 10/16 [00:04<00:02,  2.39it/s]   Layer 15 forward pass:  69%|██████▉   | 11/16 [00:04<00:02,  2.39it/s]   Layer 15 forward pass:  75%|███████▌  | 12/16 [00:05<00:01,  2.39it/s]   Layer 15 forward pass:  81%|████████▏ | 13/16 [00:05<00:01,  2.39it/s]   Layer 15 forward pass:  88%|████████▊ | 14/16 [00:05<00:00,  2.39it/s]   Layer 15 forward pass:  94%|█████████▍| 15/16 [00:06<00:00,  2.39it/s]   Layer 15 forward pass: 100%|██████████| 16/16 [00:06<00:00,  2.39it/s]   Layer 15 forward pass: 100%|██████████| 16/16 [00:06<00:00,  2.40it/s]
+   Quantizing: model.layers.15.self_attn.q_proj.weight (torch.Size([12288, 5120])) on device cuda:0
+   Quantizing: model.layers.15.self_attn.k_proj.weight (torch.Size([1024, 5120])) on device cuda:0
+   Quantizing: model.layers.15.self_attn.v_proj.weight (torch.Size([1024, 5120])) on device cuda:0
+   Quantizing: model.layers.15.self_attn.o_proj.weight (torch.Size([5120, 6144])) on device cuda:0
+   Quantizing: model.layers.15.mlp.gate_proj.weight (torch.Size([17408, 5120])) on device cuda:1
+   Quantizing: model.layers.15.mlp.up_proj.weight (torch.Size([17408, 5120])) on device cuda:1
+   Quantizing: model.layers.15.mlp.down_proj.weight (torch.Size([5120, 17408])) on device cuda:1
+
+⚡ Quantizing layer 17/64...
+   Layer 16 forward pass:   0%|          | 0/16 [00:00<?, ?it/s]   Layer 16 forward pass:   6%|▋         | 1/16 [00:00<00:07,  2.09it/s]   Layer 16 forward pass:  12%|█▎        | 2/16 [00:00<00:06,  2.09it/s]   Layer 16 forward pass:  19%|█▉        | 3/16 [00:01<00:06,  2.09it/s]   Layer 16 forward pass:  25%|██▌       | 4/16 [00:01<00:05,  2.09it/s]   Layer 16 forward pass:  31%|███▏      | 5/16 [00:02<00:05,  2.09it/s]   Layer 16 forward pass:  38%|███▊      | 6/16 [00:02<00:04,  2.09it/s]   Layer 16 forward pass:  44%|████▍     | 7/16 [00:03<00:04,  2.09it/s]   Layer 16 forward pass:  50%|█████     | 8/16 [00:03<00:03,  2.09it/s]   Layer 16 forward pass:  56%|█████▋    | 9/16 [00:04<00:03,  2.09it/s]   Layer 16 forward pass:  62%|██████▎   | 10/16 [00:04<00:02,  2.09it/s]   Layer 16 forward pass:  69%|██████▉   | 11/16 [00:05<00:02,  2.09it/s]   Layer 16 forward pass:  75%|███████▌  | 12/16 [00:05<00:01,  2.09it/s]   Layer 16 forward pass:  81%|████████▏ | 13/16 [00:06<00:01,  2.09it/s]   Layer 16 forward pass:  88%|████████▊ | 14/16 [00:06<00:00,  2.09it/s]   Layer 16 forward pass:  94%|█████████▍| 15/16 [00:07<00:00,  2.09it/s]   Layer 16 forward pass: 100%|██████████| 16/16 [00:07<00:00,  2.09it/s]   Layer 16 forward pass: 100%|██████████| 16/16 [00:07<00:00,  2.09it/s]
+   Quantizing: model.layers.16.linear_attn.out_proj.weight (torch.Size([5120, 6144])) on device cuda:0
+   Quantizing: model.layers.16.linear_attn.in_proj_qkv.weight (torch.Size([10240, 5120])) on device cuda:0
+   Quantizing: model.layers.16.linear_attn.in_proj_z.weight (torch.Size([6144, 5120])) on device cuda:0
+   Quantizing: model.layers.16.linear_attn.in_proj_b.weight (torch.Size([48, 5120])) on device cuda:0
+   Quantizing: model.layers.16.linear_attn.in_proj_a.weight (torch.Size([48, 5120])) on device cuda:0
+   Quantizing: model.layers.16.mlp.gate_proj.weight (torch.Size([17408, 5120])) on device cuda:1
+   Quantizing: model.layers.16.mlp.up_proj.weight (torch.Size([17408, 5120])) on device cuda:1
+   Quantizing: model.layers.16.mlp.down_proj.weight (torch.Size([5120, 17408])) on device cuda:1
+
+⚡ Quantizing layer 18/64...
+   Layer 17 forward pass:   0%|          | 0/16 [00:00<?, ?it/s]   Layer 17 forward pass:   6%|▋         | 1/16 [00:00<00:07,  2.09it/s]   Layer 17 forward pass:  12%|█▎        | 2/16 [00:00<00:06,  2.09it/s]   Layer 17 forward pass:  19%|█▉        | 3/16 [00:01<00:06,  2.09it/s]   Layer 17 forward pass:  25%|██▌       | 4/16 [00:01<00:05,  2.08it/s]   Layer 17 forward pass:  31%|███▏      | 5/16 [00:02<00:05,  2.08it/s]   Layer 17 forward pass:  38%|███▊      | 6/16 [00:02<00:04,  2.09it/s]   Layer 17 forward pass:  44%|████▍     | 7/16 [00:03<00:04,  2.09it/s]   Layer 17 forward pass:  50%|█████     | 8/16 [00:03<00:03,  2.08it/s]   Layer 17 forward pass:  56%|█████▋    | 9/16 [00:04<00:03,  2.08it/s]   Layer 17 forward pass:  62%|██████▎   | 10/16 [00:04<00:02,  2.08it/s]   Layer 17 forward pass:  69%|██████▉   | 11/16 [00:05<00:02,  2.08it/s]   Layer 17 forward pass:  75%|███████▌  | 12/16 [00:05<00:01,  2.08it/s]   Layer 17 forward pass:  81%|████████▏ | 13/16 [00:06<00:01,  2.08it/s]   Layer 17 forward pass:  88%|████████▊ | 14/16 [00:06<00:00,  2.08it/s]   Layer 17 forward pass:  94%|█████████▍| 15/16 [00:07<00:00,  2.08it/s]   Layer 17 forward pass: 100%|██████████| 16/16 [00:07<00:00,  2.07it/s]   Layer 17 forward pass: 100%|██████████| 16/16 [00:07<00:00,  2.08it/s]
+   Quantizing: model.layers.17.linear_attn.out_proj.weight (torch.Size([5120, 6144])) on device cuda:0
+   Quantizing: model.layers.17.linear_attn.in_proj_qkv.weight (torch.Size([10240, 5120])) on device cuda:0
+   Quantizing: model.layers.17.linear_attn.in_proj_z.weight (torch.Size([6144, 5120])) on device cuda:0
+   Quantizing: model.layers.17.linear_attn.in_proj_b.weight (torch.Size([48, 5120])) on device cuda:0
+   Quantizing: model.layers.17.linear_attn.in_proj_a.weight (torch.Size([48, 5120])) on device cuda:0
+   Quantizing: model.layers.17.mlp.gate_proj.weight (torch.Size([17408, 5120])) on device cuda:1
+   Quantizing: model.layers.17.mlp.up_proj.weight (torch.Size([17408, 5120])) on device cuda:1
+   Quantizing: model.layers.17.mlp.down_proj.weight (torch.Size([5120, 17408])) on device cuda:1
+
+⚡ Quantizing layer 19/64...
+   Layer 18 forward pass:   0%|          | 0/16 [00:00<?, ?it/s]   Layer 18 forward pass:   6%|▋         | 1/16 [00:00<00:07,  2.08it/s]   Layer 18 forward pass:  12%|█▎        | 2/16 [00:00<00:06,  2.08it/s]   Layer 18 forward pass:  19%|█▉        | 3/16 [00:01<00:06,  2.09it/s]   Layer 18 forward pass:  25%|██▌       | 4/16 [00:01<00:05,  2.09it/s]   Layer 18 forward pass:  31%|███▏      | 5/16 [00:02<00:05,  2.09it/s]   Layer 18 forward pass:  38%|███▊      | 6/16 [00:02<00:04,  2.09it/s]   Layer 18 forward pass:  44%|████▍     | 7/16 [00:03<00:04,  2.08it/s]   Layer 18 forward pass:  50%|█████     | 8/16 [00:03<00:03,  2.08it/s]   Layer 18 forward pass:  56%|█████▋    | 9/16 [00:04<00:03,  2.08it/s]   Layer 18 forward pass:  62%|██████▎   | 10/16 [00:04<00:02,  2.08it/s]   Layer 18 forward pass:  69%|██████▉   | 11/16 [00:05<00:02,  2.08it/s]   Layer 18 forward pass:  75%|███████▌  | 12/16 [00:05<00:01,  2.08it/s]   Layer 18 forward pass:  81%|████████▏ | 13/16 [00:06<00:01,  2.08it/s]   Layer 18 forward pass:  88%|████████▊ | 14/16 [00:06<00:00,  2.08it/s]   Layer 18 forward pass:  94%|█████████▍| 15/16 [00:07<00:00,  2.08it/s]   Layer 18 forward pass: 100%|██████████| 16/16 [00:07<00:00,  2.08it/s]   Layer 18 forward pass: 100%|██████████| 16/16 [00:07<00:00,  2.08it/s]
+   Quantizing: model.layers.18.linear_attn.out_proj.weight (torch.Size([5120, 6144])) on device cuda:0
+   Quantizing: model.layers.18.linear_attn.in_proj_qkv.weight (torch.Size([10240, 5120])) on device cuda:0
+   Quantizing: model.layers.18.linear_attn.in_proj_z.weight (torch.Size([6144, 5120])) on device cuda:0
+   Quantizing: model.layers.18.linear_attn.in_proj_b.weight (torch.Size([48, 5120])) on device cuda:0
+   Quantizing: model.layers.18.linear_attn.in_proj_a.weight (torch.Size([48, 5120])) on device cuda:0
+   Quantizing: model.layers.18.mlp.gate_proj.weight (torch.Size([17408, 5120])) on device cuda:1
+   Quantizing: model.layers.18.mlp.up_proj.weight (torch.Size([17408, 5120])) on device cuda:1
+   Quantizing: model.layers.18.mlp.down_proj.weight (torch.Size([5120, 17408])) on device cuda:1
+
+⚡ Quantizing layer 20/64...
+   Layer 19 forward pass:   0%|          | 0/16 [00:00<?, ?it/s]   Layer 19 forward pass:   6%|▋         | 1/16 [00:00<00:06,  2.39it/s]   Layer 19 forward pass:  12%|█▎        | 2/16 [00:00<00:05,  2.39it/s]   Layer 19 forward pass:  19%|█▉        | 3/16 [00:01<00:05,  2.39it/s]   Layer 19 forward pass:  25%|██▌       | 4/16 [00:01<00:05,  2.39it/s]   Layer 19 forward pass:  31%|███▏      | 5/16 [00:02<00:04,  2.39it/s]   Layer 19 forward pass:  38%|███▊      | 6/16 [00:02<00:04,  2.39it/s]   Layer 19 forward pass:  44%|████▍     | 7/16 [00:02<00:03,  2.39it/s]   Layer 19 forward pass:  50%|█████     | 8/16 [00:03<00:03,  2.38it/s]   Layer 19 forward pass:  56%|█████▋    | 9/16 [00:03<00:02,  2.38it/s]   Layer 19 forward pass:  62%|██████▎   | 10/16 [00:04<00:02,  2.38it/s]   Layer 19 forward pass:  69%|██████▉   | 11/16 [00:04<00:02,  2.38it/s]   Layer 19 forward pass:  75%|███████▌  | 12/16 [00:05<00:01,  2.38it/s]   Layer 19 forward pass:  81%|████████▏ | 13/16 [00:05<00:01,  2.38it/s]   Layer 19 forward pass:  88%|████████▊ | 14/16 [00:05<00:00,  2.38it/s]   Layer 19 forward pass:  94%|█████████▍| 15/16 [00:06<00:00,  2.38it/s]   Layer 19 forward pass: 100%|██████████| 16/16 [00:06<00:00,  2.38it/s]   Layer 19 forward pass: 100%|██████████| 16/16 [00:06<00:00,  2.38it/s]
+   Quantizing: model.layers.19.self_attn.q_proj.weight (torch.Size([12288, 5120])) on device cuda:0
+   Quantizing: model.layers.19.self_attn.k_proj.weight (torch.Size([1024, 5120])) on device cuda:0
+   Quantizing: model.layers.19.self_attn.v_proj.weight (torch.Size([1024, 5120])) on device cuda:0
+   Quantizing: model.layers.19.self_attn.o_proj.weight (torch.Size([5120, 6144])) on device cuda:0
+   Quantizing: model.layers.19.mlp.gate_proj.weight (torch.Size([17408, 5120])) on device cuda:1
+   Quantizing: model.layers.19.mlp.up_proj.weight (torch.Size([17408, 5120])) on device cuda:1
+   Quantizing: model.layers.19.mlp.down_proj.weight (torch.Size([5120, 17408])) on device cuda:1
+
+⚡ Quantizing layer 21/64...
+   Layer 20 forward pass:   0%|          | 0/16 [00:00<?, ?it/s]   Layer 20 forward pass:   6%|▋         | 1/16 [00:00<00:07,  2.09it/s]   Layer 20 forward pass:  12%|█▎        | 2/16 [00:00<00:06,  2.08it/s]   Layer 20 forward pass:  19%|█▉        | 3/16 [00:01<00:06,  2.08it/s]   Layer 20 forward pass:  25%|██▌       | 4/16 [00:01<00:05,  2.08it/s]   Layer 20 forward pass:  31%|███▏      | 5/16 [00:02<00:05,  2.08it/s]   Layer 20 forward pass:  38%|███▊      | 6/16 [00:02<00:04,  2.08it/s]   Layer 20 forward pass:  44%|████▍     | 7/16 [00:03<00:04,  2.08it/s]   Layer 20 forward pass:  50%|█████     | 8/16 [00:03<00:03,  2.08it/s]   Layer 20 forward pass:  56%|█████▋    | 9/16 [00:04<00:03,  2.08it/s]   Layer 20 forward pass:  62%|██████▎   | 10/16 [00:04<00:02,  2.08it/s]   Layer 20 forward pass:  69%|██████▉   | 11/16 [00:05<00:02,  2.08it/s]   Layer 20 forward pass:  75%|███████▌  | 12/16 [00:05<00:01,  2.08it/s]   Layer 20 forward pass:  81%|████████▏ | 13/16 [00:06<00:01,  2.08it/s]   Layer 20 forward pass:  88%|████████▊ | 14/16 [00:06<00:00,  2.08it/s]   Layer 20 forward pass:  94%|█████████▍| 15/16 [00:07<00:00,  2.08it/s]   Layer 20 forward pass: 100%|██████████| 16/16 [00:07<00:00,  2.08it/s]   Layer 20 forward pass: 100%|██████████| 16/16 [00:07<00:00,  2.08it/s]
+   Quantizing: model.layers.20.linear_attn.out_proj.weight (torch.Size([5120, 6144])) on device cuda:0
+   Quantizing: model.layers.20.linear_attn.in_proj_qkv.weight (torch.Size([10240, 5120])) on device cuda:0
+   Quantizing: model.layers.20.linear_attn.in_proj_z.weight (torch.Size([6144, 5120])) on device cuda:0
+   Quantizing: model.layers.20.linear_attn.in_proj_b.weight (torch.Size([48, 5120])) on device cuda:0
+   Quantizing: model.layers.20.linear_attn.in_proj_a.weight (torch.Size([48, 5120])) on device cuda:0
+   Quantizing: model.layers.20.mlp.gate_proj.weight (torch.Size([17408, 5120])) on device cuda:1
+   Quantizing: model.layers.20.mlp.up_proj.weight (torch.Size([17408, 5120])) on device cuda:1
+   Quantizing: model.layers.20.mlp.down_proj.weight (torch.Size([5120, 17408])) on device cuda:1
+
+⚡ Quantizing layer 22/64...
+   Layer 21 forward pass:   0%|          | 0/16 [00:00<?, ?it/s]   Layer 21 forward pass:   6%|▋         | 1/16 [00:00<00:07,  2.09it/s]   Layer 21 forward pass:  12%|█▎        | 2/16 [00:00<00:06,  2.08it/s]   Layer 21 forward pass:  19%|█▉        | 3/16 [00:01<00:06,  2.08it/s]   Layer 21 forward pass:  25%|██▌       | 4/16 [00:01<00:05,  2.08it/s]   Layer 21 forward pass:  31%|███▏      | 5/16 [00:02<00:05,  2.08it/s]   Layer 21 forward pass:  38%|███▊      | 6/16 [00:02<00:04,  2.07it/s]   Layer 21 forward pass:  44%|████▍     | 7/16 [00:03<00:04,  2.07it/s]   Layer 21 forward pass:  50%|█████     | 8/16 [00:03<00:03,  2.07it/s]   Layer 21 forward pass:  56%|█████▋    | 9/16 [00:04<00:03,  2.08it/s]   Layer 21 forward pass:  62%|██████▎   | 10/16 [00:04<00:02,  2.08it/s]   Layer 21 forward pass:  69%|██████▉   | 11/16 [00:05<00:02,  2.07it/s]   Layer 21 forward pass:  75%|███████▌  | 12/16 [00:05<00:01,  2.07it/s]   Layer 21 forward pass:  81%|████████▏ | 13/16 [00:06<00:01,  2.07it/s]   Layer 21 forward pass:  88%|████████▊ | 14/16 [00:06<00:00,  2.07it/s]   Layer 21 forward pass:  94%|█████████▍| 15/16 [00:07<00:00,  2.07it/s]   Layer 21 forward pass: 100%|██████████| 16/16 [00:07<00:00,  2.07it/s]   Layer 21 forward pass: 100%|██████████| 16/16 [00:07<00:00,  2.08it/s]
+   Quantizing: model.layers.21.linear_attn.out_proj.weight (torch.Size([5120, 6144])) on device cuda:0
+   Quantizing: model.layers.21.linear_attn.in_proj_qkv.weight (torch.Size([10240, 5120])) on device cuda:0
+   Quantizing: model.layers.21.linear_attn.in_proj_z.weight (torch.Size([6144, 5120])) on device cuda:0
+   Quantizing: model.layers.21.linear_attn.in_proj_b.weight (torch.Size([48, 5120])) on device cuda:0
+   Quantizing: model.layers.21.linear_attn.in_proj_a.weight (torch.Size([48, 5120])) on device cuda:0
+   Quantizing: model.layers.21.mlp.gate_proj.weight (torch.Size([17408, 5120])) on device cuda:1
+   Quantizing: model.layers.21.mlp.up_proj.weight (torch.Size([17408, 5120])) on device cuda:1
+   Quantizing: model.layers.21.mlp.down_proj.weight (torch.Size([5120, 17408])) on device cuda:1
+
+⚡ Quantizing layer 23/64...
+   Layer 22 forward pass:   0%|          | 0/16 [00:00<?, ?it/s]   Layer 22 forward pass:   6%|▋         | 1/16 [00:00<00:07,  2.09it/s]   Layer 22 forward pass:  12%|█▎        | 2/16 [00:00<00:06,  2.07it/s]   Layer 22 forward pass:  19%|█▉        | 3/16 [00:01<00:06,  2.08it/s]   Layer 22 forward pass:  25%|██▌       | 4/16 [00:01<00:05,  2.08it/s]   Layer 22 forward pass:  31%|███▏      | 5/16 [00:02<00:05,  2.08it/s]   Layer 22 forward pass:  38%|███▊      | 6/16 [00:02<00:04,  2.08it/s]   Layer 22 forward pass:  44%|████▍     | 7/16 [00:03<00:04,  2.07it/s]   Layer 22 forward pass:  50%|█████     | 8/16 [00:03<00:03,  2.07it/s]   Layer 22 forward pass:  56%|█████▋    | 9/16 [00:04<00:03,  2.07it/s]   Layer 22 forward pass:  62%|██████▎   | 10/16 [00:04<00:02,  2.07it/s]   Layer 22 forward pass:  69%|██████▉   | 11/16 [00:05<00:02,  2.07it/s]   Layer 22 forward pass:  75%|███████▌  | 12/16 [00:05<00:01,  2.07it/s]   Layer 22 forward pass:  81%|████████▏ | 13/16 [00:06<00:01,  2.07it/s]   Layer 22 forward pass:  88%|████████▊ | 14/16 [00:06<00:00,  2.07it/s]   Layer 22 forward pass:  94%|█████████▍| 15/16 [00:07<00:00,  2.07it/s]   Layer 22 forward pass: 100%|██████████| 16/16 [00:07<00:00,  2.07it/s]   Layer 22 forward pass: 100%|██████████| 16/16 [00:07<00:00,  2.07it/s]
+   Quantizing: model.layers.22.linear_attn.out_proj.weight (torch.Size([5120, 6144])) on device cuda:0
+   Quantizing: model.layers.22.linear_attn.in_proj_qkv.weight (torch.Size([10240, 5120])) on device cuda:0
+   Quantizing: model.layers.22.linear_attn.in_proj_z.weight (torch.Size([6144, 5120])) on device cuda:0
+   Quantizing: model.layers.22.linear_attn.in_proj_b.weight (torch.Size([48, 5120])) on device cuda:0
+   Quantizing: model.layers.22.linear_attn.in_proj_a.weight (torch.Size([48, 5120])) on device cuda:0
+   Quantizing: model.layers.22.mlp.gate_proj.weight (torch.Size([17408, 5120])) on device cuda:1
+   Quantizing: model.layers.22.mlp.up_proj.weight (torch.Size([17408, 5120])) on device cuda:1
+   Quantizing: model.layers.22.mlp.down_proj.weight (torch.Size([5120, 17408])) on device cuda:1
+
+⚡ Quantizing layer 24/64...
+   Layer 23 forward pass:   0%|          | 0/16 [00:00<?, ?it/s]   Layer 23 forward pass:   6%|▋         | 1/16 [00:00<00:06,  2.39it/s]   Layer 23 forward pass:  12%|█▎        | 2/16 [00:00<00:05,  2.39it/s]   Layer 23 forward pass:  19%|█▉        | 3/16 [00:01<00:05,  2.38it/s]   Layer 23 forward pass:  25%|██▌       | 4/16 [00:01<00:05,  2.38it/s]   Layer 23 forward pass:  31%|███▏      | 5/16 [00:02<00:04,  2.38it/s]   Layer 23 forward pass:  38%|███▊      | 6/16 [00:02<00:04,  2.38it/s]   Layer 23 forward pass:  44%|████▍     | 7/16 [00:02<00:03,  2.38it/s]   Layer 23 forward pass:  50%|█████     | 8/16 [00:03<00:03,  2.37it/s]   Layer 23 forward pass:  56%|█████▋    | 9/16 [00:03<00:02,  2.37it/s]   Layer 23 forward pass:  62%|██████▎   | 10/16 [00:04<00:02,  2.37it/s]   Layer 23 forward pass:  69%|██████▉   | 11/16 [00:04<00:02,  2.37it/s]   Layer 23 forward pass:  75%|███████▌  | 12/16 [00:05<00:01,  2.37it/s]   Layer 23 forward pass:  81%|████████▏ | 13/16 [00:05<00:01,  2.37it/s]   Layer 23 forward pass:  88%|████████▊ | 14/16 [00:05<00:00,  2.37it/s]   Layer 23 forward pass:  94%|█████████▍| 15/16 [00:06<00:00,  2.37it/s]   Layer 23 forward pass: 100%|██████████| 16/16 [00:06<00:00,  2.37it/s]   Layer 23 forward pass: 100%|██████████| 16/16 [00:06<00:00,  2.37it/s]
+   Quantizing: model.layers.23.self_attn.q_proj.weight (torch.Size([12288, 5120])) on device cuda:0
+   Quantizing: model.layers.23.self_attn.k_proj.weight (torch.Size([1024, 5120])) on device cuda:0
+   Quantizing: model.layers.23.self_attn.v_proj.weight (torch.Size([1024, 5120])) on device cuda:0
+   Quantizing: model.layers.23.self_attn.o_proj.weight (torch.Size([5120, 6144])) on device cuda:0
+   Quantizing: model.layers.23.mlp.gate_proj.weight (torch.Size([17408, 5120])) on device cuda:1
+   Quantizing: model.layers.23.mlp.up_proj.weight (torch.Size([17408, 5120])) on device cuda:1
+   Quantizing: model.layers.23.mlp.down_proj.weight (torch.Size([5120, 17408])) on device cuda:1
+
+⚡ Quantizing layer 25/64...
+   Layer 24 forward pass:   0%|          | 0/16 [00:00<?, ?it/s]   Layer 24 forward pass:   6%|▋         | 1/16 [00:00<00:07,  2.06it/s]   Layer 24 forward pass:  12%|█▎        | 2/16 [00:00<00:06,  2.06it/s]   Layer 24 forward pass:  19%|█▉        | 3/16 [00:01<00:06,  2.07it/s]   Layer 24 forward pass:  25%|██▌       | 4/16 [00:01<00:05,  2.07it/s]   Layer 24 forward pass:  31%|███▏      | 5/16 [00:02<00:05,  2.07it/s]   Layer 24 forward pass:  38%|███▊      | 6/16 [00:02<00:04,  2.07it/s]   Layer 24 forward pass:  44%|████▍     | 7/16 [00:03<00:04,  2.07it/s]   Layer 24 forward pass:  50%|█████     | 8/16 [00:03<00:03,  2.07it/s]   Layer 24 forward pass:  56%|█████▋    | 9/16 [00:04<00:03,  2.07it/s]   Layer 24 forward pass:  62%|██████▎   | 10/16 [00:04<00:02,  2.07it/s]   Layer 24 forward pass:  69%|██████▉   | 11/16 [00:05<00:02,  2.07it/s]   Layer 24 forward pass:  75%|███████▌  | 12/16 [00:05<00:01,  2.06it/s]   Layer 24 forward pass:  81%|████████▏ | 13/16 [00:06<00:01,  2.07it/s]   Layer 24 forward pass:  88%|████████▊ | 14/16 [00:06<00:00,  2.06it/s]   Layer 24 forward pass:  94%|█████████▍| 15/16 [00:07<00:00,  2.07it/s]   Layer 24 forward pass: 100%|██████████| 16/16 [00:07<00:00,  2.07it/s]   Layer 24 forward pass: 100%|██████████| 16/16 [00:07<00:00,  2.07it/s]
+   Quantizing: model.layers.24.linear_attn.out_proj.weight (torch.Size([5120, 6144])) on device cuda:0
+   Quantizing: model.layers.24.linear_attn.in_proj_qkv.weight (torch.Size([10240, 5120])) on device cuda:0
+   Quantizing: model.layers.24.linear_attn.in_proj_z.weight (torch.Size([6144, 5120])) on device cuda:0
+   Quantizing: model.layers.24.linear_attn.in_proj_b.weight (torch.Size([48, 5120])) on device cuda:0
+   Quantizing: model.layers.24.linear_attn.in_proj_a.weight (torch.Size([48, 5120])) on device cuda:0
+   Quantizing: model.layers.24.mlp.gate_proj.weight (torch.Size([17408, 5120])) on device cuda:1
+   Quantizing: model.layers.24.mlp.up_proj.weight (torch.Size([17408, 5120])) on device cuda:1
+   Quantizing: model.layers.24.mlp.down_proj.weight (torch.Size([5120, 17408])) on device cuda:1
+
+⚡ Quantizing layer 26/64...
+   Layer 25 forward pass:   0%|          | 0/16 [00:00<?, ?it/s]   Layer 25 forward pass:   6%|▋         | 1/16 [00:00<00:07,  2.08it/s]   Layer 25 forward pass:  12%|█▎        | 2/16 [00:00<00:06,  2.08it/s]   Layer 25 forward pass:  19%|█▉        | 3/16 [00:01<00:06,  2.07it/s]   Layer 25 forward pass:  25%|██▌       | 4/16 [00:01<00:05,  2.08it/s]   Layer 25 forward pass:  31%|███▏      | 5/16 [00:02<00:05,  2.07it/s]   Layer 25 forward pass:  38%|███▊      | 6/16 [00:02<00:04,  2.07it/s]   Layer 25 forward pass:  44%|████▍     | 7/16 [00:03<00:04,  2.07it/s]   Layer 25 forward pass:  50%|█████     | 8/16 [00:03<00:03,  2.07it/s]   Layer 25 forward pass:  56%|█████▋    | 9/16 [00:04<00:03,  2.07it/s]   Layer 25 forward pass:  62%|██████▎   | 10/16 [00:04<00:02,  2.07it/s]   Layer 25 forward pass:  69%|██████▉   | 11/16 [00:05<00:02,  2.07it/s]   Layer 25 forward pass:  75%|███████▌  | 12/16 [00:05<00:01,  2.06it/s]   Layer 25 forward pass:  81%|████████▏ | 13/16 [00:06<00:01,  2.06it/s]   Layer 25 forward pass:  88%|████████▊ | 14/16 [00:06<00:00,  2.06it/s]   Layer 25 forward pass:  94%|█████████▍| 15/16 [00:07<00:00,  2.06it/s]   Layer 25 forward pass: 100%|██████████| 16/16 [00:07<00:00,  2.06it/s]   Layer 25 forward pass: 100%|██████████| 16/16 [00:07<00:00,  2.07it/s]
+   Quantizing: model.layers.25.linear_attn.out_proj.weight (torch.Size([5120, 6144])) on device cuda:0
+   Quantizing: model.layers.25.linear_attn.in_proj_qkv.weight (torch.Size([10240, 5120])) on device cuda:0
+   Quantizing: model.layers.25.linear_attn.in_proj_z.weight (torch.Size([6144, 5120])) on device cuda:0
+   Quantizing: model.layers.25.linear_attn.in_proj_b.weight (torch.Size([48, 5120])) on device cuda:0
+   Quantizing: model.layers.25.linear_attn.in_proj_a.weight (torch.Size([48, 5120])) on device cuda:0
+   Quantizing: model.layers.25.mlp.gate_proj.weight (torch.Size([17408, 5120])) on device cuda:1
+   Quantizing: model.layers.25.mlp.up_proj.weight (torch.Size([17408, 5120])) on device cuda:1
+   Quantizing: model.layers.25.mlp.down_proj.weight (torch.Size([5120, 17408])) on device cuda:1
+
+⚡ Quantizing layer 27/64...
+   Layer 26 forward pass:   0%|          | 0/16 [00:00<?, ?it/s]   Layer 26 forward pass:   6%|▋         | 1/16 [00:00<00:07,  2.07it/s]   Layer 26 forward pass:  12%|█▎        | 2/16 [00:00<00:06,  2.07it/s]   Layer 26 forward pass:  19%|█▉        | 3/16 [00:01<00:06,  2.07it/s]   Layer 26 forward pass:  25%|██▌       | 4/16 [00:01<00:05,  2.07it/s]   Layer 26 forward pass:  31%|███▏      | 5/16 [00:02<00:05,  2.06it/s]   Layer 26 forward pass:  38%|███▊      | 6/16 [00:02<00:04,  2.06it/s]   Layer 26 forward pass:  44%|████▍     | 7/16 [00:03<00:04,  2.07it/s]   Layer 26 forward pass:  50%|█████     | 8/16 [00:03<00:03,  2.07it/s]   Layer 26 forward pass:  56%|█████▋    | 9/16 [00:04<00:03,  2.07it/s]   Layer 26 forward pass:  62%|██████▎   | 10/16 [00:04<00:02,  2.07it/s]   Layer 26 forward pass:  69%|██████▉   | 11/16 [00:05<00:02,  2.07it/s]   Layer 26 forward pass:  75%|███████▌  | 12/16 [00:05<00:01,  2.07it/s]   Layer 26 forward pass:  81%|████████▏ | 13/16 [00:06<00:01,  2.07it/s]   Layer 26 forward pass:  88%|████████▊ | 14/16 [00:06<00:00,  2.07it/s]   Layer 26 forward pass:  94%|█████████▍| 15/16 [00:07<00:00,  2.07it/s]   Layer 26 forward pass: 100%|██████████| 16/16 [00:07<00:00,  2.07it/s]   Layer 26 forward pass: 100%|██████████| 16/16 [00:07<00:00,  2.07it/s]
+   Quantizing: model.layers.26.linear_attn.out_proj.weight (torch.Size([5120, 6144])) on device cuda:0
+   Quantizing: model.layers.26.linear_attn.in_proj_qkv.weight (torch.Size([10240, 5120])) on device cuda:0
+   Quantizing: model.layers.26.linear_attn.in_proj_z.weight (torch.Size([6144, 5120])) on device cuda:0
+   Quantizing: model.layers.26.linear_attn.in_proj_b.weight (torch.Size([48, 5120])) on device cuda:0
+   Quantizing: model.layers.26.linear_attn.in_proj_a.weight (torch.Size([48, 5120])) on device cuda:0
+   Quantizing: model.layers.26.mlp.gate_proj.weight (torch.Size([17408, 5120])) on device cuda:1
+   Quantizing: model.layers.26.mlp.up_proj.weight (torch.Size([17408, 5120])) on device cuda:1
+   Quantizing: model.layers.26.mlp.down_proj.weight (torch.Size([5120, 17408])) on device cuda:1
+
+⚡ Quantizing layer 28/64...
+   Layer 27 forward pass:   0%|          | 0/16 [00:00<?, ?it/s]   Layer 27 forward pass:   6%|▋         | 1/16 [00:00<00:06,  2.38it/s]   Layer 27 forward pass:  12%|█▎        | 2/16 [00:00<00:05,  2.38it/s]   Layer 27 forward pass:  19%|█▉        | 3/16 [00:01<00:05,  2.38it/s]   Layer 27 forward pass:  25%|██▌       | 4/16 [00:01<00:05,  2.38it/s]   Layer 27 forward pass:  31%|███▏      | 5/16 [00:02<00:04,  2.37it/s]   Layer 27 forward pass:  38%|███▊      | 6/16 [00:02<00:04,  2.37it/s]   Layer 27 forward pass:  44%|████▍     | 7/16 [00:02<00:03,  2.36it/s]   Layer 27 forward pass:  50%|█████     | 8/16 [00:03<00:03,  2.36it/s]   Layer 27 forward pass:  56%|█████▋    | 9/16 [00:03<00:02,  2.37it/s]   Layer 27 forward pass:  62%|██████▎   | 10/16 [00:04<00:02,  2.37it/s]   Layer 27 forward pass:  69%|██████▉   | 11/16 [00:04<00:02,  2.37it/s]   Layer 27 forward pass:  75%|███████▌  | 12/16 [00:05<00:01,  2.37it/s]   Layer 27 forward pass:  81%|████████▏ | 13/16 [00:05<00:01,  2.37it/s]   Layer 27 forward pass:  88%|████████▊ | 14/16 [00:05<00:00,  2.37it/s]   Layer 27 forward pass:  94%|█████████▍| 15/16 [00:06<00:00,  2.37it/s]   Layer 27 forward pass: 100%|██████████| 16/16 [00:06<00:00,  2.36it/s]   Layer 27 forward pass: 100%|██████████| 16/16 [00:06<00:00,  2.37it/s]
+   Quantizing: model.layers.27.self_attn.q_proj.weight (torch.Size([12288, 5120])) on device cuda:0
+   Quantizing: model.layers.27.self_attn.k_proj.weight (torch.Size([1024, 5120])) on device cuda:0
+   Quantizing: model.layers.27.self_attn.v_proj.weight (torch.Size([1024, 5120])) on device cuda:0
+   Quantizing: model.layers.27.self_attn.o_proj.weight (torch.Size([5120, 6144])) on device cuda:0
+   Quantizing: model.layers.27.mlp.gate_proj.weight (torch.Size([17408, 5120])) on device cuda:1
+   Quantizing: model.layers.27.mlp.up_proj.weight (torch.Size([17408, 5120])) on device cuda:1
+   Quantizing: model.layers.27.mlp.down_proj.weight (torch.Size([5120, 17408])) on device cuda:1
+
+⚡ Quantizing layer 29/64...
+   Layer 28 forward pass:   0%|          | 0/16 [00:00<?, ?it/s]   Layer 28 forward pass:   6%|▋         | 1/16 [00:00<00:07,  2.08it/s]   Layer 28 forward pass:  12%|█▎        | 2/16 [00:00<00:06,  2.08it/s]   Layer 28 forward pass:  19%|█▉        | 3/16 [00:01<00:06,  2.08it/s]   Layer 28 forward pass:  25%|██▌       | 4/16 [00:01<00:05,  2.08it/s]   Layer 28 forward pass:  31%|███▏      | 5/16 [00:02<00:05,  2.07it/s]   Layer 28 forward pass:  38%|███▊      | 6/16 [00:02<00:04,  2.07it/s]   Layer 28 forward pass:  44%|████▍     | 7/16 [00:03<00:04,  2.06it/s]   Layer 28 forward pass:  50%|█████     | 8/16 [00:03<00:03,  2.07it/s]   Layer 28 forward pass:  56%|█████▋    | 9/16 [00:04<00:03,  2.07it/s]   Layer 28 forward pass:  62%|██████▎   | 10/16 [00:04<00:02,  2.06it/s]   Layer 28 forward pass:  69%|██████▉   | 11/16 [00:05<00:02,  2.06it/s]   Layer 28 forward pass:  75%|███████▌  | 12/16 [00:05<00:01,  2.07it/s]   Layer 28 forward pass:  81%|████████▏ | 13/16 [00:06<00:01,  2.07it/s]   Layer 28 forward pass:  88%|████████▊ | 14/16 [00:06<00:00,  2.07it/s]   Layer 28 forward pass:  94%|█████████▍| 15/16 [00:07<00:00,  2.07it/s]   Layer 28 forward pass: 100%|██████████| 16/16 [00:07<00:00,  2.06it/s]   Layer 28 forward pass: 100%|██████████| 16/16 [00:07<00:00,  2.07it/s]
+   Quantizing: model.layers.28.linear_attn.out_proj.weight (torch.Size([5120, 6144])) on device cuda:0
+   Quantizing: model.layers.28.linear_attn.in_proj_qkv.weight (torch.Size([10240, 5120])) on device cuda:0
+   Quantizing: model.layers.28.linear_attn.in_proj_z.weight (torch.Size([6144, 5120])) on device cuda:0
+   Quantizing: model.layers.28.linear_attn.in_proj_b.weight (torch.Size([48, 5120])) on device cuda:0
+   Quantizing: model.layers.28.linear_attn.in_proj_a.weight (torch.Size([48, 5120])) on device cuda:0
+   Quantizing: model.layers.28.mlp.gate_proj.weight (torch.Size([17408, 5120])) on device cuda:1
+   Quantizing: model.layers.28.mlp.up_proj.weight (torch.Size([17408, 5120])) on device cuda:1
+   Quantizing: model.layers.28.mlp.down_proj.weight (torch.Size([5120, 17408])) on device cuda:1
+
+⚡ Quantizing layer 30/64...
+   Layer 29 forward pass:   0%|          | 0/16 [00:00<?, ?it/s]   Layer 29 forward pass:   6%|▋         | 1/16 [00:00<00:07,  2.08it/s]   Layer 29 forward pass:  12%|█▎        | 2/16 [00:00<00:06,  2.08it/s]   Layer 29 forward pass:  19%|█▉        | 3/16 [00:01<00:06,  2.08it/s]   Layer 29 forward pass:  25%|██▌       | 4/16 [00:01<00:05,  2.08it/s]   Layer 29 forward pass:  31%|███▏      | 5/16 [00:02<00:05,  2.08it/s]   Layer 29 forward pass:  38%|███▊      | 6/16 [00:02<00:04,  2.07it/s]   Layer 29 forward pass:  44%|████▍     | 7/16 [00:03<00:04,  2.07it/s]   Layer 29 forward pass:  50%|█████     | 8/16 [00:03<00:03,  2.07it/s]   Layer 29 forward pass:  56%|█████▋    | 9/16 [00:04<00:03,  2.07it/s]   Layer 29 forward pass:  62%|██████▎   | 10/16 [00:04<00:02,  2.07it/s]   Layer 29 forward pass:  69%|██████▉   | 11/16 [00:05<00:02,  2.07it/s]   Layer 29 forward pass:  75%|███████▌  | 12/16 [00:05<00:01,  2.07it/s]   Layer 29 forward pass:  81%|████████▏ | 13/16 [00:06<00:01,  2.07it/s]   Layer 29 forward pass:  88%|████████▊ | 14/16 [00:06<00:00,  2.06it/s]   Layer 29 forward pass:  94%|█████████▍| 15/16 [00:07<00:00,  2.06it/s]   Layer 29 forward pass: 100%|██████████| 16/16 [00:07<00:00,  2.06it/s]   Layer 29 forward pass: 100%|██████████| 16/16 [00:07<00:00,  2.07it/s]
+   Quantizing: model.layers.29.linear_attn.out_proj.weight (torch.Size([5120, 6144])) on device cuda:0
+   Quantizing: model.layers.29.linear_attn.in_proj_qkv.weight (torch.Size([10240, 5120])) on device cuda:0
+   Quantizing: model.layers.29.linear_attn.in_proj_z.weight (torch.Size([6144, 5120])) on device cuda:0
+   Quantizing: model.layers.29.linear_attn.in_proj_b.weight (torch.Size([48, 5120])) on device cuda:0
+   Quantizing: model.layers.29.linear_attn.in_proj_a.weight (torch.Size([48, 5120])) on device cuda:0
+   Quantizing: model.layers.29.mlp.gate_proj.weight (torch.Size([17408, 5120])) on device cuda:1
+   Quantizing: model.layers.29.mlp.up_proj.weight (torch.Size([17408, 5120])) on device cuda:1
+   Quantizing: model.layers.29.mlp.down_proj.weight (torch.Size([5120, 17408])) on device cuda:1
+
+⚡ Quantizing layer 31/64...
+   Layer 30 forward pass:   0%|          | 0/16 [00:00<?, ?it/s]   Layer 30 forward pass:   6%|▋         | 1/16 [00:00<00:07,  2.07it/s]   Layer 30 forward pass:  12%|█▎        | 2/16 [00:00<00:06,  2.07it/s]   Layer 30 forward pass:  19%|█▉        | 3/16 [00:01<00:06,  2.08it/s]   Layer 30 forward pass:  25%|██▌       | 4/16 [00:01<00:05,  2.07it/s]   Layer 30 forward pass:  31%|███▏      | 5/16 [00:02<00:05,  2.07it/s]   Layer 30 forward pass:  38%|███▊      | 6/16 [00:02<00:04,  2.07it/s]   Layer 30 forward pass:  44%|████▍     | 7/16 [00:03<00:04,  2.06it/s]   Layer 30 forward pass:  50%|█████     | 8/16 [00:03<00:03,  2.07it/s]   Layer 30 forward pass:  56%|█████▋    | 9/16 [00:04<00:03,  2.07it/s]   Layer 30 forward pass:  62%|██████▎   | 10/16 [00:04<00:02,  2.07it/s]   Layer 30 forward pass:  69%|██████▉   | 11/16 [00:05<00:02,  2.07it/s]   Layer 30 forward pass:  75%|███████▌  | 12/16 [00:05<00:01,  2.07it/s]   Layer 30 forward pass:  81%|████████▏ | 13/16 [00:06<00:01,  2.06it/s]   Layer 30 forward pass:  88%|████████▊ | 14/16 [00:06<00:00,  2.06it/s]   Layer 30 forward pass:  94%|█████████▍| 15/16 [00:07<00:00,  2.07it/s]   Layer 30 forward pass: 100%|██████████| 16/16 [00:07<00:00,  2.06it/s]   Layer 30 forward pass: 100%|██████████| 16/16 [00:07<00:00,  2.07it/s]
+   Quantizing: model.layers.30.linear_attn.out_proj.weight (torch.Size([5120, 6144])) on device cuda:0
+   Quantizing: model.layers.30.linear_attn.in_proj_qkv.weight (torch.Size([10240, 5120])) on device cuda:0
+   Quantizing: model.layers.30.linear_attn.in_proj_z.weight (torch.Size([6144, 5120])) on device cuda:0
+   Quantizing: model.layers.30.linear_attn.in_proj_b.weight (torch.Size([48, 5120])) on device cuda:0
+   Quantizing: model.layers.30.linear_attn.in_proj_a.weight (torch.Size([48, 5120])) on device cuda:0
+   Quantizing: model.layers.30.mlp.gate_proj.weight (torch.Size([17408, 5120])) on device cuda:1
+   Quantizing: model.layers.30.mlp.up_proj.weight (torch.Size([17408, 5120])) on device cuda:1
+   Quantizing: model.layers.30.mlp.down_proj.weight (torch.Size([5120, 17408])) on device cuda:1
+
+⚡ Quantizing layer 32/64...
+   Layer 31 forward pass:   0%|          | 0/16 [00:00<?, ?it/s]   Layer 31 forward pass:   6%|▋         | 1/16 [00:00<00:06,  2.39it/s]   Layer 31 forward pass:  12%|█▎        | 2/16 [00:00<00:05,  2.38it/s]   Layer 31 forward pass:  19%|█▉        | 3/16 [00:01<00:05,  2.38it/s]   Layer 31 forward pass:  25%|██▌       | 4/16 [00:01<00:05,  2.37it/s]   Layer 31 forward pass:  31%|███▏      | 5/16 [00:02<00:04,  2.38it/s]   Layer 31 forward pass:  38%|███▊      | 6/16 [00:02<00:04,  2.37it/s]   Layer 31 forward pass:  44%|████▍     | 7/16 [00:02<00:03,  2.37it/s]   Layer 31 forward pass:  50%|█████     | 8/16 [00:03<00:03,  2.37it/s]   Layer 31 forward pass:  56%|█████▋    | 9/16 [00:03<00:02,  2.37it/s]   Layer 31 forward pass:  62%|██████▎   | 10/16 [00:04<00:02,  2.37it/s]   Layer 31 forward pass:  69%|██████▉   | 11/16 [00:04<00:02,  2.37it/s]   Layer 31 forward pass:  75%|███████▌  | 12/16 [00:05<00:01,  2.37it/s]   Layer 31 forward pass:  81%|████████▏ | 13/16 [00:05<00:01,  2.37it/s]   Layer 31 forward pass:  88%|████████▊ | 14/16 [00:05<00:00,  2.37it/s]   Layer 31 forward pass:  94%|█████████▍| 15/16 [00:06<00:00,  2.36it/s]   Layer 31 forward pass: 100%|██████████| 16/16 [00:06<00:00,  2.36it/s]   Layer 31 forward pass: 100%|██████████| 16/16 [00:06<00:00,  2.37it/s]
+   Quantizing: model.layers.31.self_attn.q_proj.weight (torch.Size([12288, 5120])) on device cuda:0
+   Quantizing: model.layers.31.self_attn.k_proj.weight (torch.Size([1024, 5120])) on device cuda:0
+   Quantizing: model.layers.31.self_attn.v_proj.weight (torch.Size([1024, 5120])) on device cuda:0
+   Quantizing: model.layers.31.self_attn.o_proj.weight (torch.Size([5120, 6144])) on device cuda:0
+   Quantizing: model.layers.31.mlp.gate_proj.weight (torch.Size([17408, 5120])) on device cuda:1
+   Quantizing: model.layers.31.mlp.up_proj.weight (torch.Size([17408, 5120])) on device cuda:1
+   Quantizing: model.layers.31.mlp.down_proj.weight (torch.Size([5120, 17408])) on device cuda:1
+
+⚡ Quantizing layer 33/64...
+   Layer 32 forward pass:   0%|          | 0/16 [00:00<?, ?it/s]   Layer 32 forward pass:   6%|▋         | 1/16 [00:00<00:07,  2.08it/s]   Layer 32 forward pass:  12%|█▎        | 2/16 [00:00<00:06,  2.07it/s]   Layer 32 forward pass:  19%|█▉        | 3/16 [00:01<00:06,  2.07it/s]   Layer 32 forward pass:  25%|██▌       | 4/16 [00:01<00:05,  2.07it/s]   Layer 32 forward pass:  31%|███▏      | 5/16 [00:02<00:05,  2.07it/s]   Layer 32 forward pass:  38%|███▊      | 6/16 [00:02<00:04,  2.07it/s]   Layer 32 forward pass:  44%|████▍     | 7/16 [00:03<00:04,  2.07it/s]   Layer 32 forward pass:  50%|█████     | 8/16 [00:03<00:03,  2.07it/s]   Layer 32 forward pass:  56%|█████▋    | 9/16 [00:04<00:03,  2.07it/s]   Layer 32 forward pass:  62%|██████▎   | 10/16 [00:04<00:02,  2.07it/s]   Layer 32 forward pass:  69%|██████▉   | 11/16 [00:05<00:02,  2.07it/s]   Layer 32 forward pass:  75%|███████▌  | 12/16 [00:05<00:01,  2.07it/s]   Layer 32 forward pass:  81%|████████▏ | 13/16 [00:06<00:01,  2.06it/s]   Layer 32 forward pass:  88%|████████▊ | 14/16 [00:06<00:00,  2.06it/s]   Layer 32 forward pass:  94%|█████████▍| 15/16 [00:07<00:00,  2.06it/s]   Layer 32 forward pass: 100%|██████████| 16/16 [00:07<00:00,  2.06it/s]   Layer 32 forward pass: 100%|██████████| 16/16 [00:07<00:00,  2.07it/s]
+   Quantizing: model.layers.32.linear_attn.out_proj.weight (torch.Size([5120, 6144])) on device cuda:0
+   Quantizing: model.layers.32.linear_attn.in_proj_qkv.weight (torch.Size([10240, 5120])) on device cuda:0
+   Quantizing: model.layers.32.linear_attn.in_proj_z.weight (torch.Size([6144, 5120])) on device cuda:0
+   Quantizing: model.layers.32.linear_attn.in_proj_b.weight (torch.Size([48, 5120])) on device cuda:0
+   Quantizing: model.layers.32.linear_attn.in_proj_a.weight (torch.Size([48, 5120])) on device cuda:0
+   Quantizing: model.layers.32.mlp.gate_proj.weight (torch.Size([17408, 5120])) on device cuda:1
+   Quantizing: model.layers.32.mlp.up_proj.weight (torch.Size([17408, 5120])) on device cuda:1
+   Quantizing: model.layers.32.mlp.down_proj.weight (torch.Size([5120, 17408])) on device cuda:1
+
+⚡ Quantizing layer 34/64...
+   Layer 33 forward pass:   0%|          | 0/16 [00:00<?, ?it/s]   Layer 33 forward pass:   6%|▋         | 1/16 [00:00<00:07,  2.09it/s]   Layer 33 forward pass:  12%|█▎        | 2/16 [00:00<00:06,  2.08it/s]   Layer 33 forward pass:  19%|█▉        | 3/16 [00:01<00:06,  2.08it/s]   Layer 33 forward pass:  25%|██▌       | 4/16 [00:01<00:05,  2.07it/s]   Layer 33 forward pass:  31%|███▏      | 5/16 [00:02<00:05,  2.07it/s]   Layer 33 forward pass:  38%|███▊      | 6/16 [00:02<00:04,  2.07it/s]   Layer 33 forward pass:  44%|████▍     | 7/16 [00:03<00:04,  2.07it/s]   Layer 33 forward pass:  50%|█████     | 8/16 [00:03<00:03,  2.07it/s]   Layer 33 forward pass:  56%|█████▋    | 9/16 [00:04<00:03,  2.07it/s]   Layer 33 forward pass:  62%|██████▎   | 10/16 [00:04<00:02,  2.07it/s]   Layer 33 forward pass:  69%|██████▉   | 11/16 [00:05<00:02,  2.07it/s]   Layer 33 forward pass:  75%|███████▌  | 12/16 [00:05<00:01,  2.07it/s]   Layer 33 forward pass:  81%|████████▏ | 13/16 [00:06<00:01,  2.07it/s]   Layer 33 forward pass:  88%|████████▊ | 14/16 [00:06<00:00,  2.06it/s]   Layer 33 forward pass:  94%|█████████▍| 15/16 [00:07<00:00,  2.07it/s]   Layer 33 forward pass: 100%|██████████| 16/16 [00:07<00:00,  2.06it/s]   Layer 33 forward pass: 100%|██████████| 16/16 [00:07<00:00,  2.07it/s]
+   Quantizing: model.layers.33.linear_attn.out_proj.weight (torch.Size([5120, 6144])) on device cuda:0
+   Quantizing: model.layers.33.linear_attn.in_proj_qkv.weight (torch.Size([10240, 5120])) on device cuda:0
+   Quantizing: model.layers.33.linear_attn.in_proj_z.weight (torch.Size([6144, 5120])) on device cuda:0
+   Quantizing: model.layers.33.linear_attn.in_proj_b.weight (torch.Size([48, 5120])) on device cuda:0
+   Quantizing: model.layers.33.linear_attn.in_proj_a.weight (torch.Size([48, 5120])) on device cuda:0
+   Quantizing: model.layers.33.mlp.gate_proj.weight (torch.Size([17408, 5120])) on device cuda:1
+   Quantizing: model.layers.33.mlp.up_proj.weight (torch.Size([17408, 5120])) on device cuda:1
+   Quantizing: model.layers.33.mlp.down_proj.weight (torch.Size([5120, 17408])) on device cuda:1
+
+⚡ Quantizing layer 35/64...
+   Layer 34 forward pass:   0%|          | 0/16 [00:00<?, ?it/s]   Layer 34 forward pass:   6%|▋         | 1/16 [00:00<00:07,  2.07it/s]   Layer 34 forward pass:  12%|█▎        | 2/16 [00:00<00:06,  2.06it/s]   Layer 34 forward pass:  19%|█▉        | 3/16 [00:01<00:06,  2.06it/s]   Layer 34 forward pass:  25%|██▌       | 4/16 [00:01<00:05,  2.06it/s]   Layer 34 forward pass:  31%|███▏      | 5/16 [00:02<00:05,  2.06it/s]   Layer 34 forward pass:  38%|███▊      | 6/16 [00:02<00:04,  2.07it/s]   Layer 34 forward pass:  44%|████▍     | 7/16 [00:03<00:04,  2.07it/s]   Layer 34 forward pass:  50%|█████     | 8/16 [00:03<00:03,  2.07it/s]   Layer 34 forward pass:  56%|█████▋    | 9/16 [00:04<00:03,  2.07it/s]   Layer 34 forward pass:  62%|██████▎   | 10/16 [00:04<00:02,  2.07it/s]   Layer 34 forward pass:  69%|██████▉   | 11/16 [00:05<00:02,  2.06it/s]   Layer 34 forward pass:  75%|███████▌  | 12/16 [00:05<00:01,  2.06it/s]   Layer 34 forward pass:  81%|████████▏ | 13/16 [00:06<00:01,  2.06it/s]   Layer 34 forward pass:  88%|████████▊ | 14/16 [00:06<00:00,  2.06it/s]   Layer 34 forward pass:  94%|█████████▍| 15/16 [00:07<00:00,  2.05it/s]   Layer 34 forward pass: 100%|██████████| 16/16 [00:07<00:00,  2.05it/s]   Layer 34 forward pass: 100%|██████████| 16/16 [00:07<00:00,  2.06it/s]
+   Quantizing: model.layers.34.linear_attn.out_proj.weight (torch.Size([5120, 6144])) on device cuda:0
+   Quantizing: model.layers.34.linear_attn.in_proj_qkv.weight (torch.Size([10240, 5120])) on device cuda:0
+   Quantizing: model.layers.34.linear_attn.in_proj_z.weight (torch.Size([6144, 5120])) on device cuda:0
+   Quantizing: model.layers.34.linear_attn.in_proj_b.weight (torch.Size([48, 5120])) on device cuda:0
+   Quantizing: model.layers.34.linear_attn.in_proj_a.weight (torch.Size([48, 5120])) on device cuda:0
+   Quantizing: model.layers.34.mlp.gate_proj.weight (torch.Size([17408, 5120])) on device cuda:1
+   Quantizing: model.layers.34.mlp.up_proj.weight (torch.Size([17408, 5120])) on device cuda:1
+   Quantizing: model.layers.34.mlp.down_proj.weight (torch.Size([5120, 17408])) on device cuda:1
+
+⚡ Quantizing layer 36/64...
+   Layer 35 forward pass:   0%|          | 0/16 [00:00<?, ?it/s]   Layer 35 forward pass:   6%|▋         | 1/16 [00:00<00:06,  2.39it/s]   Layer 35 forward pass:  12%|█▎        | 2/16 [00:00<00:05,  2.38it/s]   Layer 35 forward pass:  19%|█▉        | 3/16 [00:01<00:05,  2.38it/s]   Layer 35 forward pass:  25%|██▌       | 4/16 [00:01<00:05,  2.37it/s]   Layer 35 forward pass:  31%|███▏      | 5/16 [00:02<00:04,  2.37it/s]   Layer 35 forward pass:  38%|███▊      | 6/16 [00:02<00:04,  2.37it/s]   Layer 35 forward pass:  44%|████▍     | 7/16 [00:02<00:03,  2.37it/s]   Layer 35 forward pass:  50%|█████     | 8/16 [00:03<00:03,  2.37it/s]   Layer 35 forward pass:  56%|█████▋    | 9/16 [00:03<00:02,  2.37it/s]   Layer 35 forward pass:  62%|██████▎   | 10/16 [00:04<00:02,  2.37it/s]   Layer 35 forward pass:  69%|██████▉   | 11/16 [00:04<00:02,  2.36it/s]   Layer 35 forward pass:  75%|███████▌  | 12/16 [00:05<00:01,  2.36it/s]   Layer 35 forward pass:  81%|████████▏ | 13/16 [00:05<00:01,  2.36it/s]   Layer 35 forward pass:  88%|████████▊ | 14/16 [00:05<00:00,  2.36it/s]   Layer 35 forward pass:  94%|█████████▍| 15/16 [00:06<00:00,  2.36it/s]   Layer 35 forward pass: 100%|██████████| 16/16 [00:06<00:00,  2.36it/s]   Layer 35 forward pass: 100%|██████████| 16/16 [00:06<00:00,  2.37it/s]
+   Quantizing: model.layers.35.self_attn.q_proj.weight (torch.Size([12288, 5120])) on device cuda:0
+   Quantizing: model.layers.35.self_attn.k_proj.weight (torch.Size([1024, 5120])) on device cuda:0
+   Quantizing: model.layers.35.self_attn.v_proj.weight (torch.Size([1024, 5120])) on device cuda:0
+   Quantizing: model.layers.35.self_attn.o_proj.weight (torch.Size([5120, 6144])) on device cuda:0
+   Quantizing: model.layers.35.mlp.gate_proj.weight (torch.Size([17408, 5120])) on device cuda:1
+   Quantizing: model.layers.35.mlp.up_proj.weight (torch.Size([17408, 5120])) on device cuda:1
+   Quantizing: model.layers.35.mlp.down_proj.weight (torch.Size([5120, 17408])) on device cuda:1
+
+⚡ Quantizing layer 37/64...
+   Layer 36 forward pass:   0%|          | 0/16 [00:00<?, ?it/s]   Layer 36 forward pass:   6%|▋         | 1/16 [00:00<00:07,  2.07it/s]   Layer 36 forward pass:  12%|█▎        | 2/16 [00:00<00:06,  2.07it/s]   Layer 36 forward pass:  19%|█▉        | 3/16 [00:01<00:06,  2.07it/s]   Layer 36 forward pass:  25%|██▌       | 4/16 [00:01<00:05,  2.07it/s]   Layer 36 forward pass:  31%|███▏      | 5/16 [00:02<00:05,  2.07it/s]   Layer 36 forward pass:  38%|███▊      | 6/16 [00:02<00:04,  2.07it/s]   Layer 36 forward pass:  44%|████▍     | 7/16 [00:03<00:04,  2.06it/s]   Layer 36 forward pass:  50%|█████     | 8/16 [00:03<00:03,  2.07it/s]   Layer 36 forward pass:  56%|█████▋    | 9/16 [00:04<00:03,  2.06it/s]   Layer 36 forward pass:  62%|██████▎   | 10/16 [00:04<00:02,  2.06it/s]   Layer 36 forward pass:  69%|██████▉   | 11/16 [00:05<00:02,  2.06it/s]   Layer 36 forward pass:  75%|███████▌  | 12/16 [00:05<00:01,  2.06it/s]   Layer 36 forward pass:  81%|████████▏ | 13/16 [00:06<00:01,  2.06it/s]   Layer 36 forward pass:  88%|████████▊ | 14/16 [00:06<00:00,  2.06it/s]   Layer 36 forward pass:  94%|█████████▍| 15/16 [00:07<00:00,  2.06it/s]   Layer 36 forward pass: 100%|██████████| 16/16 [00:07<00:00,  2.06it/s]   Layer 36 forward pass: 100%|██████████| 16/16 [00:07<00:00,  2.06it/s]
+   Quantizing: model.layers.36.linear_attn.out_proj.weight (torch.Size([5120, 6144])) on device cuda:0
+   Quantizing: model.layers.36.linear_attn.in_proj_qkv.weight (torch.Size([10240, 5120])) on device cuda:0
+   Quantizing: model.layers.36.linear_attn.in_proj_z.weight (torch.Size([6144, 5120])) on device cuda:0
+   Quantizing: model.layers.36.linear_attn.in_proj_b.weight (torch.Size([48, 5120])) on device cuda:0
+   Quantizing: model.layers.36.linear_attn.in_proj_a.weight (torch.Size([48, 5120])) on device cuda:0
+   Quantizing: model.layers.36.mlp.gate_proj.weight (torch.Size([17408, 5120])) on device cuda:1
+   Quantizing: model.layers.36.mlp.up_proj.weight (torch.Size([17408, 5120])) on device cuda:1
+   Quantizing: model.layers.36.mlp.down_proj.weight (torch.Size([5120, 17408])) on device cuda:1
+
+⚡ Quantizing layer 38/64...
+   Layer 37 forward pass:   0%|          | 0/16 [00:00<?, ?it/s]   Layer 37 forward pass:   6%|▋         | 1/16 [00:00<00:07,  2.06it/s]   Layer 37 forward pass:  12%|█▎        | 2/16 [00:00<00:06,  2.07it/s]   Layer 37 forward pass:  19%|█▉        | 3/16 [00:01<00:06,  2.06it/s]   Layer 37 forward pass:  25%|██▌       | 4/16 [00:01<00:05,  2.06it/s]   Layer 37 forward pass:  31%|███▏      | 5/16 [00:02<00:05,  2.06it/s]   Layer 37 forward pass:  38%|███▊      | 6/16 [00:02<00:04,  2.07it/s]   Layer 37 forward pass:  44%|████▍     | 7/16 [00:03<00:05,  1.58it/s]   Layer 37 forward pass:  50%|█████     | 8/16 [00:04<00:04,  1.70it/s]   Layer 37 forward pass:  56%|█████▋    | 9/16 [00:04<00:03,  1.80it/s]   Layer 37 forward pass:  62%|██████▎   | 10/16 [00:05<00:03,  1.87it/s]   Layer 37 forward pass:  69%|██████▉   | 11/16 [00:05<00:02,  1.93it/s]   Layer 37 forward pass:  75%|███████▌  | 12/16 [00:06<00:02,  1.97it/s]   Layer 37 forward pass:  81%|████████▏ | 13/16 [00:06<00:01,  1.99it/s]   Layer 37 forward pass:  88%|████████▊ | 14/16 [00:07<00:00,  2.01it/s]   Layer 37 forward pass:  94%|█████████▍| 15/16 [00:07<00:00,  2.03it/s]   Layer 37 forward pass: 100%|██████████| 16/16 [00:08<00:00,  2.04it/s]   Layer 37 forward pass: 100%|██████████| 16/16 [00:08<00:00,  1.95it/s]
+   Quantizing: model.layers.37.linear_attn.out_proj.weight (torch.Size([5120, 6144])) on device cuda:0
+   Quantizing: model.layers.37.linear_attn.in_proj_qkv.weight (torch.Size([10240, 5120])) on device cuda:0
+   Quantizing: model.layers.37.linear_attn.in_proj_z.weight (torch.Size([6144, 5120])) on device cuda:0
+   Quantizing: model.layers.37.linear_attn.in_proj_b.weight (torch.Size([48, 5120])) on device cuda:0
+   Quantizing: model.layers.37.linear_attn.in_proj_a.weight (torch.Size([48, 5120])) on device cuda:0
+   Quantizing: model.layers.37.mlp.gate_proj.weight (torch.Size([17408, 5120])) on device cuda:1
+   Quantizing: model.layers.37.mlp.up_proj.weight (torch.Size([17408, 5120])) on device cuda:1
+   Quantizing: model.layers.37.mlp.down_proj.weight (torch.Size([5120, 17408])) on device cuda:1
+
+⚡ Quantizing layer 39/64...
+   Layer 38 forward pass:   0%|          | 0/16 [00:00<?, ?it/s]   Layer 38 forward pass:   6%|▋         | 1/16 [00:00<00:07,  2.06it/s]   Layer 38 forward pass:  12%|█▎        | 2/16 [00:00<00:06,  2.06it/s]   Layer 38 forward pass:  19%|█▉        | 3/16 [00:01<00:06,  2.06it/s]   Layer 38 forward pass:  25%|██▌       | 4/16 [00:01<00:05,  2.07it/s]   Layer 38 forward pass:  31%|███▏      | 5/16 [00:02<00:05,  2.07it/s]   Layer 38 forward pass:  38%|███▊      | 6/16 [00:02<00:04,  2.07it/s]   Layer 38 forward pass:  44%|████▍     | 7/16 [00:03<00:04,  2.06it/s]   Layer 38 forward pass:  50%|█████     | 8/16 [00:03<00:03,  2.06it/s]   Layer 38 forward pass:  56%|█████▋    | 9/16 [00:04<00:03,  2.06it/s]   Layer 38 forward pass:  62%|██████▎   | 10/16 [00:04<00:02,  2.06it/s]   Layer 38 forward pass:  69%|██████▉   | 11/16 [00:05<00:02,  2.06it/s]   Layer 38 forward pass:  75%|███████▌  | 12/16 [00:05<00:01,  2.06it/s]   Layer 38 forward pass:  81%|████████▏ | 13/16 [00:06<00:01,  2.06it/s]   Layer 38 forward pass:  88%|████████▊ | 14/16 [00:06<00:00,  2.06it/s]   Layer 38 forward pass:  94%|█████████▍| 15/16 [00:07<00:00,  2.06it/s]   Layer 38 forward pass: 100%|██████████| 16/16 [00:07<00:00,  2.06it/s]   Layer 38 forward pass: 100%|██████████| 16/16 [00:07<00:00,  2.06it/s]
+   Quantizing: model.layers.38.linear_attn.out_proj.weight (torch.Size([5120, 6144])) on device cuda:0
+   Quantizing: model.layers.38.linear_attn.in_proj_qkv.weight (torch.Size([10240, 5120])) on device cuda:0
+   Quantizing: model.layers.38.linear_attn.in_proj_z.weight (torch.Size([6144, 5120])) on device cuda:0
+   Quantizing: model.layers.38.linear_attn.in_proj_b.weight (torch.Size([48, 5120])) on device cuda:0
+   Quantizing: model.layers.38.linear_attn.in_proj_a.weight (torch.Size([48, 5120])) on device cuda:0
+   Quantizing: model.layers.38.mlp.gate_proj.weight (torch.Size([17408, 5120])) on device cuda:1
+   Quantizing: model.layers.38.mlp.up_proj.weight (torch.Size([17408, 5120])) on device cuda:1
+   Quantizing: model.layers.38.mlp.down_proj.weight (torch.Size([5120, 17408])) on device cuda:1
+
+⚡ Quantizing layer 40/64...
+   Layer 39 forward pass:   0%|          | 0/16 [00:00<?, ?it/s]   Layer 39 forward pass:   6%|▋         | 1/16 [00:00<00:06,  2.38it/s]   Layer 39 forward pass:  12%|█▎        | 2/16 [00:00<00:05,  2.37it/s]   Layer 39 forward pass:  19%|█▉        | 3/16 [00:01<00:05,  2.37it/s]   Layer 39 forward pass:  25%|██▌       | 4/16 [00:01<00:05,  2.37it/s]   Layer 39 forward pass:  31%|███▏      | 5/16 [00:02<00:04,  2.36it/s]   Layer 39 forward pass:  38%|███▊      | 6/16 [00:02<00:04,  2.36it/s]   Layer 39 forward pass:  44%|████▍     | 7/16 [00:02<00:03,  2.36it/s]   Layer 39 forward pass:  50%|█████     | 8/16 [00:03<00:03,  2.36it/s]   Layer 39 forward pass:  56%|█████▋    | 9/16 [00:03<00:02,  2.36it/s]   Layer 39 forward pass:  62%|██████▎   | 10/16 [00:04<00:02,  2.36it/s]   Layer 39 forward pass:  69%|██████▉   | 11/16 [00:04<00:02,  2.36it/s]   Layer 39 forward pass:  75%|███████▌  | 12/16 [00:05<00:01,  2.36it/s]   Layer 39 forward pass:  81%|████████▏ | 13/16 [00:05<00:01,  2.36it/s]   Layer 39 forward pass:  88%|████████▊ | 14/16 [00:05<00:00,  2.36it/s]   Layer 39 forward pass:  94%|█████████▍| 15/16 [00:06<00:00,  2.36it/s]   Layer 39 forward pass: 100%|██████████| 16/16 [00:06<00:00,  2.35it/s]   Layer 39 forward pass: 100%|██████████| 16/16 [00:06<00:00,  2.36it/s]
+   Quantizing: model.layers.39.self_attn.q_proj.weight (torch.Size([12288, 5120])) on device cuda:0
+   Quantizing: model.layers.39.self_attn.k_proj.weight (torch.Size([1024, 5120])) on device cuda:0
+   Quantizing: model.layers.39.self_attn.v_proj.weight (torch.Size([1024, 5120])) on device cuda:0
+   Quantizing: model.layers.39.self_attn.o_proj.weight (torch.Size([5120, 6144])) on device cuda:0
+   Quantizing: model.layers.39.mlp.gate_proj.weight (torch.Size([17408, 5120])) on device cuda:1
+   Quantizing: model.layers.39.mlp.up_proj.weight (torch.Size([17408, 5120])) on device cuda:1
+   Quantizing: model.layers.39.mlp.down_proj.weight (torch.Size([5120, 17408])) on device cuda:1
+
+⚡ Quantizing layer 41/64...
+   Layer 40 forward pass:   0%|          | 0/16 [00:00<?, ?it/s]   Layer 40 forward pass:   6%|▋         | 1/16 [00:00<00:07,  2.07it/s]   Layer 40 forward pass:  12%|█▎        | 2/16 [00:00<00:06,  2.07it/s]   Layer 40 forward pass:  19%|█▉        | 3/16 [00:01<00:06,  2.07it/s]   Layer 40 forward pass:  25%|██▌       | 4/16 [00:01<00:05,  2.07it/s]   Layer 40 forward pass:  31%|███▏      | 5/16 [00:02<00:05,  2.07it/s]   Layer 40 forward pass:  38%|███▊      | 6/16 [00:02<00:04,  2.07it/s]   Layer 40 forward pass:  44%|████▍     | 7/16 [00:03<00:04,  2.06it/s]   Layer 40 forward pass:  50%|█████     | 8/16 [00:03<00:03,  2.06it/s]   Layer 40 forward pass:  56%|█████▋    | 9/16 [00:04<00:03,  2.06it/s]   Layer 40 forward pass:  62%|██████▎   | 10/16 [00:04<00:02,  2.06it/s]   Layer 40 forward pass:  69%|██████▉   | 11/16 [00:05<00:02,  2.06it/s]   Layer 40 forward pass:  75%|███████▌  | 12/16 [00:05<00:01,  2.06it/s]   Layer 40 forward pass:  81%|████████▏ | 13/16 [00:06<00:01,  2.05it/s]   Layer 40 forward pass:  88%|████████▊ | 14/16 [00:06<00:00,  2.05it/s]   Layer 40 forward pass:  94%|█████████▍| 15/16 [00:07<00:00,  2.05it/s]   Layer 40 forward pass: 100%|██████████| 16/16 [00:07<00:00,  2.05it/s]   Layer 40 forward pass: 100%|██████████| 16/16 [00:07<00:00,  2.06it/s]
+   Quantizing: model.layers.40.linear_attn.out_proj.weight (torch.Size([5120, 6144])) on device cuda:0
+   Quantizing: model.layers.40.linear_attn.in_proj_qkv.weight (torch.Size([10240, 5120])) on device cuda:0
+   Quantizing: model.layers.40.linear_attn.in_proj_z.weight (torch.Size([6144, 5120])) on device cuda:0
+   Quantizing: model.layers.40.linear_attn.in_proj_b.weight (torch.Size([48, 5120])) on device cuda:0
+   Quantizing: model.layers.40.linear_attn.in_proj_a.weight (torch.Size([48, 5120])) on device cuda:0
+   Quantizing: model.layers.40.mlp.gate_proj.weight (torch.Size([17408, 5120])) on device cuda:1
+   Quantizing: model.layers.40.mlp.up_proj.weight (torch.Size([17408, 5120])) on device cuda:1
+   Quantizing: model.layers.40.mlp.down_proj.weight (torch.Size([5120, 17408])) on device cuda:1
+
+⚡ Quantizing layer 42/64...
+   Layer 41 forward pass:   0%|          | 0/16 [00:00<?, ?it/s]   Layer 41 forward pass:   6%|▋         | 1/16 [00:00<00:07,  2.07it/s]   Layer 41 forward pass:  12%|█▎        | 2/16 [00:00<00:06,  2.05it/s]   Layer 41 forward pass:  19%|█▉        | 3/16 [00:01<00:06,  2.06it/s]   Layer 41 forward pass:  25%|██▌       | 4/16 [00:01<00:05,  2.06it/s]   Layer 41 forward pass:  31%|███▏      | 5/16 [00:02<00:05,  2.06it/s]   Layer 41 forward pass:  38%|███▊      | 6/16 [00:02<00:04,  2.06it/s]   Layer 41 forward pass:  44%|████▍     | 7/16 [00:03<00:04,  2.06it/s]   Layer 41 forward pass:  50%|█████     | 8/16 [00:03<00:03,  2.06it/s]   Layer 41 forward pass:  56%|█████▋    | 9/16 [00:04<00:03,  2.06it/s]   Layer 41 forward pass:  62%|██████▎   | 10/16 [00:04<00:02,  2.06it/s]   Layer 41 forward pass:  69%|██████▉   | 11/16 [00:05<00:02,  2.06it/s]   Layer 41 forward pass:  75%|███████▌  | 12/16 [00:05<00:01,  2.06it/s]   Layer 41 forward pass:  81%|████████▏ | 13/16 [00:06<00:01,  2.06it/s]   Layer 41 forward pass:  88%|████████▊ | 14/16 [00:06<00:00,  2.06it/s]   Layer 41 forward pass:  94%|█████████▍| 15/16 [00:07<00:00,  2.06it/s]   Layer 41 forward pass: 100%|██████████| 16/16 [00:07<00:00,  2.05it/s]   Layer 41 forward pass: 100%|██████████| 16/16 [00:07<00:00,  2.06it/s]
+   Quantizing: model.layers.41.linear_attn.out_proj.weight (torch.Size([5120, 6144])) on device cuda:0
+   Quantizing: model.layers.41.linear_attn.in_proj_qkv.weight (torch.Size([10240, 5120])) on device cuda:0
+   Quantizing: model.layers.41.linear_attn.in_proj_z.weight (torch.Size([6144, 5120])) on device cuda:0
+   Quantizing: model.layers.41.linear_attn.in_proj_b.weight (torch.Size([48, 5120])) on device cuda:0
+   Quantizing: model.layers.41.linear_attn.in_proj_a.weight (torch.Size([48, 5120])) on device cuda:0
+   Quantizing: model.layers.41.mlp.gate_proj.weight (torch.Size([17408, 5120])) on device cuda:1
+   Quantizing: model.layers.41.mlp.up_proj.weight (torch.Size([17408, 5120])) on device cuda:1
+   Quantizing: model.layers.41.mlp.down_proj.weight (torch.Size([5120, 17408])) on device cuda:1
+
+⚡ Quantizing layer 43/64...
+   Layer 42 forward pass:   0%|          | 0/16 [00:00<?, ?it/s]   Layer 42 forward pass:   6%|▋         | 1/16 [00:00<00:07,  2.07it/s]   Layer 42 forward pass:  12%|█▎        | 2/16 [00:00<00:06,  2.06it/s]   Layer 42 forward pass:  19%|█▉        | 3/16 [00:01<00:06,  2.06it/s]   Layer 42 forward pass:  25%|██▌       | 4/16 [00:01<00:05,  2.06it/s]   Layer 42 forward pass:  31%|███▏      | 5/16 [00:02<00:05,  2.06it/s]   Layer 42 forward pass:  38%|███▊      | 6/16 [00:02<00:04,  2.06it/s]   Layer 42 forward pass:  44%|████▍     | 7/16 [00:03<00:04,  2.06it/s]   Layer 42 forward pass:  50%|█████     | 8/16 [00:03<00:03,  2.06it/s]   Layer 42 forward pass:  56%|█████▋    | 9/16 [00:04<00:03,  2.06it/s]   Layer 42 forward pass:  62%|██████▎   | 10/16 [00:04<00:02,  2.06it/s]   Layer 42 forward pass:  69%|██████▉   | 11/16 [00:05<00:02,  2.05it/s]   Layer 42 forward pass:  75%|███████▌  | 12/16 [00:05<00:01,  2.05it/s]   Layer 42 forward pass:  81%|████████▏ | 13/16 [00:06<00:01,  2.05it/s]   Layer 42 forward pass:  88%|████████▊ | 14/16 [00:06<00:00,  2.05it/s]   Layer 42 forward pass:  94%|█████████▍| 15/16 [00:07<00:00,  2.05it/s]   Layer 42 forward pass: 100%|██████████| 16/16 [00:07<00:00,  2.05it/s]   Layer 42 forward pass: 100%|██████████| 16/16 [00:07<00:00,  2.06it/s]
+   Quantizing: model.layers.42.linear_attn.out_proj.weight (torch.Size([5120, 6144])) on device cuda:0
+   Quantizing: model.layers.42.linear_attn.in_proj_qkv.weight (torch.Size([10240, 5120])) on device cuda:0
+   Quantizing: model.layers.42.linear_attn.in_proj_z.weight (torch.Size([6144, 5120])) on device cuda:0
+   Quantizing: model.layers.42.linear_attn.in_proj_b.weight (torch.Size([48, 5120])) on device cuda:0
+   Quantizing: model.layers.42.linear_attn.in_proj_a.weight (torch.Size([48, 5120])) on device cuda:0
+   Quantizing: model.layers.42.mlp.gate_proj.weight (torch.Size([17408, 5120])) on device cuda:1
+   Quantizing: model.layers.42.mlp.up_proj.weight (torch.Size([17408, 5120])) on device cuda:1
+   Quantizing: model.layers.42.mlp.down_proj.weight (torch.Size([5120, 17408])) on device cuda:1
+
+⚡ Quantizing layer 44/64...
+   Layer 43 forward pass:   0%|          | 0/16 [00:00<?, ?it/s]   Layer 43 forward pass:   6%|▋         | 1/16 [00:00<00:06,  2.34it/s]   Layer 43 forward pass:  12%|█▎        | 2/16 [00:00<00:05,  2.36it/s]   Layer 43 forward pass:  19%|█▉        | 3/16 [00:01<00:05,  2.36it/s]   Layer 43 forward pass:  25%|██▌       | 4/16 [00:01<00:05,  2.36it/s]   Layer 43 forward pass:  31%|███▏      | 5/16 [00:02<00:04,  2.37it/s]   Layer 43 forward pass:  38%|███▊      | 6/16 [00:02<00:04,  2.37it/s]   Layer 43 forward pass:  44%|████▍     | 7/16 [00:02<00:03,  2.36it/s]   Layer 43 forward pass:  50%|█████     | 8/16 [00:03<00:03,  2.36it/s]   Layer 43 forward pass:  56%|█████▋    | 9/16 [00:03<00:02,  2.36it/s]   Layer 43 forward pass:  62%|██████▎   | 10/16 [00:04<00:02,  2.35it/s]   Layer 43 forward pass:  69%|██████▉   | 11/16 [00:04<00:02,  2.35it/s]   Layer 43 forward pass:  75%|███████▌  | 12/16 [00:05<00:01,  2.35it/s]   Layer 43 forward pass:  81%|████████▏ | 13/16 [00:05<00:01,  2.35it/s]   Layer 43 forward pass:  88%|████████▊ | 14/16 [00:05<00:00,  2.35it/s]   Layer 43 forward pass:  94%|█████████▍| 15/16 [00:06<00:00,  2.35it/s]   Layer 43 forward pass: 100%|██████████| 16/16 [00:06<00:00,  2.35it/s]   Layer 43 forward pass: 100%|██████████| 16/16 [00:06<00:00,  2.36it/s]
+   Quantizing: model.layers.43.self_attn.q_proj.weight (torch.Size([12288, 5120])) on device cuda:0
+   Quantizing: model.layers.43.self_attn.k_proj.weight (torch.Size([1024, 5120])) on device cuda:0
+   Quantizing: model.layers.43.self_attn.v_proj.weight (torch.Size([1024, 5120])) on device cuda:0
+   Quantizing: model.layers.43.self_attn.o_proj.weight (torch.Size([5120, 6144])) on device cuda:0
+   Quantizing: model.layers.43.mlp.gate_proj.weight (torch.Size([17408, 5120])) on device cuda:1
+   Quantizing: model.layers.43.mlp.up_proj.weight (torch.Size([17408, 5120])) on device cuda:1
+   Quantizing: model.layers.43.mlp.down_proj.weight (torch.Size([5120, 17408])) on device cuda:1
+
+⚡ Quantizing layer 45/64...
+   Layer 44 forward pass:   0%|          | 0/16 [00:00<?, ?it/s]   Layer 44 forward pass:   6%|▋         | 1/16 [00:00<00:07,  2.06it/s]   Layer 44 forward pass:  12%|█▎        | 2/16 [00:00<00:06,  2.06it/s]   Layer 44 forward pass:  19%|█▉        | 3/16 [00:01<00:06,  2.07it/s]   Layer 44 forward pass:  25%|██▌       | 4/16 [00:01<00:05,  2.07it/s]   Layer 44 forward pass:  31%|███▏      | 5/16 [00:02<00:05,  2.07it/s]   Layer 44 forward pass:  38%|███▊      | 6/16 [00:02<00:04,  2.06it/s]   Layer 44 forward pass:  44%|████▍     | 7/16 [00:03<00:04,  2.06it/s]   Layer 44 forward pass:  50%|█████     | 8/16 [00:03<00:03,  2.06it/s]   Layer 44 forward pass:  56%|█████▋    | 9/16 [00:04<00:03,  2.06it/s]   Layer 44 forward pass:  62%|██████▎   | 10/16 [00:04<00:02,  2.06it/s]   Layer 44 forward pass:  69%|██████▉   | 11/16 [00:05<00:02,  2.06it/s]   Layer 44 forward pass:  75%|███████▌  | 12/16 [00:05<00:01,  2.06it/s]   Layer 44 forward pass:  81%|████████▏ | 13/16 [00:06<00:01,  2.05it/s]   Layer 44 forward pass:  88%|████████▊ | 14/16 [00:06<00:00,  2.05it/s]   Layer 44 forward pass:  94%|█████████▍| 15/16 [00:07<00:00,  2.06it/s]   Layer 44 forward pass: 100%|██████████| 16/16 [00:07<00:00,  2.06it/s]   Layer 44 forward pass: 100%|██████████| 16/16 [00:07<00:00,  2.06it/s]
+   Quantizing: model.layers.44.linear_attn.out_proj.weight (torch.Size([5120, 6144])) on device cuda:0
+   Quantizing: model.layers.44.linear_attn.in_proj_qkv.weight (torch.Size([10240, 5120])) on device cuda:0
+   Quantizing: model.layers.44.linear_attn.in_proj_z.weight (torch.Size([6144, 5120])) on device cuda:0
+   Quantizing: model.layers.44.linear_attn.in_proj_b.weight (torch.Size([48, 5120])) on device cuda:0
+   Quantizing: model.layers.44.linear_attn.in_proj_a.weight (torch.Size([48, 5120])) on device cuda:0
+   Quantizing: model.layers.44.mlp.gate_proj.weight (torch.Size([17408, 5120])) on device cuda:1
+   Quantizing: model.layers.44.mlp.up_proj.weight (torch.Size([17408, 5120])) on device cuda:1
+   Quantizing: model.layers.44.mlp.down_proj.weight (torch.Size([5120, 17408])) on device cuda:1
+
+⚡ Quantizing layer 46/64...
+   Layer 45 forward pass:   0%|          | 0/16 [00:00<?, ?it/s]   Layer 45 forward pass:   6%|▋         | 1/16 [00:00<00:07,  2.07it/s]   Layer 45 forward pass:  12%|█▎        | 2/16 [00:00<00:06,  2.07it/s]   Layer 45 forward pass:  19%|█▉        | 3/16 [00:01<00:06,  2.06it/s]   Layer 45 forward pass:  25%|██▌       | 4/16 [00:01<00:05,  2.06it/s]   Layer 45 forward pass:  31%|███▏      | 5/16 [00:02<00:05,  2.06it/s]   Layer 45 forward pass:  38%|███▊      | 6/16 [00:02<00:04,  2.06it/s]   Layer 45 forward pass:  44%|████▍     | 7/16 [00:03<00:04,  2.06it/s]   Layer 45 forward pass:  50%|█████     | 8/16 [00:03<00:03,  2.06it/s]   Layer 45 forward pass:  56%|█████▋    | 9/16 [00:04<00:03,  2.06it/s]   Layer 45 forward pass:  62%|██████▎   | 10/16 [00:04<00:02,  2.06it/s]   Layer 45 forward pass:  69%|██████▉   | 11/16 [00:05<00:02,  2.06it/s]   Layer 45 forward pass:  75%|███████▌  | 12/16 [00:05<00:01,  2.06it/s]   Layer 45 forward pass:  81%|████████▏ | 13/16 [00:06<00:01,  2.06it/s]   Layer 45 forward pass:  88%|████████▊ | 14/16 [00:06<00:00,  2.06it/s]   Layer 45 forward pass:  94%|█████████▍| 15/16 [00:07<00:00,  2.06it/s]   Layer 45 forward pass: 100%|██████████| 16/16 [00:07<00:00,  2.06it/s]   Layer 45 forward pass: 100%|██████████| 16/16 [00:07<00:00,  2.06it/s]
+   Quantizing: model.layers.45.linear_attn.out_proj.weight (torch.Size([5120, 6144])) on device cuda:0
+   Quantizing: model.layers.45.linear_attn.in_proj_qkv.weight (torch.Size([10240, 5120])) on device cuda:0
+   Quantizing: model.layers.45.linear_attn.in_proj_z.weight (torch.Size([6144, 5120])) on device cuda:0
+   Quantizing: model.layers.45.linear_attn.in_proj_b.weight (torch.Size([48, 5120])) on device cuda:0
+   Quantizing: model.layers.45.linear_attn.in_proj_a.weight (torch.Size([48, 5120])) on device cuda:0
+   Quantizing: model.layers.45.mlp.gate_proj.weight (torch.Size([17408, 5120])) on device cuda:1
+   Quantizing: model.layers.45.mlp.up_proj.weight (torch.Size([17408, 5120])) on device cuda:1
+   Quantizing: model.layers.45.mlp.down_proj.weight (torch.Size([5120, 17408])) on device cuda:1
+
+⚡ Quantizing layer 47/64...
+   Layer 46 forward pass:   0%|          | 0/16 [00:00<?, ?it/s]   Layer 46 forward pass:   6%|▋         | 1/16 [00:00<00:07,  2.08it/s]   Layer 46 forward pass:  12%|█▎        | 2/16 [00:00<00:06,  2.07it/s]   Layer 46 forward pass:  19%|█▉        | 3/16 [00:01<00:06,  2.07it/s]   Layer 46 forward pass:  25%|██▌       | 4/16 [00:01<00:05,  2.06it/s]   Layer 46 forward pass:  31%|███▏      | 5/16 [00:02<00:05,  2.07it/s]   Layer 46 forward pass:  38%|███▊      | 6/16 [00:02<00:04,  2.06it/s]   Layer 46 forward pass:  44%|████▍     | 7/16 [00:03<00:04,  2.06it/s]   Layer 46 forward pass:  50%|█████     | 8/16 [00:04<00:05,  1.47it/s]   Layer 46 forward pass:  56%|█████▋    | 9/16 [00:04<00:04,  1.61it/s]   Layer 46 forward pass:  62%|██████▎   | 10/16 [00:05<00:03,  1.73it/s]   Layer 46 forward pass:  69%|██████▉   | 11/16 [00:05<00:02,  1.82it/s]   Layer 46 forward pass:  75%|███████▌  | 12/16 [00:06<00:02,  1.88it/s]   Layer 46 forward pass:  81%|████████▏ | 13/16 [00:06<00:01,  1.93it/s]   Layer 46 forward pass:  88%|████████▊ | 14/16 [00:07<00:01,  1.97it/s]   Layer 46 forward pass:  94%|█████████▍| 15/16 [00:07<00:00,  1.99it/s]   Layer 46 forward pass: 100%|██████████| 16/16 [00:08<00:00,  2.01it/s]   Layer 46 forward pass: 100%|██████████| 16/16 [00:08<00:00,  1.91it/s]
+   Quantizing: model.layers.46.linear_attn.out_proj.weight (torch.Size([5120, 6144])) on device cuda:0
+   Quantizing: model.layers.46.linear_attn.in_proj_qkv.weight (torch.Size([10240, 5120])) on device cuda:0
+   Quantizing: model.layers.46.linear_attn.in_proj_z.weight (torch.Size([6144, 5120])) on device cuda:0
+   Quantizing: model.layers.46.linear_attn.in_proj_b.weight (torch.Size([48, 5120])) on device cuda:0
+   Quantizing: model.layers.46.linear_attn.in_proj_a.weight (torch.Size([48, 5120])) on device cuda:0
+   Quantizing: model.layers.46.mlp.gate_proj.weight (torch.Size([17408, 5120])) on device cuda:1
+   Quantizing: model.layers.46.mlp.up_proj.weight (torch.Size([17408, 5120])) on device cuda:1
+   Quantizing: model.layers.46.mlp.down_proj.weight (torch.Size([5120, 17408])) on device cuda:1
+
+⚡ Quantizing layer 48/64...
+   Layer 47 forward pass:   0%|          | 0/16 [00:00<?, ?it/s]   Layer 47 forward pass:   6%|▋         | 1/16 [00:00<00:06,  2.37it/s]   Layer 47 forward pass:  12%|█▎        | 2/16 [00:00<00:05,  2.37it/s]   Layer 47 forward pass:  19%|█▉        | 3/16 [00:01<00:05,  2.37it/s]   Layer 47 forward pass:  25%|██▌       | 4/16 [00:01<00:05,  2.37it/s]   Layer 47 forward pass:  31%|███▏      | 5/16 [00:02<00:04,  2.37it/s]   Layer 47 forward pass:  38%|███▊      | 6/16 [00:02<00:04,  2.37it/s]   Layer 47 forward pass:  44%|████▍     | 7/16 [00:02<00:03,  2.36it/s]   Layer 47 forward pass:  50%|█████     | 8/16 [00:03<00:03,  2.36it/s]   Layer 47 forward pass:  56%|█████▋    | 9/16 [00:03<00:02,  2.36it/s]   Layer 47 forward pass:  62%|██████▎   | 10/16 [00:04<00:02,  2.36it/s]   Layer 47 forward pass:  69%|██████▉   | 11/16 [00:04<00:02,  2.36it/s]   Layer 47 forward pass:  75%|███████▌  | 12/16 [00:05<00:01,  2.36it/s]   Layer 47 forward pass:  81%|████████▏ | 13/16 [00:05<00:01,  2.35it/s]   Layer 47 forward pass:  88%|████████▊ | 14/16 [00:05<00:00,  2.35it/s]   Layer 47 forward pass:  94%|█████████▍| 15/16 [00:06<00:00,  2.34it/s]   Layer 47 forward pass: 100%|██████████| 16/16 [00:06<00:00,  2.34it/s]   Layer 47 forward pass: 100%|██████████| 16/16 [00:06<00:00,  2.36it/s]
+   Quantizing: model.layers.47.self_attn.q_proj.weight (torch.Size([12288, 5120])) on device cuda:0
+   Quantizing: model.layers.47.self_attn.k_proj.weight (torch.Size([1024, 5120])) on device cuda:0
+   Quantizing: model.layers.47.self_attn.v_proj.weight (torch.Size([1024, 5120])) on device cuda:0
+   Quantizing: model.layers.47.self_attn.o_proj.weight (torch.Size([5120, 6144])) on device cuda:0
+   Quantizing: model.layers.47.mlp.gate_proj.weight (torch.Size([17408, 5120])) on device cuda:1
+   Quantizing: model.layers.47.mlp.up_proj.weight (torch.Size([17408, 5120])) on device cuda:1
+   Quantizing: model.layers.47.mlp.down_proj.weight (torch.Size([5120, 17408])) on device cuda:1
+
+⚡ Quantizing layer 49/64...
+   Layer 48 forward pass:   0%|          | 0/16 [00:00<?, ?it/s]   Layer 48 forward pass:   6%|▋         | 1/16 [00:00<00:07,  2.07it/s]   Layer 48 forward pass:  12%|█▎        | 2/16 [00:00<00:06,  2.07it/s]   Layer 48 forward pass:  19%|█▉        | 3/16 [00:01<00:06,  2.06it/s]   Layer 48 forward pass:  25%|██▌       | 4/16 [00:01<00:05,  2.06it/s]   Layer 48 forward pass:  31%|███▏      | 5/16 [00:02<00:05,  2.06it/s]   Layer 48 forward pass:  38%|███▊      | 6/16 [00:02<00:04,  2.06it/s]   Layer 48 forward pass:  44%|████▍     | 7/16 [00:03<00:04,  2.06it/s]   Layer 48 forward pass:  50%|█████     | 8/16 [00:03<00:03,  2.05it/s]   Layer 48 forward pass:  56%|█████▋    | 9/16 [00:04<00:03,  2.05it/s]   Layer 48 forward pass:  62%|██████▎   | 10/16 [00:04<00:02,  2.05it/s]   Layer 48 forward pass:  69%|██████▉   | 11/16 [00:05<00:02,  2.05it/s]   Layer 48 forward pass:  75%|███████▌  | 12/16 [00:05<00:01,  2.05it/s]   Layer 48 forward pass:  81%|████████▏ | 13/16 [00:06<00:01,  2.05it/s]   Layer 48 forward pass:  88%|████████▊ | 14/16 [00:06<00:00,  2.05it/s]   Layer 48 forward pass:  94%|█████████▍| 15/16 [00:07<00:00,  2.05it/s]   Layer 48 forward pass: 100%|██████████| 16/16 [00:07<00:00,  2.05it/s]   Layer 48 forward pass: 100%|██████████| 16/16 [00:07<00:00,  2.05it/s]
+   Quantizing: model.layers.48.linear_attn.out_proj.weight (torch.Size([5120, 6144])) on device cuda:0
+   Quantizing: model.layers.48.linear_attn.in_proj_qkv.weight (torch.Size([10240, 5120])) on device cuda:0
+   Quantizing: model.layers.48.linear_attn.in_proj_z.weight (torch.Size([6144, 5120])) on device cuda:0
+   Quantizing: model.layers.48.linear_attn.in_proj_b.weight (torch.Size([48, 5120])) on device cuda:0
+   Quantizing: model.layers.48.linear_attn.in_proj_a.weight (torch.Size([48, 5120])) on device cuda:0
+   Quantizing: model.layers.48.mlp.gate_proj.weight (torch.Size([17408, 5120])) on device cuda:1
+   Quantizing: model.layers.48.mlp.up_proj.weight (torch.Size([17408, 5120])) on device cuda:1
+   Quantizing: model.layers.48.mlp.down_proj.weight (torch.Size([5120, 17408])) on device cuda:1
+
+⚡ Quantizing layer 50/64...
+   Layer 49 forward pass:   0%|          | 0/16 [00:00<?, ?it/s]   Layer 49 forward pass:   6%|▋         | 1/16 [00:00<00:07,  2.08it/s]   Layer 49 forward pass:  12%|█▎        | 2/16 [00:00<00:06,  2.07it/s]   Layer 49 forward pass:  19%|█▉        | 3/16 [00:01<00:06,  2.07it/s]   Layer 49 forward pass:  25%|██▌       | 4/16 [00:01<00:05,  2.07it/s]   Layer 49 forward pass:  31%|███▏      | 5/16 [00:02<00:05,  2.07it/s]   Layer 49 forward pass:  38%|███▊      | 6/16 [00:02<00:04,  2.06it/s]   Layer 49 forward pass:  44%|████▍     | 7/16 [00:03<00:04,  2.06it/s]   Layer 49 forward pass:  50%|█████     | 8/16 [00:03<00:03,  2.06it/s]   Layer 49 forward pass:  56%|█████▋    | 9/16 [00:04<00:03,  2.06it/s]   Layer 49 forward pass:  62%|██████▎   | 10/16 [00:04<00:02,  2.06it/s]   Layer 49 forward pass:  69%|██████▉   | 11/16 [00:05<00:02,  2.06it/s]   Layer 49 forward pass:  75%|███████▌  | 12/16 [00:05<00:01,  2.05it/s]   Layer 49 forward pass:  81%|████████▏ | 13/16 [00:06<00:01,  2.05it/s]   Layer 49 forward pass:  88%|████████▊ | 14/16 [00:06<00:00,  2.05it/s]   Layer 49 forward pass:  94%|█████████▍| 15/16 [00:07<00:00,  2.05it/s]   Layer 49 forward pass: 100%|██████████| 16/16 [00:07<00:00,  2.05it/s]   Layer 49 forward pass: 100%|██████████| 16/16 [00:07<00:00,  2.06it/s]
+   Quantizing: model.layers.49.linear_attn.out_proj.weight (torch.Size([5120, 6144])) on device cuda:0
+   Quantizing: model.layers.49.linear_attn.in_proj_qkv.weight (torch.Size([10240, 5120])) on device cuda:0
+   Quantizing: model.layers.49.linear_attn.in_proj_z.weight (torch.Size([6144, 5120])) on device cuda:0
+   Quantizing: model.layers.49.linear_attn.in_proj_b.weight (torch.Size([48, 5120])) on device cuda:0
+   Quantizing: model.layers.49.linear_attn.in_proj_a.weight (torch.Size([48, 5120])) on device cuda:0
+   Quantizing: model.layers.49.mlp.gate_proj.weight (torch.Size([17408, 5120])) on device cuda:1
+   Quantizing: model.layers.49.mlp.up_proj.weight (torch.Size([17408, 5120])) on device cuda:1
+   Quantizing: model.layers.49.mlp.down_proj.weight (torch.Size([5120, 17408])) on device cuda:1
+
+⚡ Quantizing layer 51/64...
+   Layer 50 forward pass:   0%|          | 0/16 [00:00<?, ?it/s]   Layer 50 forward pass:   6%|▋         | 1/16 [00:00<00:07,  2.07it/s]   Layer 50 forward pass:  12%|█▎        | 2/16 [00:00<00:06,  2.07it/s]   Layer 50 forward pass:  19%|█▉        | 3/16 [00:01<00:06,  2.07it/s]   Layer 50 forward pass:  25%|██▌       | 4/16 [00:01<00:05,  2.07it/s]   Layer 50 forward pass:  31%|███▏      | 5/16 [00:02<00:05,  2.06it/s]   Layer 50 forward pass:  38%|███▊      | 6/16 [00:02<00:04,  2.06it/s]   Layer 50 forward pass:  44%|████▍     | 7/16 [00:03<00:04,  2.06it/s]   Layer 50 forward pass:  50%|█████     | 8/16 [00:03<00:03,  2.06it/s]   Layer 50 forward pass:  56%|█████▋    | 9/16 [00:04<00:03,  2.06it/s]   Layer 50 forward pass:  62%|██████▎   | 10/16 [00:04<00:02,  2.06it/s]   Layer 50 forward pass:  69%|██████▉   | 11/16 [00:05<00:02,  2.06it/s]   Layer 50 forward pass:  75%|███████▌  | 12/16 [00:05<00:01,  2.06it/s]   Layer 50 forward pass:  81%|████████▏ | 13/16 [00:06<00:01,  2.05it/s]   Layer 50 forward pass:  88%|████████▊ | 14/16 [00:06<00:00,  2.05it/s]   Layer 50 forward pass:  94%|█████████▍| 15/16 [00:07<00:00,  2.05it/s]   Layer 50 forward pass: 100%|██████████| 16/16 [00:07<00:00,  2.05it/s]   Layer 50 forward pass: 100%|██████████| 16/16 [00:07<00:00,  2.06it/s]
+   Quantizing: model.layers.50.linear_attn.out_proj.weight (torch.Size([5120, 6144])) on device cuda:0
+   Quantizing: model.layers.50.linear_attn.in_proj_qkv.weight (torch.Size([10240, 5120])) on device cuda:0
+   Quantizing: model.layers.50.linear_attn.in_proj_z.weight (torch.Size([6144, 5120])) on device cuda:0
+   Quantizing: model.layers.50.linear_attn.in_proj_b.weight (torch.Size([48, 5120])) on device cuda:0
+   Quantizing: model.layers.50.linear_attn.in_proj_a.weight (torch.Size([48, 5120])) on device cuda:0
+   Quantizing: model.layers.50.mlp.gate_proj.weight (torch.Size([17408, 5120])) on device cuda:1
+   Quantizing: model.layers.50.mlp.up_proj.weight (torch.Size([17408, 5120])) on device cuda:1
+   Quantizing: model.layers.50.mlp.down_proj.weight (torch.Size([5120, 17408])) on device cuda:1
+
+⚡ Quantizing layer 52/64...
+   Layer 51 forward pass:   0%|          | 0/16 [00:00<?, ?it/s]   Layer 51 forward pass:   6%|▋         | 1/16 [00:00<00:06,  2.37it/s]   Layer 51 forward pass:  12%|█▎        | 2/16 [00:00<00:05,  2.37it/s]   Layer 51 forward pass:  19%|█▉        | 3/16 [00:01<00:05,  2.37it/s]   Layer 51 forward pass:  25%|██▌       | 4/16 [00:01<00:05,  2.36it/s]   Layer 51 forward pass:  31%|███▏      | 5/16 [00:02<00:04,  2.36it/s]   Layer 51 forward pass:  38%|███▊      | 6/16 [00:02<00:04,  2.36it/s]   Layer 51 forward pass:  44%|████▍     | 7/16 [00:02<00:03,  2.36it/s]   Layer 51 forward pass:  50%|█████     | 8/16 [00:03<00:03,  2.36it/s]   Layer 51 forward pass:  56%|█████▋    | 9/16 [00:03<00:02,  2.36it/s]   Layer 51 forward pass:  62%|██████▎   | 10/16 [00:04<00:02,  2.35it/s]   Layer 51 forward pass:  69%|██████▉   | 11/16 [00:04<00:02,  2.35it/s]   Layer 51 forward pass:  75%|███████▌  | 12/16 [00:05<00:01,  2.35it/s]   Layer 51 forward pass:  81%|████████▏ | 13/16 [00:05<00:01,  2.35it/s]   Layer 51 forward pass:  88%|████████▊ | 14/16 [00:05<00:00,  2.35it/s]   Layer 51 forward pass:  94%|█████████▍| 15/16 [00:06<00:00,  2.34it/s]   Layer 51 forward pass: 100%|██████████| 16/16 [00:06<00:00,  2.34it/s]   Layer 51 forward pass: 100%|██████████| 16/16 [00:06<00:00,  2.35it/s]
+   Quantizing: model.layers.51.self_attn.q_proj.weight (torch.Size([12288, 5120])) on device cuda:0
+   Quantizing: model.layers.51.self_attn.k_proj.weight (torch.Size([1024, 5120])) on device cuda:0
+   Quantizing: model.layers.51.self_attn.v_proj.weight (torch.Size([1024, 5120])) on device cuda:0
+   Quantizing: model.layers.51.self_attn.o_proj.weight (torch.Size([5120, 6144])) on device cuda:0
+   Quantizing: model.layers.51.mlp.gate_proj.weight (torch.Size([17408, 5120])) on device cuda:1
+   Quantizing: model.layers.51.mlp.up_proj.weight (torch.Size([17408, 5120])) on device cuda:1
+   Quantizing: model.layers.51.mlp.down_proj.weight (torch.Size([5120, 17408])) on device cuda:1
+
+⚡ Quantizing layer 53/64...
+   Layer 52 forward pass:   0%|          | 0/16 [00:00<?, ?it/s]   Layer 52 forward pass:   6%|▋         | 1/16 [00:00<00:07,  2.07it/s]   Layer 52 forward pass:  12%|█▎        | 2/16 [00:00<00:06,  2.07it/s]   Layer 52 forward pass:  19%|█▉        | 3/16 [00:01<00:06,  2.07it/s]   Layer 52 forward pass:  25%|██▌       | 4/16 [00:01<00:05,  2.07it/s]   Layer 52 forward pass:  31%|███▏      | 5/16 [00:02<00:05,  2.06it/s]   Layer 52 forward pass:  38%|███▊      | 6/16 [00:02<00:04,  2.06it/s]   Layer 52 forward pass:  44%|████▍     | 7/16 [00:03<00:04,  2.06it/s]   Layer 52 forward pass:  50%|█████     | 8/16 [00:03<00:03,  2.05it/s]   Layer 52 forward pass:  56%|█████▋    | 9/16 [00:04<00:03,  2.06it/s]   Layer 52 forward pass:  62%|██████▎   | 10/16 [00:04<00:02,  2.06it/s]   Layer 52 forward pass:  69%|██████▉   | 11/16 [00:05<00:02,  2.06it/s]   Layer 52 forward pass:  75%|███████▌  | 12/16 [00:05<00:01,  2.06it/s]   Layer 52 forward pass:  81%|████████▏ | 13/16 [00:06<00:01,  2.06it/s]   Layer 52 forward pass:  88%|████████▊ | 14/16 [00:06<00:00,  2.06it/s]   Layer 52 forward pass:  94%|█████████▍| 15/16 [00:07<00:00,  2.05it/s]   Layer 52 forward pass: 100%|██████████| 16/16 [00:07<00:00,  2.05it/s]   Layer 52 forward pass: 100%|██████████| 16/16 [00:07<00:00,  2.06it/s]
+   Quantizing: model.layers.52.linear_attn.out_proj.weight (torch.Size([5120, 6144])) on device cuda:0
+   Quantizing: model.layers.52.linear_attn.in_proj_qkv.weight (torch.Size([10240, 5120])) on device cuda:0
+   Quantizing: model.layers.52.linear_attn.in_proj_z.weight (torch.Size([6144, 5120])) on device cuda:0
+   Quantizing: model.layers.52.linear_attn.in_proj_b.weight (torch.Size([48, 5120])) on device cuda:0
+   Quantizing: model.layers.52.linear_attn.in_proj_a.weight (torch.Size([48, 5120])) on device cuda:0
+   Quantizing: model.layers.52.mlp.gate_proj.weight (torch.Size([17408, 5120])) on device cuda:1
+   Quantizing: model.layers.52.mlp.up_proj.weight (torch.Size([17408, 5120])) on device cuda:1
+   Quantizing: model.layers.52.mlp.down_proj.weight (torch.Size([5120, 17408])) on device cuda:1
+
+⚡ Quantizing layer 54/64...
+   Layer 53 forward pass:   0%|          | 0/16 [00:00<?, ?it/s]   Layer 53 forward pass:   6%|▋         | 1/16 [00:00<00:07,  2.07it/s]   Layer 53 forward pass:  12%|█▎        | 2/16 [00:00<00:06,  2.07it/s]   Layer 53 forward pass:  19%|█▉        | 3/16 [00:01<00:06,  2.06it/s]   Layer 53 forward pass:  25%|██▌       | 4/16 [00:01<00:05,  2.07it/s]   Layer 53 forward pass:  31%|███▏      | 5/16 [00:02<00:05,  2.07it/s]   Layer 53 forward pass:  38%|███▊      | 6/16 [00:02<00:04,  2.06it/s]   Layer 53 forward pass:  44%|████▍     | 7/16 [00:03<00:04,  2.06it/s]   Layer 53 forward pass:  50%|█████     | 8/16 [00:03<00:03,  2.06it/s]   Layer 53 forward pass:  56%|█████▋    | 9/16 [00:04<00:03,  2.05it/s]   Layer 53 forward pass:  62%|██████▎   | 10/16 [00:04<00:02,  2.05it/s]   Layer 53 forward pass:  69%|██████▉   | 11/16 [00:05<00:02,  2.05it/s]   Layer 53 forward pass:  75%|███████▌  | 12/16 [00:05<00:01,  2.05it/s]   Layer 53 forward pass:  81%|████████▏ | 13/16 [00:06<00:01,  2.05it/s]   Layer 53 forward pass:  88%|████████▊ | 14/16 [00:06<00:00,  2.05it/s]   Layer 53 forward pass:  94%|█████████▍| 15/16 [00:07<00:00,  2.05it/s]   Layer 53 forward pass: 100%|██████████| 16/16 [00:07<00:00,  2.05it/s]   Layer 53 forward pass: 100%|██████████| 16/16 [00:07<00:00,  2.06it/s]
+   Quantizing: model.layers.53.linear_attn.out_proj.weight (torch.Size([5120, 6144])) on device cuda:0
+   Quantizing: model.layers.53.linear_attn.in_proj_qkv.weight (torch.Size([10240, 5120])) on device cuda:0
+   Quantizing: model.layers.53.linear_attn.in_proj_z.weight (torch.Size([6144, 5120])) on device cuda:0
+   Quantizing: model.layers.53.linear_attn.in_proj_b.weight (torch.Size([48, 5120])) on device cuda:0
+   Quantizing: model.layers.53.linear_attn.in_proj_a.weight (torch.Size([48, 5120])) on device cuda:0
+   Quantizing: model.layers.53.mlp.gate_proj.weight (torch.Size([17408, 5120])) on device cuda:1
+   Quantizing: model.layers.53.mlp.up_proj.weight (torch.Size([17408, 5120])) on device cuda:1
+   Quantizing: model.layers.53.mlp.down_proj.weight (torch.Size([5120, 17408])) on device cuda:1
+
+⚡ Quantizing layer 55/64...
+   Layer 54 forward pass:   0%|          | 0/16 [00:00<?, ?it/s]   Layer 54 forward pass:   6%|▋         | 1/16 [00:00<00:07,  2.08it/s]   Layer 54 forward pass:  12%|█▎        | 2/16 [00:00<00:06,  2.07it/s]   Layer 54 forward pass:  19%|█▉        | 3/16 [00:01<00:06,  2.07it/s]   Layer 54 forward pass:  25%|██▌       | 4/16 [00:01<00:05,  2.06it/s]   Layer 54 forward pass:  31%|███▏      | 5/16 [00:02<00:05,  2.07it/s]   Layer 54 forward pass:  38%|███▊      | 6/16 [00:02<00:04,  2.07it/s]   Layer 54 forward pass:  44%|████▍     | 7/16 [00:03<00:04,  2.06it/s]   Layer 54 forward pass:  50%|█████     | 8/16 [00:03<00:03,  2.06it/s]   Layer 54 forward pass:  56%|█████▋    | 9/16 [00:04<00:03,  2.05it/s]   Layer 54 forward pass:  62%|██████▎   | 10/16 [00:04<00:02,  2.05it/s]   Layer 54 forward pass:  69%|██████▉   | 11/16 [00:05<00:02,  2.05it/s]   Layer 54 forward pass:  75%|███████▌  | 12/16 [00:05<00:01,  2.05it/s]   Layer 54 forward pass:  81%|████████▏ | 13/16 [00:06<00:01,  2.05it/s]   Layer 54 forward pass:  88%|████████▊ | 14/16 [00:06<00:00,  2.05it/s]   Layer 54 forward pass:  94%|█████████▍| 15/16 [00:07<00:00,  2.05it/s]   Layer 54 forward pass: 100%|██████████| 16/16 [00:07<00:00,  2.05it/s]   Layer 54 forward pass: 100%|██████████| 16/16 [00:07<00:00,  2.06it/s]
+   Quantizing: model.layers.54.linear_attn.out_proj.weight (torch.Size([5120, 6144])) on device cuda:0
+   Quantizing: model.layers.54.linear_attn.in_proj_qkv.weight (torch.Size([10240, 5120])) on device cuda:0
+   Quantizing: model.layers.54.linear_attn.in_proj_z.weight (torch.Size([6144, 5120])) on device cuda:0
+   Quantizing: model.layers.54.linear_attn.in_proj_b.weight (torch.Size([48, 5120])) on device cuda:0
+   Quantizing: model.layers.54.linear_attn.in_proj_a.weight (torch.Size([48, 5120])) on device cuda:0
+   Quantizing: model.layers.54.mlp.gate_proj.weight (torch.Size([17408, 5120])) on device cuda:1
+   Quantizing: model.layers.54.mlp.up_proj.weight (torch.Size([17408, 5120])) on device cuda:1
+   Quantizing: model.layers.54.mlp.down_proj.weight (torch.Size([5120, 17408])) on device cuda:1
+
+⚡ Quantizing layer 56/64...
+   Layer 55 forward pass:   0%|          | 0/16 [00:00<?, ?it/s]   Layer 55 forward pass:   6%|▋         | 1/16 [00:00<00:06,  2.38it/s]   Layer 55 forward pass:  12%|█▎        | 2/16 [00:00<00:05,  2.38it/s]   Layer 55 forward pass:  19%|█▉        | 3/16 [00:01<00:05,  2.37it/s]   Layer 55 forward pass:  25%|██▌       | 4/16 [00:01<00:05,  2.38it/s]   Layer 55 forward pass:  31%|███▏      | 5/16 [00:02<00:04,  2.36it/s]   Layer 55 forward pass:  38%|███▊      | 6/16 [00:02<00:04,  2.36it/s]   Layer 55 forward pass:  44%|████▍     | 7/16 [00:02<00:03,  2.36it/s]   Layer 55 forward pass:  50%|█████     | 8/16 [00:03<00:03,  2.36it/s]   Layer 55 forward pass:  56%|█████▋    | 9/16 [00:03<00:02,  2.36it/s]   Layer 55 forward pass:  62%|██████▎   | 10/16 [00:04<00:02,  2.36it/s]   Layer 55 forward pass:  69%|██████▉   | 11/16 [00:04<00:02,  2.36it/s]   Layer 55 forward pass:  75%|███████▌  | 12/16 [00:05<00:01,  2.36it/s]   Layer 55 forward pass:  81%|████████▏ | 13/16 [00:05<00:01,  2.36it/s]   Layer 55 forward pass:  88%|████████▊ | 14/16 [00:05<00:00,  2.35it/s]   Layer 55 forward pass:  94%|█████████▍| 15/16 [00:06<00:00,  2.35it/s]   Layer 55 forward pass: 100%|██████████| 16/16 [00:06<00:00,  2.35it/s]   Layer 55 forward pass: 100%|██████████| 16/16 [00:06<00:00,  2.36it/s]
+   Quantizing: model.layers.55.self_attn.q_proj.weight (torch.Size([12288, 5120])) on device cuda:0
+   Quantizing: model.layers.55.self_attn.k_proj.weight (torch.Size([1024, 5120])) on device cuda:0
+   Quantizing: model.layers.55.self_attn.v_proj.weight (torch.Size([1024, 5120])) on device cuda:0
+   Quantizing: model.layers.55.self_attn.o_proj.weight (torch.Size([5120, 6144])) on device cuda:0
+   Quantizing: model.layers.55.mlp.gate_proj.weight (torch.Size([17408, 5120])) on device cuda:1
+   Quantizing: model.layers.55.mlp.up_proj.weight (torch.Size([17408, 5120])) on device cuda:1
+   Quantizing: model.layers.55.mlp.down_proj.weight (torch.Size([5120, 17408])) on device cuda:1
+
+⚡ Quantizing layer 57/64...
+   Layer 56 forward pass:   0%|          | 0/16 [00:00<?, ?it/s]   Layer 56 forward pass:   6%|▋         | 1/16 [00:00<00:07,  2.08it/s]   Layer 56 forward pass:  12%|█▎        | 2/16 [00:00<00:06,  2.08it/s]   Layer 56 forward pass:  19%|█▉        | 3/16 [00:01<00:06,  2.08it/s]   Layer 56 forward pass:  25%|██▌       | 4/16 [00:01<00:05,  2.07it/s]   Layer 56 forward pass:  31%|███▏      | 5/16 [00:02<00:05,  2.07it/s]   Layer 56 forward pass:  38%|███▊      | 6/16 [00:02<00:04,  2.07it/s]   Layer 56 forward pass:  44%|████▍     | 7/16 [00:03<00:04,  2.07it/s]   Layer 56 forward pass:  50%|█████     | 8/16 [00:03<00:03,  2.06it/s]   Layer 56 forward pass:  56%|█████▋    | 9/16 [00:04<00:03,  2.06it/s]   Layer 56 forward pass:  62%|██████▎   | 10/16 [00:04<00:02,  2.06it/s]   Layer 56 forward pass:  69%|██████▉   | 11/16 [00:05<00:02,  2.05it/s]   Layer 56 forward pass:  75%|███████▌  | 12/16 [00:05<00:01,  2.06it/s]   Layer 56 forward pass:  81%|████████▏ | 13/16 [00:06<00:01,  2.05it/s]   Layer 56 forward pass:  88%|████████▊ | 14/16 [00:06<00:00,  2.05it/s]   Layer 56 forward pass:  94%|█████████▍| 15/16 [00:07<00:00,  2.05it/s]   Layer 56 forward pass: 100%|██████████| 16/16 [00:07<00:00,  2.05it/s]   Layer 56 forward pass: 100%|██████████| 16/16 [00:07<00:00,  2.06it/s]
+   Quantizing: model.layers.56.linear_attn.out_proj.weight (torch.Size([5120, 6144])) on device cuda:0
+   Quantizing: model.layers.56.linear_attn.in_proj_qkv.weight (torch.Size([10240, 5120])) on device cuda:0
+   Quantizing: model.layers.56.linear_attn.in_proj_z.weight (torch.Size([6144, 5120])) on device cuda:0
+   Quantizing: model.layers.56.linear_attn.in_proj_b.weight (torch.Size([48, 5120])) on device cuda:0
+   Quantizing: model.layers.56.linear_attn.in_proj_a.weight (torch.Size([48, 5120])) on device cuda:0
+   Quantizing: model.layers.56.mlp.gate_proj.weight (torch.Size([17408, 5120])) on device cuda:1
+   Quantizing: model.layers.56.mlp.up_proj.weight (torch.Size([17408, 5120])) on device cuda:1
+   Quantizing: model.layers.56.mlp.down_proj.weight (torch.Size([5120, 17408])) on device cuda:1
+
+⚡ Quantizing layer 58/64...
+   Layer 57 forward pass:   0%|          | 0/16 [00:00<?, ?it/s]   Layer 57 forward pass:   6%|▋         | 1/16 [00:00<00:07,  2.07it/s]   Layer 57 forward pass:  12%|█▎        | 2/16 [00:00<00:06,  2.07it/s]   Layer 57 forward pass:  19%|█▉        | 3/16 [00:01<00:06,  2.07it/s]   Layer 57 forward pass:  25%|██▌       | 4/16 [00:01<00:05,  2.07it/s]   Layer 57 forward pass:  31%|███▏      | 5/16 [00:02<00:05,  2.07it/s]   Layer 57 forward pass:  38%|███▊      | 6/16 [00:02<00:04,  2.07it/s]   Layer 57 forward pass:  44%|████▍     | 7/16 [00:03<00:04,  2.06it/s]   Layer 57 forward pass:  50%|█████     | 8/16 [00:03<00:03,  2.06it/s]   Layer 57 forward pass:  56%|█████▋    | 9/16 [00:04<00:03,  2.06it/s]   Layer 57 forward pass:  62%|██████▎   | 10/16 [00:04<00:02,  2.06it/s]   Layer 57 forward pass:  69%|██████▉   | 11/16 [00:05<00:02,  2.05it/s]   Layer 57 forward pass:  75%|███████▌  | 12/16 [00:05<00:01,  2.05it/s]   Layer 57 forward pass:  81%|████████▏ | 13/16 [00:06<00:01,  2.05it/s]   Layer 57 forward pass:  88%|████████▊ | 14/16 [00:06<00:00,  2.05it/s]   Layer 57 forward pass:  94%|█████████▍| 15/16 [00:07<00:00,  2.05it/s]   Layer 57 forward pass: 100%|██████████| 16/16 [00:07<00:00,  2.04it/s]   Layer 57 forward pass: 100%|██████████| 16/16 [00:07<00:00,  2.06it/s]
+   Quantizing: model.layers.57.linear_attn.out_proj.weight (torch.Size([5120, 6144])) on device cuda:0
+   Quantizing: model.layers.57.linear_attn.in_proj_qkv.weight (torch.Size([10240, 5120])) on device cuda:0
+   Quantizing: model.layers.57.linear_attn.in_proj_z.weight (torch.Size([6144, 5120])) on device cuda:0
+   Quantizing: model.layers.57.linear_attn.in_proj_b.weight (torch.Size([48, 5120])) on device cuda:0
+   Quantizing: model.layers.57.linear_attn.in_proj_a.weight (torch.Size([48, 5120])) on device cuda:0
+   Quantizing: model.layers.57.mlp.gate_proj.weight (torch.Size([17408, 5120])) on device cuda:1
+   Quantizing: model.layers.57.mlp.up_proj.weight (torch.Size([17408, 5120])) on device cuda:1
+   Quantizing: model.layers.57.mlp.down_proj.weight (torch.Size([5120, 17408])) on device cuda:1
+
+⚡ Quantizing layer 59/64...
+   Layer 58 forward pass:   0%|          | 0/16 [00:00<?, ?it/s]   Layer 58 forward pass:   6%|▋         | 1/16 [00:00<00:07,  2.07it/s]   Layer 58 forward pass:  12%|█▎        | 2/16 [00:00<00:06,  2.07it/s]   Layer 58 forward pass:  19%|█▉        | 3/16 [00:01<00:06,  2.07it/s]   Layer 58 forward pass:  25%|██▌       | 4/16 [00:01<00:05,  2.07it/s]   Layer 58 forward pass:  31%|███▏      | 5/16 [00:02<00:05,  2.07it/s]   Layer 58 forward pass:  38%|███▊      | 6/16 [00:02<00:04,  2.06it/s]   Layer 58 forward pass:  44%|████▍     | 7/16 [00:03<00:04,  2.06it/s]   Layer 58 forward pass:  50%|█████     | 8/16 [00:03<00:03,  2.06it/s]   Layer 58 forward pass:  56%|█████▋    | 9/16 [00:04<00:03,  2.06it/s]   Layer 58 forward pass:  62%|██████▎   | 10/16 [00:04<00:02,  2.06it/s]   Layer 58 forward pass:  69%|██████▉   | 11/16 [00:05<00:02,  2.06it/s]   Layer 58 forward pass:  75%|███████▌  | 12/16 [00:05<00:01,  2.05it/s]   Layer 58 forward pass:  81%|████████▏ | 13/16 [00:06<00:01,  2.05it/s]   Layer 58 forward pass:  88%|████████▊ | 14/16 [00:06<00:00,  2.05it/s]   Layer 58 forward pass:  94%|█████████▍| 15/16 [00:07<00:00,  2.05it/s]   Layer 58 forward pass: 100%|██████████| 16/16 [00:07<00:00,  2.05it/s]   Layer 58 forward pass: 100%|██████████| 16/16 [00:07<00:00,  2.06it/s]
+   Quantizing: model.layers.58.linear_attn.out_proj.weight (torch.Size([5120, 6144])) on device cuda:0
+   Quantizing: model.layers.58.linear_attn.in_proj_qkv.weight (torch.Size([10240, 5120])) on device cuda:0
+   Quantizing: model.layers.58.linear_attn.in_proj_z.weight (torch.Size([6144, 5120])) on device cuda:0
+   Quantizing: model.layers.58.linear_attn.in_proj_b.weight (torch.Size([48, 5120])) on device cuda:0
+   Quantizing: model.layers.58.linear_attn.in_proj_a.weight (torch.Size([48, 5120])) on device cuda:0
+   Quantizing: model.layers.58.mlp.gate_proj.weight (torch.Size([17408, 5120])) on device cuda:1
+   Quantizing: model.layers.58.mlp.up_proj.weight (torch.Size([17408, 5120])) on device cuda:1
+   Quantizing: model.layers.58.mlp.down_proj.weight (torch.Size([5120, 17408])) on device cuda:1
+
+⚡ Quantizing layer 60/64...
+   Layer 59 forward pass:   0%|          | 0/16 [00:00<?, ?it/s]   Layer 59 forward pass:   6%|▋         | 1/16 [00:00<00:06,  2.38it/s]   Layer 59 forward pass:  12%|█▎        | 2/16 [00:00<00:05,  2.38it/s]   Layer 59 forward pass:  19%|█▉        | 3/16 [00:01<00:05,  2.37it/s]   Layer 59 forward pass:  25%|██▌       | 4/16 [00:01<00:05,  2.37it/s]   Layer 59 forward pass:  31%|███▏      | 5/16 [00:02<00:04,  2.37it/s]   Layer 59 forward pass:  38%|███▊      | 6/16 [00:02<00:04,  2.36it/s]   Layer 59 forward pass:  44%|████▍     | 7/16 [00:02<00:03,  2.37it/s]   Layer 59 forward pass:  50%|█████     | 8/16 [00:03<00:03,  2.37it/s]   Layer 59 forward pass:  56%|█████▋    | 9/16 [00:03<00:02,  2.36it/s]   Layer 59 forward pass:  62%|██████▎   | 10/16 [00:04<00:02,  2.36it/s]   Layer 59 forward pass:  69%|██████▉   | 11/16 [00:04<00:02,  2.35it/s]   Layer 59 forward pass:  75%|███████▌  | 12/16 [00:05<00:01,  2.35it/s]   Layer 59 forward pass:  81%|████████▏ | 13/16 [00:05<00:01,  2.35it/s]   Layer 59 forward pass:  88%|████████▊ | 14/16 [00:05<00:00,  2.35it/s]   Layer 59 forward pass:  94%|█████████▍| 15/16 [00:06<00:00,  2.35it/s]   Layer 59 forward pass: 100%|██████████| 16/16 [00:06<00:00,  2.35it/s]   Layer 59 forward pass: 100%|██████████| 16/16 [00:06<00:00,  2.36it/s]
+   Quantizing: model.layers.59.self_attn.q_proj.weight (torch.Size([12288, 5120])) on device cuda:0
+   Quantizing: model.layers.59.self_attn.k_proj.weight (torch.Size([1024, 5120])) on device cuda:0
+   Quantizing: model.layers.59.self_attn.v_proj.weight (torch.Size([1024, 5120])) on device cuda:0
+   Quantizing: model.layers.59.self_attn.o_proj.weight (torch.Size([5120, 6144])) on device cuda:0
+   Quantizing: model.layers.59.mlp.gate_proj.weight (torch.Size([17408, 5120])) on device cuda:1
+   Quantizing: model.layers.59.mlp.up_proj.weight (torch.Size([17408, 5120])) on device cuda:1
+   Quantizing: model.layers.59.mlp.down_proj.weight (torch.Size([5120, 17408])) on device cuda:1
+
+⚡ Quantizing layer 61/64...
+   Layer 60 forward pass:   0%|          | 0/16 [00:00<?, ?it/s]   Layer 60 forward pass:   6%|▋         | 1/16 [00:00<00:07,  2.07it/s]   Layer 60 forward pass:  12%|█▎        | 2/16 [00:00<00:06,  2.07it/s]   Layer 60 forward pass:  19%|█▉        | 3/16 [00:01<00:06,  2.07it/s]   Layer 60 forward pass:  25%|██▌       | 4/16 [00:01<00:05,  2.07it/s]   Layer 60 forward pass:  31%|███▏      | 5/16 [00:02<00:05,  2.07it/s]   Layer 60 forward pass:  38%|███▊      | 6/16 [00:02<00:04,  2.06it/s]   Layer 60 forward pass:  44%|████▍     | 7/16 [00:03<00:04,  2.06it/s]   Layer 60 forward pass:  50%|█████     | 8/16 [00:03<00:03,  2.06it/s]   Layer 60 forward pass:  56%|█████▋    | 9/16 [00:04<00:03,  2.06it/s]   Layer 60 forward pass:  62%|██████▎   | 10/16 [00:04<00:02,  2.06it/s]   Layer 60 forward pass:  69%|██████▉   | 11/16 [00:05<00:02,  2.06it/s]   Layer 60 forward pass:  75%|███████▌  | 12/16 [00:05<00:01,  2.06it/s]   Layer 60 forward pass:  81%|████████▏ | 13/16 [00:06<00:01,  2.06it/s]   Layer 60 forward pass:  88%|████████▊ | 14/16 [00:06<00:00,  2.05it/s]   Layer 60 forward pass:  94%|█████████▍| 15/16 [00:07<00:00,  2.05it/s]   Layer 60 forward pass: 100%|██████████| 16/16 [00:07<00:00,  2.05it/s]   Layer 60 forward pass: 100%|██████████| 16/16 [00:07<00:00,  2.06it/s]
+   Quantizing: model.layers.60.linear_attn.out_proj.weight (torch.Size([5120, 6144])) on device cuda:0
+   Quantizing: model.layers.60.linear_attn.in_proj_qkv.weight (torch.Size([10240, 5120])) on device cuda:0
+   Quantizing: model.layers.60.linear_attn.in_proj_z.weight (torch.Size([6144, 5120])) on device cuda:0
+   Quantizing: model.layers.60.linear_attn.in_proj_b.weight (torch.Size([48, 5120])) on device cuda:0
+   Quantizing: model.layers.60.linear_attn.in_proj_a.weight (torch.Size([48, 5120])) on device cuda:0
+   Quantizing: model.layers.60.mlp.gate_proj.weight (torch.Size([17408, 5120])) on device cuda:1
+   Quantizing: model.layers.60.mlp.up_proj.weight (torch.Size([17408, 5120])) on device cuda:1
+   Quantizing: model.layers.60.mlp.down_proj.weight (torch.Size([5120, 17408])) on device cuda:1
+
+⚡ Quantizing layer 62/64...
+   Layer 61 forward pass:   0%|          | 0/16 [00:00<?, ?it/s]   Layer 61 forward pass:   6%|▋         | 1/16 [00:00<00:07,  2.07it/s]   Layer 61 forward pass:  12%|█▎        | 2/16 [00:00<00:06,  2.07it/s]   Layer 61 forward pass:  19%|█▉        | 3/16 [00:01<00:06,  2.07it/s]   Layer 61 forward pass:  25%|██▌       | 4/16 [00:01<00:05,  2.07it/s]   Layer 61 forward pass:  31%|███▏      | 5/16 [00:02<00:05,  2.07it/s]   Layer 61 forward pass:  38%|███▊      | 6/16 [00:02<00:04,  2.07it/s]   Layer 61 forward pass:  44%|████▍     | 7/16 [00:03<00:04,  2.06it/s]   Layer 61 forward pass:  50%|█████     | 8/16 [00:03<00:03,  2.06it/s]   Layer 61 forward pass:  56%|█████▋    | 9/16 [00:04<00:03,  2.06it/s]   Layer 61 forward pass:  62%|██████▎   | 10/16 [00:04<00:02,  2.06it/s]   Layer 61 forward pass:  69%|██████▉   | 11/16 [00:05<00:02,  2.06it/s]   Layer 61 forward pass:  75%|███████▌  | 12/16 [00:05<00:01,  2.06it/s]   Layer 61 forward pass:  81%|████████▏ | 13/16 [00:06<00:01,  2.05it/s]   Layer 61 forward pass:  88%|████████▊ | 14/16 [00:06<00:00,  2.05it/s]   Layer 61 forward pass:  94%|█████████▍| 15/16 [00:07<00:00,  2.05it/s]   Layer 61 forward pass: 100%|██████████| 16/16 [00:07<00:00,  2.05it/s]   Layer 61 forward pass: 100%|██████████| 16/16 [00:07<00:00,  2.06it/s]
+   Quantizing: model.layers.61.linear_attn.out_proj.weight (torch.Size([5120, 6144])) on device cuda:0
+   Quantizing: model.layers.61.linear_attn.in_proj_qkv.weight (torch.Size([10240, 5120])) on device cuda:0
+   Quantizing: model.layers.61.linear_attn.in_proj_z.weight (torch.Size([6144, 5120])) on device cuda:0
+   Quantizing: model.layers.61.linear_attn.in_proj_b.weight (torch.Size([48, 5120])) on device cuda:0
+   Quantizing: model.layers.61.linear_attn.in_proj_a.weight (torch.Size([48, 5120])) on device cuda:0
+   Quantizing: model.layers.61.mlp.gate_proj.weight (torch.Size([17408, 5120])) on device cuda:1
+   Quantizing: model.layers.61.mlp.up_proj.weight (torch.Size([17408, 5120])) on device cuda:1
+   Quantizing: model.layers.61.mlp.down_proj.weight (torch.Size([5120, 17408])) on device cuda:1
+
+⚡ Quantizing layer 63/64...
+   Layer 62 forward pass:   0%|          | 0/16 [00:00<?, ?it/s]   Layer 62 forward pass:   6%|▋         | 1/16 [00:00<00:07,  2.06it/s]   Layer 62 forward pass:  12%|█▎        | 2/16 [00:00<00:06,  2.06it/s]   Layer 62 forward pass:  19%|█▉        | 3/16 [00:01<00:06,  2.06it/s]   Layer 62 forward pass:  25%|██▌       | 4/16 [00:01<00:05,  2.06it/s]   Layer 62 forward pass:  31%|███▏      | 5/16 [00:02<00:05,  2.06it/s]   Layer 62 forward pass:  38%|███▊      | 6/16 [00:02<00:04,  2.07it/s]   Layer 62 forward pass:  44%|████▍     | 7/16 [00:03<00:04,  2.07it/s]   Layer 62 forward pass:  50%|█████     | 8/16 [00:03<00:03,  2.07it/s]   Layer 62 forward pass:  56%|█████▋    | 9/16 [00:04<00:03,  2.06it/s]   Layer 62 forward pass:  62%|██████▎   | 10/16 [00:04<00:02,  2.06it/s]   Layer 62 forward pass:  69%|██████▉   | 11/16 [00:05<00:02,  2.06it/s]   Layer 62 forward pass:  75%|███████▌  | 12/16 [00:05<00:01,  2.06it/s]   Layer 62 forward pass:  81%|████████▏ | 13/16 [00:06<00:01,  2.06it/s]   Layer 62 forward pass:  88%|████████▊ | 14/16 [00:06<00:00,  2.05it/s]   Layer 62 forward pass:  94%|█████████▍| 15/16 [00:07<00:00,  2.05it/s]   Layer 62 forward pass: 100%|██████████| 16/16 [00:07<00:00,  2.04it/s]   Layer 62 forward pass: 100%|██████████| 16/16 [00:07<00:00,  2.06it/s]
+   Quantizing: model.layers.62.linear_attn.out_proj.weight (torch.Size([5120, 6144])) on device cuda:0
+   Quantizing: model.layers.62.linear_attn.in_proj_qkv.weight (torch.Size([10240, 5120])) on device cuda:0
+   Quantizing: model.layers.62.linear_attn.in_proj_z.weight (torch.Size([6144, 5120])) on device cuda:0
+   Quantizing: model.layers.62.linear_attn.in_proj_b.weight (torch.Size([48, 5120])) on device cuda:0
+   Quantizing: model.layers.62.linear_attn.in_proj_a.weight (torch.Size([48, 5120])) on device cuda:0
+   Quantizing: model.layers.62.mlp.gate_proj.weight (torch.Size([17408, 5120])) on device cuda:1
+   Quantizing: model.layers.62.mlp.up_proj.weight (torch.Size([17408, 5120])) on device cuda:1
+   Quantizing: model.layers.62.mlp.down_proj.weight (torch.Size([5120, 17408])) on device cuda:1
+
+⚡ Quantizing layer 64/64...
+   Layer 63 forward pass:   0%|          | 0/16 [00:00<?, ?it/s]   Layer 63 forward pass:   6%|▋         | 1/16 [00:00<00:06,  2.36it/s]   Layer 63 forward pass:  12%|█▎        | 2/16 [00:00<00:05,  2.36it/s]   Layer 63 forward pass:  19%|█▉        | 3/16 [00:01<00:05,  2.36it/s]   Layer 63 forward pass:  25%|██▌       | 4/16 [00:01<00:05,  2.37it/s]   Layer 63 forward pass:  31%|███▏      | 5/16 [00:02<00:04,  2.37it/s]   Layer 63 forward pass:  38%|███▊      | 6/16 [00:02<00:04,  2.37it/s]   Layer 63 forward pass:  44%|████▍     | 7/16 [00:02<00:03,  2.36it/s]   Layer 63 forward pass:  50%|█████     | 8/16 [00:03<00:03,  2.36it/s]   Layer 63 forward pass:  56%|█████▋    | 9/16 [00:03<00:02,  2.36it/s]   Layer 63 forward pass:  62%|██████▎   | 10/16 [00:04<00:02,  2.36it/s]   Layer 63 forward pass:  69%|██████▉   | 11/16 [00:04<00:02,  2.35it/s]   Layer 63 forward pass:  75%|███████▌  | 12/16 [00:05<00:01,  2.34it/s]   Layer 63 forward pass:  81%|████████▏ | 13/16 [00:05<00:01,  2.34it/s]   Layer 63 forward pass:  88%|████████▊ | 14/16 [00:05<00:00,  2.34it/s]   Layer 63 forward pass:  94%|█████████▍| 15/16 [00:06<00:00,  2.34it/s]   Layer 63 forward pass: 100%|██████████| 16/16 [00:06<00:00,  2.34it/s]   Layer 63 forward pass: 100%|██████████| 16/16 [00:06<00:00,  2.35it/s]
+   Quantizing: model.layers.63.self_attn.q_proj.weight (torch.Size([12288, 5120])) on device cuda:0
+   Quantizing: model.layers.63.self_attn.k_proj.weight (torch.Size([1024, 5120])) on device cuda:0
+   Quantizing: model.layers.63.self_attn.v_proj.weight (torch.Size([1024, 5120])) on device cuda:0
+   Quantizing: model.layers.63.self_attn.o_proj.weight (torch.Size([5120, 6144])) on device cuda:0
+   Quantizing: model.layers.63.mlp.gate_proj.weight (torch.Size([17408, 5120])) on device cuda:1
+   Quantizing: model.layers.63.mlp.up_proj.weight (torch.Size([17408, 5120])) on device cuda:1
+   Quantizing: model.layers.63.mlp.down_proj.weight (torch.Size([5120, 17408])) on device cuda:1
+
+💾 Step 3: Saving modified calibrated weights...
+   💾 Saving shard: output_calib/modified_model/model-00001-of-00015.safetensors
+   💾 Saving shard: output_calib/modified_model/model-00002-of-00015.safetensors
+   💾 Saving shard: output_calib/modified_model/model-00003-of-00015.safetensors
+   💾 Saving shard: output_calib/modified_model/model-00004-of-00015.safetensors
+   💾 Saving shard: output_calib/modified_model/model-00005-of-00015.safetensors
+   💾 Saving shard: output_calib/modified_model/model-00006-of-00015.safetensors
+   💾 Saving shard: output_calib/modified_model/model-00007-of-00015.safetensors
+   💾 Saving shard: output_calib/modified_model/model-00008-of-00015.safetensors
+   💾 Saving shard: output_calib/modified_model/model-00009-of-00015.safetensors
+   💾 Saving shard: output_calib/modified_model/model-00010-of-00015.safetensors
+   💾 Saving shard: output_calib/modified_model/model-00011-of-00015.safetensors
+   💾 Saving shard: output_calib/modified_model/model-00012-of-00015.safetensors
+   💾 Saving shard: output_calib/modified_model/model-00013-of-00015.safetensors
+   💾 Saving shard: output_calib/modified_model/model-00014-of-00015.safetensors
+   💾 Saving shard: output_calib/modified_model/model-00015-of-00015.safetensors
+
+📊 Calibration complete! Report saved to: output_calib/calibration_report.json

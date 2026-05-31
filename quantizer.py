@@ -231,12 +231,18 @@ def quantize_gptq_ternary(
     for col_start in range(0, n_in, block_size):
         col_end = min(col_start + block_size, n_in)
         block_cols = W[:, col_start:col_end]
+        actual_block_size = col_end - col_start
 
-        # Scale for this block (per-row, but we use per-block-of-columns)
-        scale = block_cols.abs().amax(dim=1)
+        # Scale for this block — abs-mean (BitNet b1.58); abs-max over-sparsifies
+        # rotated/near-Gaussian blocks (~84% zeros), starving GPTQ's error feedback.
+        scale = block_cols.abs().mean(dim=1)
         scale = torch.clamp(scale, min=1e-10)
         all_scales.append(scale)
 
+        # Keep a copy of original block weights to compute block quantization error E
+        W_block_orig = block_cols.clone()
+
+        # Local column-by-column quantization within the block (very fast)
         for j in range(col_start, col_end):
             w_col = W[:, j]
 
@@ -249,19 +255,31 @@ def quantize_gptq_ternary(
             w_hat = q * scale
             err = (w_col - w_hat) / H_inv_diag[j]
 
-            # Compensate remaining columns
-            if j + 1 < n_in:
-                W[:, j + 1:] -= err.unsqueeze(1) * H_inv[j, j + 1:].unsqueeze(0)
+            # Only update remaining columns INSIDE the current block locally
+            if j + 1 < col_end:
+                W[:, j + 1:col_end] -= err.unsqueeze(1) * H_inv[j, j + 1:col_end].unsqueeze(0)
+
+        # Compute total block error E
+        W_hat_block = all_ternary[:, col_start:col_end].float() * scale.unsqueeze(1)
+        E = W_block_orig - W_hat_block
+
+        # Batched matrix-multiplication (GEMM) update for all columns OUTSIDE the block
+        if col_end < n_in:
+            inv_H_block = H_inv[col_start:col_end, col_start:col_end]
+            # Solve inv_H_block @ P = H_inv[col_start:col_end, col_end:]
+            P = torch.linalg.solve(inv_H_block, H_inv[col_start:col_end, col_end:])
+            # Single highly optimized GEMM update
+            W[:, col_end:] -= E @ P
 
     # Reshape to standard format
     flat_ternary = all_ternary.reshape(-1)
-    scales_tensor = torch.stack(all_scales).to(torch.float16)  # [n_groups, n_out]
+    # Stack along dim 1 to get shape [n_out, n_groups] so that flattening
+    # aligns with the row-major block ordering of flat_ternary
+    scales_tensor = torch.stack(all_scales, dim=1).to(torch.float16)
 
-    # Reformat to match RTN output shape for compatibility
-    # Note: GPTQ scales are per-row-per-group, need to rearrange
     return QuantizedTensor(
         ternary=flat_ternary,
-        scales=scales_tensor.reshape(-1),  # Will need proper handling in packer
+        scales=scales_tensor.reshape(-1),
         original_shape=weight.shape,
         block_size=block_size,
         num_valid=weight.numel(),

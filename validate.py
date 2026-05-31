@@ -21,35 +21,38 @@ from pathlib import Path
 
 def check_gguf_loads(gguf_path: Path) -> bool:
     """Verify the GGUF file loads without errors."""
-    llama_cli = shutil.which("llama-cli")
-    if not llama_cli:
-        print("  ⚠️ llama-cli not found, skipping load test")
+    llama_completion = shutil.which("llama-completion")
+    if not llama_completion:
+        print("  ⚠️ llama-completion not found, skipping load test")
         return False
 
     print("  Testing GGUF load...")
     cmd = [
-        llama_cli,
+        llama_completion,
         "-m", str(gguf_path),
         "-p", "Test",
         "-n", "1",  # generate just 1 token to test loading
-        "--no-display-prompt",
+        "-no-cnv",
+        "-ngl", "99",
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+    result = subprocess.run(cmd, capture_output=True, timeout=120)
+    stdout = result.stdout.decode("utf-8", errors="replace")
+    stderr = result.stderr.decode("utf-8", errors="replace")
 
     if result.returncode == 0:
         print("  ✅ GGUF loads successfully")
         return True
     else:
         print(f"  ❌ GGUF load failed!")
-        print(f"  STDERR: {result.stderr[-1000:]}")
+        print(f"  STDERR: {stderr[-1000:]}")
         return False
 
 
 def test_generation(gguf_path: Path, prompts: list = None) -> dict:
     """Run test prompts and check output quality."""
-    llama_cli = shutil.which("llama-cli")
-    if not llama_cli:
-        return {"error": "llama-cli not found"}
+    llama_completion = shutil.which("llama-completion")
+    if not llama_completion:
+        return {"error": "llama-completion not found"}
 
     if prompts is None:
         prompts = [
@@ -63,19 +66,21 @@ def test_generation(gguf_path: Path, prompts: list = None) -> dict:
     for prompt in prompts:
         print(f"\n  Prompt: {prompt[:60]}...")
         cmd = [
-            llama_cli,
+            llama_completion,
             "-m", str(gguf_path),
             "-p", prompt,
             "-n", "128",
-            "--no-display-prompt",
+            "-no-cnv",
             "--temp", "0.0",  # deterministic
             "-ngl", "99",     # offload to GPU
         ]
         start = time.time()
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+        result = subprocess.run(cmd, capture_output=True, timeout=300)
+        stdout = result.stdout.decode("utf-8", errors="replace")
+        stderr = result.stderr.decode("utf-8", errors="replace")
         elapsed = time.time() - start
 
-        output = result.stdout.strip()
+        output = stdout.strip()
         results.append({
             "prompt": prompt,
             "output": output[:500],
@@ -88,7 +93,7 @@ def test_generation(gguf_path: Path, prompts: list = None) -> dict:
             print(f"  Response: {output[:200]}...")
             print(f"  Time: {elapsed:.1f}s")
         else:
-            print(f"  ❌ Generation failed: {result.stderr[-500:]}")
+            print(f"  ❌ Generation failed: {stderr[-500:]}")
 
     return {"prompts": results}
 
@@ -129,44 +134,49 @@ def run_perplexity(gguf_path: Path, test_file: Path = None) -> dict:
         "-ngl", "99",
     ]
 
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+    result = subprocess.run(cmd, capture_output=True, timeout=600)
+    stdout = result.stdout.decode("utf-8", errors="replace")
+    stderr = result.stderr.decode("utf-8", errors="replace")
+    
     if result.returncode != 0:
-        return {"error": result.stderr[-500:]}
+        return {"error": stderr[-500:]}
 
     # Parse perplexity from output
-    for line in result.stdout.split("\n"):
+    for line in stdout.split("\n"):
         if "perplexity" in line.lower():
-            return {"output": line.strip(), "raw": result.stdout[-500:]}
+            return {"output": line.strip(), "raw": stdout[-500:]}
 
-    return {"raw": result.stdout[-500:]}
+    return {"raw": stdout[-500:]}
 
 
 def benchmark_throughput(gguf_path: Path) -> dict:
     """Benchmark token generation throughput."""
-    llama_cli = shutil.which("llama-cli")
-    if not llama_cli:
-        return {"error": "llama-cli not found"}
+    llama_completion = shutil.which("llama-completion")
+    if not llama_completion:
+        return {"error": "llama-completion not found"}
 
     print("  Running throughput benchmark...")
     cmd = [
-        llama_cli,
+        llama_completion,
         "-m", str(gguf_path),
         "-p", "Write a detailed essay about the history of computing:",
         "-n", "512",
-        "--no-display-prompt",
+        "-no-cnv",
         "-ngl", "99",
     ]
 
     start = time.time()
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+    result = subprocess.run(cmd, capture_output=True, timeout=600)
+    stdout = result.stdout.decode("utf-8", errors="replace")
+    stderr = result.stderr.decode("utf-8", errors="replace")
     elapsed = time.time() - start
 
     if result.returncode != 0:
-        return {"error": result.stderr[-500:]}
+        return {"error": stderr[-500:]}
 
     # Parse timing info from stderr
     timings = {}
-    for line in result.stderr.split("\n"):
+    for line in stderr.split("\n"):
         if "eval time" in line or "total time" in line or "tokens per second" in line:
             timings[line.strip().split(":")[0].strip()] = line.strip()
 

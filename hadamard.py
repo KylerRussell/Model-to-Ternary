@@ -44,12 +44,14 @@ def _pytorch_hadamard_1d(x: torch.Tensor) -> torch.Tensor:
     assert n > 0 and (n & (n - 1)) == 0, f"Dimension must be power of 2, got {n}"
 
     # Butterfly passes
+    # IMPORTANT: We must clone before writing to avoid in-place aliasing.
+    # a and b are views into the same storage as x_reshaped, so writing
+    # a+b back would corrupt a before we compute a-b.
     h = 1
     while h < n:
-        # Reshape to pair elements
         x_reshaped = x.view(*x.shape[:-1], n // (2 * h), 2, h)
-        a = x_reshaped[..., 0, :]  # even
-        b = x_reshaped[..., 1, :]  # odd
+        a = x_reshaped[..., 0, :].clone()
+        b = x_reshaped[..., 1, :].clone()
         x_reshaped[..., 0, :] = a + b
         x_reshaped[..., 1, :] = a - b
         x = x_reshaped.view(*x.shape)
@@ -64,39 +66,56 @@ def hadamard_transform(
     use_cuda: bool = True,
 ) -> torch.Tensor:
     """
-    Apply the Hadamard transform along the last dimension of x.
+    Apply an exact orthogonal Hadamard transform along the last dimension of x.
+    If the dimension is not a power of 2, it applies a block-diagonal Hadamard
+    transform by greedily chunking into powers of 2. This guarantees perfect
+    orthogonality (H^T H = I) for any dimension size without lossy truncation.
 
     Args:
-        x: Input tensor of shape (..., dim). dim will be padded to next
-           power of 2 if necessary.
+        x: Input tensor of shape (..., dim).
         scale: Multiplicative scale applied to output. If None, uses
-               1/sqrt(dim) for orthonormal normalization.
+               1/sqrt(p) for orthonormal normalization of each block.
         use_cuda: Whether to use the CUDA kernel if available.
 
     Returns:
-        Transformed tensor of same shape as input (padded dims are truncated).
+        Transformed tensor of same shape as input.
     """
     original_dim = x.shape[-1]
-    padded_dim = _next_power_of_2(original_dim)
-
-    if scale is None:
-        scale = 1.0 / math.sqrt(padded_dim)
-
-    # Pad if needed
-    if padded_dim != original_dim:
-        x = F.pad(x, (0, padded_dim - original_dim))
-
-    # Apply transform
-    if use_cuda and HAS_CUDA_FHT and x.is_cuda:
-        result = _cuda_hadamard(x, scale=scale)
-    else:
-        result = _pytorch_hadamard_1d(x.float()) * scale
-        result = result.to(x.dtype)
-
-    # Truncate back to original dimension
-    if padded_dim != original_dim:
-        result = result[..., :original_dim]
-
+    
+    # Fast path: if power of 2
+    if (original_dim & (original_dim - 1)) == 0:
+        if scale is None:
+            scale = 1.0 / math.sqrt(original_dim)
+        if use_cuda and HAS_CUDA_FHT and x.is_cuda:
+            result = _cuda_hadamard(x, scale=scale)
+        else:
+            result = _pytorch_hadamard_1d(x.float().clone()) * scale
+            result = result.to(x.dtype)
+        return result
+        
+    # Block-diagonal fallback for non-power-of-2 (e.g. 5120 = 4096 + 1024)
+    result = torch.empty_like(x)
+    start = 0
+    dim = original_dim
+    while start < dim:
+        rem = dim - start
+        p = 1 << (rem.bit_length() - 1)
+        
+        chunk = x[..., start:start+p]
+        if scale is not None:
+            s = scale
+        else:
+            s = 1.0 / math.sqrt(p)
+            
+        if use_cuda and HAS_CUDA_FHT and chunk.is_cuda:
+            transformed = _cuda_hadamard(chunk, scale=s)
+        else:
+            transformed = _pytorch_hadamard_1d(chunk.float().clone()) * s
+            transformed = transformed.to(chunk.dtype)
+            
+        result[..., start:start+p] = transformed
+        start += p
+        
     return result
 
 

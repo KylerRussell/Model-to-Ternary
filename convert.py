@@ -60,7 +60,7 @@ from config import (
     MODEL_ID, NUM_HIDDEN_LAYERS, LAYER_TYPES,
     HIDDEN_SIZE, INTERMEDIATE_SIZE, VOCAB_SIZE,
     BLOCK_SIZE, should_quantize, ConversionConfig,
-    KEEP_FP16_PATTERNS,
+    KEEP_FP16_PATTERNS, is_rotatable_projection,
 )
 
 
@@ -143,7 +143,7 @@ class TernaryConverter:
             analyze_quantization_friendliness,
             compute_rotation_error,
         )
-        from quantizer import quantize_rtn, dequantize, compute_quantization_error
+        from quantizer import quantize_rtn, quantize_absmean, dequantize, compute_quantization_error
 
         print("\n" + "=" * 70)
         print("TERNARY CONVERSION PIPELINE — Phase 1 (RTN)")
@@ -161,6 +161,16 @@ class TernaryConverter:
         total_tensors = len(weight_map)
         print(f"  Total tensors: {total_tensors}")
         print(f"  Shard files:   {len(shards)}")
+
+        # Pre-load LayerNorm weights for offline rotation
+        self.norm_weights = {}
+        if self.config.apply_hadamard:
+            print(f"\n  Pre-loading LayerNorm weights for offline QuaRot rotation...")
+            for tensor_name, shard_file in tqdm(weight_map.items(), desc="  Loading norms"):
+                if "norm.weight" in tensor_name or "layernorm.weight" in tensor_name:
+                    # Load to CPU to save VRAM, we'll move to GPU when needed
+                    self.norm_weights[tensor_name] = load_tensor(model_path, shard_file, tensor_name, "cpu")
+            print(f"  Loaded {len(self.norm_weights)} LayerNorm weights.")
 
         # Create output directory for modified model
         modified_model_dir = self.config.output_dir / "modified_model"
@@ -185,60 +195,143 @@ class TernaryConverter:
                 # Load tensor to GPU
                 tensor = load_tensor(model_path, shard_file, tensor_name, self.device)
 
-                if should_quantize(tensor_name):
-                    # ── QUANTIZATION PATH ──
+                if is_rotatable_projection(tensor_name):
+                    # ── ROTATION (always) + QUANTIZATION (only if should_quantize) ──
+                    # Every residual-stream projection is rotated + norm-absorbed here,
+                    # whether or not it will be ternarized. This keeps the norm-zeroing in
+                    # the FP16 branch valid for EVERY layer (each input_layernorm /
+                    # post_attention_layernorm is genuinely absorbed). Quantization is a
+                    # separate decision below, so protected projections become rotated FP16
+                    # (the transparent rotation-only treatment) instead of being dumped to
+                    # the FP16 branch un-rotated with their norm stripped.
                     original_dtype = tensor.dtype
                     weight = tensor.float()
 
-                    # Pre-rotation analysis
                     if self.config.apply_hadamard and weight.ndim == 2:
-                        pre_stats = analyze_quantization_friendliness(
-                            weight, self.config.block_size
-                        )
+                        # Apply QuaRot Offline Hadamard Rotation
+                        weight_device = weight.to(self.device)
+                        
+                        # 1. Attention/MLP Outputs: dimension "output" rotation
+                        if ".o_proj" in tensor_name or ".out_proj" in tensor_name or ".down_proj" in tensor_name:
+                            rotated = rotate_weight_matrix(weight_device, dim="output")
+                        
+                        # 2. Attention/MLP Inputs: absorb norm, then dimension "input" rotation
+                        else:
+                            norm_w = None
+                            if ".self_attn." in tensor_name or ".linear_attn." in tensor_name:
+                                _parts = tensor_name.split(".")
+                                layer_idx = _parts[_parts.index("layers") + 1] if "layers" in _parts else None
+                                norm_name = f"model.language_model.layers.{layer_idx}.input_layernorm.weight"
+                                if norm_name not in self.norm_weights:
+                                    norm_name = f"model.layers.{layer_idx}.input_layernorm.weight"
+                                if norm_name in self.norm_weights:
+                                    norm_w = self.norm_weights[norm_name].to(self.device).float()
+                                else:
+                                    raise KeyError(
+                                        f"input_layernorm not found for {tensor_name} "
+                                        f"(layer_idx={layer_idx!r}); refusing to rotate without "
+                                        f"norm absorption — this would silently corrupt the model")
+                            elif ".mlp.gate_proj" in tensor_name or ".mlp.up_proj" in tensor_name:
+                                _parts = tensor_name.split(".")
+                                layer_idx = _parts[_parts.index("layers") + 1] if "layers" in _parts else None
+                                norm_name = f"model.language_model.layers.{layer_idx}.post_attention_layernorm.weight"
+                                if norm_name not in self.norm_weights:
+                                    norm_name = f"model.layers.{layer_idx}.post_attention_layernorm.weight"
+                                if norm_name in self.norm_weights:
+                                    norm_w = self.norm_weights[norm_name].to(self.device).float()
+                                else:
+                                    raise KeyError(
+                                        f"post_attention_layernorm not found for {tensor_name} "
+                                        f"(layer_idx={layer_idx!r}); refusing to rotate without "
+                                        f"norm absorption — this would silently corrupt the model")
+                            
+                            if norm_w is not None:
+                                # Check if this is an offset-1 norm (Qwen3/Gemma style)
+                                if not norm_name.endswith("linear_attn.norm.weight"):
+                                    norm_w = norm_w + 1.0
+                                weight_device = weight_device * norm_w  # Absorb diagonal norm
+                                
+                            rotated = rotate_weight_matrix(weight_device, dim="input")
 
-                        # Apply Hadamard rotation
-                        rotated = rotate_weight_matrix(weight.to(self.device), dim="input")
-
-                        post_stats = analyze_quantization_friendliness(
-                            rotated, self.config.block_size
-                        )
-
-                        rot_err = compute_rotation_error(weight, rotated)
-
-                        # Log improvement
-                        outlier_before = pre_stats["outlier_ratio_3sigma"]
-                        outlier_after = post_stats["outlier_ratio_3sigma"]
-
-                        weight_to_quantize = rotated
+                        weight_to_save = rotated
                     else:
-                        weight_to_quantize = weight
+                        weight_to_save = weight
 
-                    # Quantize to ternary
-                    qt = quantize_rtn(weight_to_quantize, self.config.block_size)
+                    if self.config.rotation_only or not should_quantize(tensor_name):
+                        # ── ROTATED-FP16 MODE (rotation-only, or protected from quant) ──
+                        # Save pure rotated FP16 weights (no ternary quantization).
+                        modified_tensors[tensor_name] = weight_to_save.to(original_dtype).cpu()
+                        self.stats["fp16_tensors"] += 1
+                        self.stats["total_params_fp16"] += tensor.numel()
+                    else:
+                        # ── TERNARY QUANTIZATION ──
+                        qt = quantize_absmean(weight_to_save, self.config.block_size)
+                        reconstructed = dequantize(qt)
 
-                    # Dequantize back to FP16 for saving
-                    # (The HF→GGUF converter will re-quantize to TQ2_0)
-                    reconstructed = dequantize(qt)
+                        err = compute_quantization_error(weight_to_save, qt)
+                        self.stats["errors"][tensor_name] = {
+                            "cosine_sim": err["cosine_similarity"],
+                            "sqnr_db": err["sqnr_db"],
+                            "sparsity": err["sparsity"],
+                            "distribution": err["ternary_distribution"],
+                        }
 
-                    # Compute error metrics
-                    err = compute_quantization_error(weight, qt)
-                    self.stats["errors"][tensor_name] = {
-                        "cosine_sim": err["cosine_similarity"],
-                        "sqnr_db": err["sqnr_db"],
-                        "sparsity": err["sparsity"],
-                        "distribution": err["ternary_distribution"],
-                    }
-
-                    # Save the DEQUANTIZED weights (ternary * scale as FP16)
-                    # This way convert_hf_to_gguf.py can load them normally,
-                    # and llama-quantize will re-pack to TQ2_0
-                    modified_tensors[tensor_name] = reconstructed.to(original_dtype).cpu()
-
-                    self.stats["quantized_tensors"] += 1
-                    self.stats["total_params_quantized"] += tensor.numel()
+                        modified_tensors[tensor_name] = reconstructed.to(original_dtype).cpu()
+                        self.stats["quantized_tensors"] += 1
+                        self.stats["total_params_quantized"] += tensor.numel()
 
                 else:
                     # ── FP16 PRESERVATION PATH ──
+                    if self.config.apply_hadamard:
+                        original_dtype = tensor.dtype
+                        
+                        # Overwrite ONLY the specific LayerNorm weights we absorbed with 1.0s
+                        is_absorbed_norm = False
+                        if "model.language_model.norm.weight" in tensor_name or "model.norm.weight" in tensor_name:
+                            is_absorbed_norm = True
+                        elif tensor_name.startswith("model.") and ("input_layernorm.weight" in tensor_name or "post_attention_layernorm.weight" in tensor_name):
+                            is_absorbed_norm = True
+
+                        if is_absorbed_norm:
+                            # Set to ZERO because convert_hf_to_gguf_patched.py adds +1
+                            # to all Qwen3.6 norm weights (offset-1 format).
+                            # 0.0 + 1.0 = 1.0 (identity) in the GGUF.
+                            tensor = torch.zeros_like(tensor)
+                            
+                        # Rotate embeddings (dim="input" because W_emb_new = W_emb * H)
+                        elif "embed_tokens.weight" in tensor_name and ("model.embed_tokens" in tensor_name or "model.language_model.embed_tokens" in tensor_name):
+                            print(f"   Applying batched rotation for {tensor_name}...")
+                            weight_device = tensor.float().to(self.device)
+                            rotated_chunks = []
+                            chunk_size = 4096
+                            for i in range(0, weight_device.shape[0], chunk_size):
+                                chunk = weight_device[i:i+chunk_size]
+                                rotated_chunks.append(rotate_weight_matrix(chunk, dim="input"))
+                            tensor = torch.cat(rotated_chunks, dim=0).to(original_dtype).cpu()
+                            del weight_device, rotated_chunks
+                            torch.cuda.empty_cache()
+                            
+                        # Absorb final norm and rotate LM Head (dim="input")
+                        elif "lm_head.weight" in tensor_name:
+                            print(f"   Applying batched rotation for {tensor_name}...")
+                            weight_device = tensor.float().to(self.device)
+                            norm_name = "model.language_model.norm.weight"
+                            if norm_name not in self.norm_weights:
+                                norm_name = "model.norm.weight"
+                            if norm_name in self.norm_weights:
+                                norm_w = self.norm_weights[norm_name].to(self.device).float()
+                                if not norm_name.endswith("linear_attn.norm.weight"):
+                                    norm_w = norm_w + 1.0
+                                weight_device = weight_device * norm_w
+                            rotated_chunks = []
+                            chunk_size = 4096
+                            for i in range(0, weight_device.shape[0], chunk_size):
+                                chunk = weight_device[i:i+chunk_size]
+                                rotated_chunks.append(rotate_weight_matrix(chunk, dim="input"))
+                            tensor = torch.cat(rotated_chunks, dim=0).to(original_dtype).cpu()
+                            del weight_device, rotated_chunks
+                            torch.cuda.empty_cache()
+
                     modified_tensors[tensor_name] = tensor.cpu()
                     self.stats["fp16_tensors"] += 1
                     self.stats["total_params_fp16"] += tensor.numel()
@@ -357,15 +450,20 @@ def run_gguf_conversion(modified_model_dir: Path, output_dir: Path,
     print("GGUF CONVERSION")
     print("=" * 70)
 
-    # Find convert script
-    convert_script = shutil.which("convert_hf_to_gguf.py")
-    if not convert_script:
-        # Try common locations
-        for path in ["/usr/bin/convert_hf_to_gguf.py",
-                     "/usr/local/bin/convert_hf_to_gguf.py"]:
-            if os.path.exists(path):
-                convert_script = path
-                break
+    # Find convert script — prefer local patched version (has Qwen3.6 tokenizer hash)
+    script_dir = Path(__file__).parent
+    local_patched = script_dir / "convert_hf_to_gguf_patched.py"
+    convert_script = None
+    if local_patched.exists():
+        convert_script = str(local_patched)
+    else:
+        convert_script = shutil.which("convert_hf_to_gguf.py")
+        if not convert_script:
+            for path in ["/usr/bin/convert_hf_to_gguf.py",
+                         "/usr/local/bin/convert_hf_to_gguf.py"]:
+                if os.path.exists(path):
+                    convert_script = path
+                    break
 
     if not convert_script:
         print("❌ convert_hf_to_gguf.py not found!")
@@ -454,6 +552,9 @@ Examples:
     parser.add_argument("--output-dir", type=str, default="./output", help="Output directory")
     parser.add_argument("--block-size", type=int, default=128, help="Quantization block size")
     parser.add_argument("--no-hadamard", action="store_true", help="Skip Hadamard rotation")
+    parser.add_argument("--rotation-only", action="store_true",
+                        help="Apply rotation+norm absorption only (no ternary quantization). "
+                             "Produces a pure FP16 rotated model for validation.")
     parser.add_argument("--skip-gguf", action="store_true", help="Skip GGUF conversion step")
     parser.add_argument("--gguf-format", type=str, default="tq2_0",
                         choices=["tq2_0", "tq1_0"], help="GGUF quantization format")
@@ -484,6 +585,7 @@ Examples:
         output_dir=Path(args.output_dir),
         block_size=args.block_size,
         apply_hadamard=not args.no_hadamard,
+        rotation_only=args.rotation_only,
         gguf_format=args.gguf_format,
     )
 
