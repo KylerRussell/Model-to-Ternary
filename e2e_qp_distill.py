@@ -299,15 +299,37 @@ def precompute_teacher(args):
 
 
 def train(args):
-    device = "cuda:0" if torch.cuda.is_available() else "cpu"
-    print("Building ternary student (packed 2-bit)...")
+    # DDP when launched via torchrun (LOCAL_RANK set); plain single-GPU otherwise.
+    local_rank = int(os.environ.get("LOCAL_RANK", -1))
+    world = int(os.environ.get("WORLD_SIZE", 1))
+    ddp = local_rank >= 0 and world > 1
+    if ddp:
+        import torch.distributed as dist
+        dist.init_process_group(backend="nccl")
+        torch.cuda.set_device(local_rank)
+        device = f"cuda:{local_rank}"
+        rank = dist.get_rank()
+    else:
+        device = "cuda:0" if torch.cuda.is_available() else "cpu"
+        rank = 0
+    is_main = (rank == 0)
+
+    def log(*a):
+        if is_main:
+            print(*a)
+
+    log(f"Building ternary student (packed 2-bit){f' [DDP x{world}]' if ddp else ''}...")
     model, config = build_student(args.student_path, args.orig_config_path, BLOCK_SIZE, device)
     model.train()
     try:
-        model.gradient_checkpointing_enable()
-        print("   gradient checkpointing enabled")
-    except Exception as e:
-        print(f"   ⚠️ gradient_checkpointing_enable failed ({e}); memory may be tight")
+        model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+        log("   gradient checkpointing enabled (non-reentrant)")
+    except Exception:
+        try:
+            model.gradient_checkpointing_enable()
+            log("   gradient checkpointing enabled")
+        except Exception as e:
+            log(f"   ⚠️ gradient_checkpointing_enable failed ({e}); memory may be tight")
 
     # freeze everything except the ternary scales
     scales = []
@@ -316,17 +338,26 @@ def train(args):
             p.requires_grad_(True); scales.append(p)
         else:
             p.requires_grad_(False)
-    print(f"   training {len(scales)} scale tensors "
-          f"({sum(s.numel() for s in scales)/1e6:.1f}M params)")
+    log(f"   training {len(scales)} scale tensors "
+        f"({sum(s.numel() for s in scales)/1e6:.1f}M params)")
+
+    core = model                                          # underlying model, used for save_student
+    if ddp:
+        from torch.nn.parallel import DistributedDataParallel as DDP
+        # broadcast_buffers=False: the packed weight buffers are identical and constant, so don't
+        # re-broadcast ~7 GB every step. Only the scale grads get all-reduced.
+        model = DDP(core, device_ids=[local_rank], output_device=local_rank,
+                    broadcast_buffers=False, find_unused_parameters=False, static_graph=True)
+    opt = torch.optim.Adam(scales, lr=args.lr)            # scales still reference the live params
 
     cache = torch.load(args.teacher_cache)
     batches = load_calib_batches(args.calib, 1, args.seq, device)
     n = min(len(batches), len(cache["idx"]))
     if args.max_samples:
         n = min(n, args.max_samples)
-    opt = torch.optim.Adam(scales, lr=args.lr)
+    shard = list(range(rank, n, world)) if ddp else list(range(n))   # each rank a different slice
+    log(f"   {n} sequences total; {len(shard)} on this rank")
 
-    # keep-best on a smoothed KL so one noisy/easy batch can't win or poison the result
     best_kl = float("inf")
     best_scales = [s.detach().clone() for s in scales]
     ema = None
@@ -336,9 +367,17 @@ def train(args):
             for s, b in zip(scales, best_scales):
                 s.copy_(b)
 
+    def global_kl(loss):
+        if not ddp:
+            return loss.item()
+        t = loss.detach().clone()
+        import torch.distributed as dist
+        dist.all_reduce(t, op=dist.ReduceOp.SUM)           # average across ranks for a stable metric
+        return (t / world).item()
+
     step = 0
     while step < args.steps:
-        for bi in range(n):
+        for bi in shard:
             if step >= args.steps:
                 break
             ids = batches[bi].to(device)
@@ -347,30 +386,39 @@ def train(args):
             out = model(ids)
             loss = topk_kl_loss(out.logits, t_idx, t_val, args.temperature)
             opt.zero_grad(set_to_none=True)
-            loss.backward()
+            loss.backward()                                # DDP all-reduces the scale grads here
             torch.nn.utils.clip_grad_norm_(scales, 1.0)
-            if step < args.warmup:                      # linear LR warmup
+            if step < args.warmup:                         # linear LR warmup
                 for g in opt.param_groups:
                     g["lr"] = args.lr * (step + 1) / max(1, args.warmup)
             opt.step()
             step += 1
 
-            kl = loss.item()
+            kl = global_kl(loss)
             ema = kl if ema is None else 0.9 * ema + 0.1 * kl
-            if ema < best_kl:
+            if ema < best_kl:                              # identical on every rank -> stays in sync
                 best_kl = ema
                 best_scales = [s.detach().clone() for s in scales]
             if step % args.log_every == 0 or step == 1:
-                print(f"   step {step}/{args.steps}  KL={kl:.4f}  ema={ema:.4f}  best={best_kl:.4f}")
+                log(f"   step {step}/{args.steps}  KL={kl:.4f}  ema={ema:.4f}  best={best_kl:.4f}")
             if args.ckpt_every and step % args.ckpt_every == 0:
                 restore_best()
-                save_student(model, args.student_path, args.out, BLOCK_SIZE)
+                if is_main:
+                    save_student(core, args.student_path, args.out, BLOCK_SIZE)
+                    print(f"   checkpoint saved at step {step} (best ema KL {best_kl:.4f})")
                 torch.cuda.empty_cache()
-                print(f"   checkpoint saved at step {step} (best ema KL {best_kl:.4f})")
-                # resume training from where we were (best is a snapshot, not a reset)
+                if ddp:
+                    import torch.distributed as dist
+                    dist.barrier()                          # others wait while rank 0 writes
+
     restore_best()
-    save_student(model, args.student_path, args.out, BLOCK_SIZE)
-    print(f"Done. Best ema KL {best_kl:.4f}. Trained student -> {args.out}")
+    if is_main:
+        save_student(core, args.student_path, args.out, BLOCK_SIZE)
+        print(f"Done. Best ema KL {best_kl:.4f}. Trained student -> {args.out}")
+    if ddp:
+        import torch.distributed as dist
+        dist.barrier()
+        dist.destroy_process_group()
 
 
 def save_student(model, student_path, out_dir, block_size):

@@ -314,6 +314,8 @@ def main():
                              "Subdirectories are loaded and mixed; takes priority over --fallback.")
     parser.add_argument("--text-field", type=str, default=None,
                         help="Override the text column name (auto-detected if omitted).")
+    parser.add_argument("--seed", type=int, default=42,
+                        help="Sampling seed. Use a DIFFERENT value (e.g. 123) for a held-out eval set.")
     parser.add_argument("--output", type=str, default="./output/calibration_data.json",
                         help="Path to save calibration data")
     args = parser.parse_args()
@@ -325,6 +327,7 @@ def main():
         cache_dir=args.cache_dir,
         local_dir=args.local_dir,
         text_field=args.text_field,
+        seed=args.seed,
     )
 
     save_calibration_cache(samples, Path(args.output))

@@ -144,30 +144,40 @@ def _deploy_ternary(W: torch.Tensor, s: torch.Tensor, block_size: int):
     return deq, sparsity
 
 
-@torch.no_grad()
-def _out_mse(X_list, W_fp, W_use, device, inp):
-    """Mean output MSE of (X @ W_use^T) vs the FP target (X @ W_fp^T) over batches."""
-    tot, cnt = 0.0, 0
-    for Xb in X_list:
+def _build_gram(input_batches, inp, device):
+    """H = Σ_b X_bᵀ X_b ([inp,inp]) plus total row count N, in ONE pass over the cached
+    inputs. Collapsing the calibration data into the Gram matrix makes every optimization
+    step O(out·inp²) and independent of the number of rows — no per-epoch data passes and
+    no per-step host→device copies (the two things that made the old loop slow)."""
+    H = torch.zeros(inp, inp, device=device, dtype=torch.float32)
+    N = 0
+    for Xb in input_batches:
         X = Xb.to(device, torch.float32).reshape(-1, inp)
-        tot += F.mse_loss(X @ W_use.t(), X @ W_fp.t(), reduction="sum").item()
-        cnt += X.shape[0] * W_fp.shape[0]
-    return tot / max(cnt, 1)
+        H.addmm_(X.t(), X)                         # H += Xᵀ X
+        N += X.shape[0]
+        del X
+    return H, N
 
 
-def reconstruct_linear(module, input_batches, block_size, epochs, lr, device):
-    """Short SGD reconstruction of one nn.Linear to ternary. Sets module.weight to the
-    deployed ternary*scale weight and returns per-linear stats. Keep-best + grad-clip make
-    it monotonic: the deployed weight is never worse (in output MSE) than the RTN init."""
-    W_fp = module.weight.data.detach().to(device, torch.float32)     # frozen target
+def reconstruct_linear(module, input_batches, block_size, iters, lr, device):
+    """Ternary reconstruction of one nn.Linear. Minimises the SAME output error
+    ‖X(Wq−W_fp)ᵀ‖²_F as before, but evaluated through the precomputed Gram matrix
+    H = XᵀX, so each step is exact full-batch and data-size-independent. Keep-best on the
+    deployed (rounded) weight plus early-stop keep the result monotonic and ≥ the RTN init."""
+    W_fp = module.weight.data.detach().to(device, torch.float32)     # frozen target [out,inp]
     out, inp = W_fp.shape
     flat, _ = _blocks(W_fp, block_size)
-    s_init = flat.abs().mean(dim=1).clamp_min(1e-8)                    # abs-mean init == RTN
+    s_init = flat.abs().mean(dim=1).clamp_min(1e-8)                   # abs-mean init == RTN
 
-    # eval on a couple of batches; epoch-0 (RTN) is always a candidate
-    eval_batches = input_batches[:min(2, len(input_batches))]
+    H, N = _build_gram(input_batches, inp, device)                   # one-time Gram build
+    denom = float(N * out)
+
+    def gram_mse(W_use):                                             # mean output MSE via H
+        D = W_use - W_fp
+        return ((D @ H) * D).sum() / denom
+
     best_deploy, best_sparsity = _deploy_ternary(W_fp, s_init, block_size)
-    init_mse = _out_mse(eval_batches, W_fp, best_deploy, device, inp)
+    init_mse = gram_mse(best_deploy).item()                          # RTN is always a candidate
     best_mse = init_mse
 
     W = W_fp.clone().requires_grad_(True)
@@ -175,31 +185,31 @@ def reconstruct_linear(module, input_batches, block_size, epochs, lr, device):
     opt = torch.optim.Adam([{"params": [W], "lr": lr},
                             {"params": [s], "lr": lr * 0.1}])
 
-    n = len(input_batches)
-    for _ in range(epochs):
-        for bi in torch.randperm(n).tolist():
-            X = input_batches[bi].to(device, torch.float32).reshape(-1, inp)
-            with torch.no_grad():
-                target = X @ W_fp.t()
-            Wq = ste_ternary(W, s, block_size)
-            loss = F.mse_loss(X @ Wq.t(), target)
-            opt.zero_grad(set_to_none=True)
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_([W, s], 1.0)               # stability
-            opt.step()
-        # keep-best on the DEPLOYED (rounded) weight — guards against divergence
+    stale = 0
+    for _ in range(iters):
+        Wq = ste_ternary(W, s, block_size)
+        D = Wq - W_fp
+        loss = ((D @ H) * D).sum() / denom
+        opt.zero_grad(set_to_none=True)
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_([W, s], 1.0)                   # stability
+        opt.step()
+        # keep-best on the DEPLOYED (rounded) weight; early-stop once it stops improving
         with torch.no_grad():
             dep, sp = _deploy_ternary(W, s, block_size)
-            m = _out_mse(eval_batches, W_fp, dep, device, inp)
-            if m < best_mse:
-                best_mse, best_deploy, best_sparsity = m, dep.clone(), sp
+            m = gram_mse(dep).item()
+            if m < best_mse - 1e-9:
+                best_mse, best_deploy, best_sparsity, stale = m, dep.clone(), sp, 0
+            else:
+                stale += 1
+                if stale >= 40:
+                    break
 
     deq, sparsity, final_mse = best_deploy, best_sparsity, best_mse
     cos = F.cosine_similarity(deq.reshape(1, -1), W_fp.reshape(1, -1)).item()
 
     module.weight.data.copy_(deq.to(module.weight.dtype))
-    del W_fp, W, s, opt, deq, best_deploy
-    torch.cuda.empty_cache()
+    del W_fp, W, s, opt, H, deq, best_deploy
     return {"cosine": cos, "sparsity": sparsity,
             "init_mse": init_mse, "final_mse": final_mse}
 
@@ -217,9 +227,15 @@ def main():
     ap.add_argument("--samples", type=int, default=32,
                     help="Calibration samples (trades CPU activation cache + quality).")
     ap.add_argument("--batch-size", type=int, default=2)
-    ap.add_argument("--epochs", type=int, default=20, help="SGD passes per linear.")
+    ap.add_argument("--iters", type=int, default=200,
+                    help="Max full-batch reconstruction steps per linear "
+                         "(early-stops after 40 steps without improvement).")
+    ap.add_argument("--epochs", type=int, default=None,
+                    help="(Legacy, ignored — superseded by --iters.)")
     ap.add_argument("--lr", type=float, default=1e-3)
     args = ap.parse_args()
+    if args.epochs is not None:
+        print(f"⚠️  --epochs is ignored in the Gram-matrix reconstruction; using --iters {args.iters}")
 
     model_path = Path(args.model_path)
     orig_config_path = Path(args.orig_config_path) if args.orig_config_path else model_path
@@ -251,6 +267,9 @@ def main():
         model = AutoModelForCausalLM.from_config(config, trust_remote_code=True)
 
     device = "cuda:0" if torch.cuda.is_available() else "cpu"
+    if device != "cpu":
+        torch.backends.cuda.matmul.allow_tf32 = True   # tensor-core fp32 matmul (~2x on Ampere)
+        torch.backends.cudnn.allow_tf32 = True
     print(f"🖥️ device: {device}")
 
     input_ids = [torch.tensor(s, dtype=torch.long) for s in samples]
@@ -392,16 +411,18 @@ def main():
             for h in hooks:
                 h.remove()
 
-            # Reconstruct each target Linear, then free its cached inputs
+            # Reconstruct each target Linear (independent given the captured FP inputs).
             stats["layers"][str(l)] = {}
             for name, module in targets.items():
                 r = reconstruct_linear(module, cached[name], args.block_size,
-                                       args.epochs, args.lr, device)
+                                       args.iters, args.lr, device)
                 stats["layers"][str(l)][name] = r
+                cached[name] = None                            # free this linear's cache
                 print(f"   {name:28s} cos={r['cosine']:.4f}  spars={r['sparsity']:.3f}  "
-                      f"mse {r['init_mse']:.3e} → {r['final_mse']:.3e}")
-                cached[name] = None
+                      f"mse {r['init_mse']:.3e} → {r['final_mse']:.3e}", flush=True)
             del cached
+            if device != "cpu":
+                torch.cuda.empty_cache()                    # once per layer, not per linear
 
         # Pass B: propagate QUANTIZED activations to the next layer (error compensation)
         next_layer_inputs = run_layer_forward(layer, f"   L{l} propagate (quantized)")

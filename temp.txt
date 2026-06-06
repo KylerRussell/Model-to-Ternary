@@ -1,0 +1,9 @@
+After 1 pass QAT: 
+========================================================
+  FP teacher  perplexity :   3.0126
+  ternary     perplexity :   4.9977
+  ppl ratio (ternary/FP) :   1.6590  (+65.9%)
+  mean top-64 KL(FP||tern):   0.7509 nats
+  top-1 agreement        :   71.52%
+========================================================
+Guide: ppl ratio < ~1.10, KL < ~0.3, agreement > ~85% = tracks the original well.
