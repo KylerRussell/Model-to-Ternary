@@ -138,6 +138,175 @@ def topk_kl_loss(student_logits, teacher_idx, teacher_val, temperature=1.0):
     return kl.mean() * (temperature ** 2)
 
 
+def cakld_loss(student_logits, teacher_idx, teacher_val, temperature=1.0):
+    """Confidence-Aware KL (CAKLD, BitDistiller ACL 2024): identical to topk_kl_loss but each
+    token's KL is weighted by the teacher's peak probability at that position, so high-confidence
+    teacher tokens dominate the gradient. This directly targets generation dissociation: low-entropy
+    (confident) positions get high weight, high-entropy (uncertain) positions get low weight.
+    Same shapes as topk_kl_loss."""
+    s = student_logits.float() / temperature
+    log_Z = torch.logsumexp(s, dim=-1, keepdim=True)
+    s_topk = torch.gather(s, -1, teacher_idx.long())
+    log_q = s_topk - log_Z
+    p = torch.softmax(teacher_val.float() / temperature, dim=-1)
+    kl = (p * (torch.log(p + 1e-9) - log_q)).sum(-1)        # [B, T]
+    # p.max over top-k approximates full-vocab confidence; detach so weights don't fight the loss
+    confidence = p.max(dim=-1).values.detach()               # [B, T]
+    return (kl * confidence).sum() / confidence.sum().clamp_min(1e-8) * (temperature ** 2)
+
+
+def hidden_state_loss(student_h, teacher_h):
+    """Feature distillation on the final (post-norm) hidden state. Shapes [B, T, H].
+
+    lm_head is a frozen linear shared by teacher and student, so matching the full 5120-dim
+    hidden vector is a FULL-distribution constraint — strictly stronger than the top-k logit KL,
+    which only pins the teacher's 64 largest logits and leaves the rest of the vocabulary (and
+    every intermediate feature) unconstrained. This term directly targets the generation-
+    dissociation gap (coherent perplexity but degraded greedy generation) that top-k KL ignores.
+
+    Plain fp32 MSE; weight it against the KL via the caller's --feat-weight. Watch the printed
+    feat vs KL magnitudes — post-norm hidden RMS is ~O(1)/element, so MSE and KL are usually the
+    same order, but lower the weight if feat dominates the gradient."""
+    return F.mse_loss(student_h.float(), teacher_h.float())
+
+
+class _TopKKLFunc(torch.autograd.Function):
+    """Fused topk-KL / CAKLD loss with memory-safe backward.
+
+    The naive approach saves gathered_w [B*T, K, H] (~320 MB on GPU) in the autograd
+    graph for the bmm backward.  That tensor stays alive across the entire model backward,
+    which means the ste_ternary recompute during gradient checkpointing sees ~320 MB of
+    extra live memory and OOMs on GPU1 (the active group card for layers 32-63).
+
+    This function fuses the entire loss, computes grad_h analytically, and del's
+    gathered_w *before* the chunked log_Z gradient loop.  By the time gradient
+    checkpointing triggers the ste_ternary recompute, those ~320 MB are back in the
+    CUDA cache and reusable.
+
+    Gradient derivation:
+        loss = T² × Σ_i c_i × KL_i,  c_i = 1/B_T  (topk_kl)  or  conf_i/Σconf (cakld)
+        KL_i = Σ_k p_ik (log p_ik − log q_ik),  log q_ik = (h_i·w_k)/T − log Z_i
+        ∂(loss)/∂(h_i) = (T·c_i·grad_loss) × [Σ_j q_ij·w_j − Σ_k p_ik·w_k]
+                       =   factor_i         × [  full-softmax term  −  topk term  ]
+    """
+
+    @staticmethod
+    def forward(ctx, h_flat, w_cpu, t_idx_flat, t_val_flat,
+                temperature, chunk_size, use_cakld):
+        B_T, H = h_flat.shape
+        V = w_cpu.shape[0]
+        K = t_idx_flat.shape[1]
+        dev = h_flat.device
+        h = h_flat.float()  # fp32 for numerical stability; h_flat may be bf16
+
+        with torch.no_grad():
+            # ── log Z via 2-pass chunked logsumexp ──────────────────────────────────
+            row_max = h.new_full((B_T,), float('-inf'))
+            for i in range(0, V, chunk_size):
+                c = h @ w_cpu[i:i + chunk_size].to(dev, torch.float32).T / temperature
+                row_max = torch.maximum(row_max, c.amax(-1))
+            log_sum = h.new_zeros(B_T)
+            for i in range(0, V, chunk_size):
+                c = h @ w_cpu[i:i + chunk_size].to(dev, torch.float32).T / temperature
+                log_sum += torch.exp(c - row_max.unsqueeze(-1)).sum(-1)
+            log_Z = row_max + torch.log(log_sum)  # [B_T]
+
+            # ── topk scores (gathered_w briefly allocated then freed) ───────────────
+            idx_cpu = t_idx_flat.reshape(-1).cpu()
+            gathered_w = w_cpu[idx_cpu].reshape(B_T, K, H).to(dev, torch.float32)  # [B_T, K, H]
+            s_topk = (torch.bmm(h.unsqueeze(1),
+                                 gathered_w.transpose(-2, -1)).squeeze(1)
+                      / temperature)  # [B_T, K]
+            del gathered_w  # free ~320 MB; not needed for loss or backward
+
+            # ── KL divergence ────────────────────────────────────────────────────────
+            log_q = s_topk - log_Z.unsqueeze(-1)
+            p = torch.softmax(t_val_flat.float() / temperature, dim=-1)
+            kl = (p * (torch.log(p + 1e-9) - log_q)).sum(-1)  # [B_T]
+
+            if use_cakld:
+                confidence = p.max(dim=-1).values
+                denom = confidence.sum().clamp_min(1e-8)
+                loss = (kl * confidence).sum() / denom * (temperature ** 2)
+            else:
+                loss = kl.mean() * (temperature ** 2)
+
+        to_save = [h_flat, w_cpu, t_idx_flat, t_val_flat, log_Z]
+        if use_cakld:
+            to_save += [confidence, denom.unsqueeze(0)]
+        ctx.save_for_backward(*to_save)
+        ctx.temperature = temperature
+        ctx.chunk_size = chunk_size
+        ctx.use_cakld = use_cakld
+        return loss
+
+    @staticmethod
+    def backward(ctx, grad_loss):
+        if ctx.use_cakld:
+            h_flat, w_cpu, t_idx_flat, t_val_flat, log_Z, confidence, denom = ctx.saved_tensors
+            denom = denom.squeeze()
+        else:
+            h_flat, w_cpu, t_idx_flat, t_val_flat, log_Z = ctx.saved_tensors
+            confidence = denom = None
+
+        temperature = ctx.temperature
+        chunk_size  = ctx.chunk_size
+        B_T, H = h_flat.shape
+        V = w_cpu.shape[0]
+        K = t_idx_flat.shape[1]
+        dev = h_flat.device
+
+        h = h_flat.float()
+        p = torch.softmax(t_val_flat.float() / temperature, dim=-1)  # [B_T, K]
+
+        # factor_i = T · c_i · grad_loss   (the scalar in front of [E_q[w] - E_p[w]])
+        if ctx.use_cakld:
+            c = confidence / denom * (temperature ** 2)
+        else:
+            c = h.new_full((B_T,), temperature ** 2 / B_T)
+        factor = c * float(grad_loss) / temperature  # [B_T]
+
+        grad_h = torch.zeros_like(h)  # fp32 accumulator on dev
+
+        # ── topk term: -factor_i · Σ_k p_ik · w_k  (brief alloc, freed immediately) ──
+        idx_cpu = t_idx_flat.reshape(-1).cpu()
+        gathered_w = w_cpu[idx_cpu].reshape(B_T, K, H).to(dev, torch.float32)  # [B_T, K, H]
+        # [B_T, 1, K] @ [B_T, K, H] → [B_T, H]
+        grad_h -= torch.bmm((factor.unsqueeze(-1) * p).unsqueeze(1),
+                             gathered_w).squeeze(1)
+        del gathered_w  # free ~320 MB before model-backward recompute starts
+
+        # ── full-softmax term: +factor_i · Σ_j q_ij · w_j  (chunked, O(cs·H) peak) ──
+        for i in range(0, V, chunk_size):
+            w_c = w_cpu[i:i + chunk_size].to(dev, torch.float32)
+            q_c = torch.exp(h @ w_c.T / temperature - log_Z.unsqueeze(-1))  # [B_T, cs]
+            grad_h += (factor.unsqueeze(-1) * q_c) @ w_c
+            del w_c, q_c
+
+        # 7 inputs: h_flat, w_cpu, t_idx_flat, t_val_flat, temperature, chunk_size, use_cakld
+        return grad_h.to(h_flat.dtype), None, None, None, None, None, None
+
+
+def chunked_hidden_state_loss(h_last, lm_head_weight, teacher_idx, teacher_val,
+                               temperature=1.0, loss_type="topk_kl", chunk_size=32768):
+    """Distillation loss from last hidden state [B, T, H] without materialising [B, T, V].
+
+    Uses _TopKKLFunc which frees the [B*T, K, H] gathered_w tensor inside its backward
+    before the model's gradient checkpointing recompute, saving ~320 MB on the active GPU.
+    Use this instead of topk_kl_loss/cakld_loss for group_size > 2."""
+    if lm_head_weight.device.type == "meta":
+        raise ValueError("lm_head_weight is a meta tensor; pass the saved CPU weight instead")
+    B, T, H = h_last.shape
+    K = teacher_idx.shape[-1]
+    h_flat     = h_last.reshape(B * T, H)
+    t_idx_flat = teacher_idx.reshape(B * T, K)
+    t_val_flat = teacher_val.reshape(B * T, K)
+    return _TopKKLFunc.apply(
+        h_flat, lm_head_weight, t_idx_flat, t_val_flat,
+        float(temperature), chunk_size, loss_type == "cakld"
+    )
+
+
 # ─────────────────────────── shared loading helpers ────────────────────────────────
 
 def load_calib_batches(calib_path, batch_size, seq, device):
@@ -283,18 +452,28 @@ def precompute_teacher(args):
     batches = load_calib_batches(args.calib, 1, args.seq, device)
     if args.max_samples:
         batches = batches[:args.max_samples]
-    print(f"{len(batches)} batches; caching top-{args.topk} logits")
-    idx_all, val_all = [], []
+    print(f"{len(batches)} batches; caching top-{args.topk} logits"
+          + ("  + final hidden states" if args.cache_hidden else ""))
+    idx_all, val_all, hid_all = [], [], []
     with torch.no_grad():
         for i, b in enumerate(batches):
-            out = model(b.to("cuda:0"))                       # accelerate moves it onward
+            # output_hidden_states keeps every layer's hidden alive until forward end (~650 MB
+            # transient for 64 layers); only needed when caching the final hidden state.
+            out = model(b.to("cuda:0"), output_hidden_states=args.cache_hidden)  # accelerate moves it on
             logits = out.logits[0]                            # [T, V]
             val, idx = torch.topk(logits.float(), args.topk, dim=-1)
             idx_all.append(idx.to(torch.int32).cpu())
             val_all.append(val.to(torch.float16).cpu())
+            if args.cache_hidden:
+                # hidden_states[-1] is the post-norm final hidden (== base model last_hidden_state),
+                # exactly what the student matches. fp16 on CPU: ~T*H*2 bytes/seq.
+                hid_all.append(out.hidden_states[-1][0].to(torch.float16).cpu())
             if (i + 1) % 10 == 0:
                 print(f"   {i + 1}/{len(batches)}")
-    torch.save({"idx": idx_all, "val": val_all, "seq": args.seq}, args.teacher_cache)
+    payload = {"idx": idx_all, "val": val_all, "seq": args.seq}
+    if args.cache_hidden:
+        payload["hidden"] = hid_all
+    torch.save(payload, args.teacher_cache)
     print(f"Saved teacher cache -> {args.teacher_cache}")
 
 
@@ -349,8 +528,17 @@ def train(args):
         model = DDP(core, device_ids=[local_rank], output_device=local_rank,
                     broadcast_buffers=False, find_unused_parameters=False, static_graph=True)
     opt = torch.optim.Adam(scales, lr=args.lr)            # scales still reference the live params
+    loss_fn = cakld_loss if getattr(args, "loss_fn", "topk_kl") == "cakld" else topk_kl_loss
+    log(f"   loss function: {getattr(args, 'loss_fn', 'topk_kl')}")
 
     cache = torch.load(args.teacher_cache)
+    feat_w = getattr(args, "feat_weight", 0.0)
+    if feat_w > 0 and "hidden" not in cache:
+        raise SystemExit("--feat-weight > 0 needs teacher hidden states; regenerate the teacher "
+                         "cache with --cache-hidden (delete the old one first).")
+    if feat_w > 0:
+        log(f"   + hidden-state feature distillation (weight {feat_w}); note E2E-QP trains only "
+            f"scales, so this is weaker leverage than in block_qat.py")
     batches = load_calib_batches(args.calib, 1, args.seq, device)
     n = min(len(batches), len(cache["idx"]))
     if args.max_samples:
@@ -383,8 +571,15 @@ def train(args):
             ids = batches[bi].to(device)
             t_idx = cache["idx"][bi].unsqueeze(0).to(device)
             t_val = cache["val"][bi].unsqueeze(0).to(device)
-            out = model(ids)
-            loss = topk_kl_loss(out.logits, t_idx, t_val, args.temperature)
+            out = model(ids, output_hidden_states=feat_w > 0)
+            loss = loss_fn(out.logits, t_idx, t_val, args.temperature)
+            if feat_w > 0:
+                # DDP-safe: call the wrapped model's forward (grad sync) and take the post-norm
+                # final hidden from output_hidden_states[-1]. (Can't use core.model() under DDP —
+                # it would bypass the gradient all-reduce.)
+                sh = out.hidden_states[-1]
+                th = cache["hidden"][bi].unsqueeze(0).to(sh.device)
+                loss = loss + feat_w * hidden_state_loss(sh, th)
             opt.zero_grad(set_to_none=True)
             loss.backward()                                # DDP all-reduces the scale grads here
             torch.nn.utils.clip_grad_norm_(scales, 1.0)
@@ -508,6 +703,13 @@ def smoke():
     print(f"top-k KL scale-training: {first:.4f} -> {last:.4f} "
           f"({'OK reduces' if last < first else 'NO improvement'})")
     assert last < first, "scale training did not reduce KL"
+
+    # 5) hidden-state feature loss: 0 at exact match, positive under mismatch
+    h_t = torch.randn(2, 8, 32)
+    assert hidden_state_loss(h_t, h_t).item() == 0.0
+    assert hidden_state_loss(h_t + 0.1, h_t).item() > 0.0
+    print("hidden_state_loss: OK (0 at match, >0 otherwise)")
+
     print("\n✅ all smoke checks passed")
 
 
@@ -523,6 +725,11 @@ def main():
     ap.add_argument("--teacher-cache", default="./output_recovery/teacher_topk.pt")
     ap.add_argument("--out", default="./output_e2eqp/modified_model")
     ap.add_argument("--topk", type=int, default=64)
+    ap.add_argument("--cache-hidden", action="store_true",
+                    help="Also cache the teacher's final post-norm hidden state per token (enables "
+                         "hidden-state feature distillation via --feat-weight in block_qat.py). Adds "
+                         "~seq*5120*2 bytes/sequence to the cache (~5 GB at 512 seqs × 1024 tokens). "
+                         "Regenerate the teacher cache (delete teacher_topk.pt) if it lacks this.")
     ap.add_argument("--seq", type=int, default=1024)
     ap.add_argument("--steps", type=int, default=500)
     ap.add_argument("--lr", type=float, default=2e-5)
@@ -535,6 +742,16 @@ def main():
     ap.add_argument("--cpu-mem", default="120GiB", help="CPU memory cap for teacher offload.")
     ap.add_argument("--max-samples", type=int, default=0,
                     help="Cap calibration batches used (0 = all). Lower = faster teacher pass + training.")
+    ap.add_argument("--loss-fn", default="topk_kl", choices=["topk_kl", "cakld"],
+                    help="Distillation loss: topk_kl (standard) or cakld (confidence-aware, "
+                         "BitDistiller — weights each token by teacher peak probability, "
+                         "targets greedy-generation fidelity).")
+    ap.add_argument("--feat-weight", type=float, default=0.0,
+                    help="Weight for hidden-state feature distillation added to the KL loss "
+                         "(0 = off; behavior unchanged). Matches the student's final post-norm "
+                         "hidden to the teacher's (cache it via --cache-hidden). E2E-QP trains "
+                         "only scales, so this is weaker leverage than block_qat.py's assignment "
+                         "training — the main use is block_qat.")
     args = ap.parse_args()
 
     if args.smoke:

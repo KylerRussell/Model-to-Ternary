@@ -34,7 +34,7 @@ def load_calibration_samples(cache_path: Path) -> list:
     """Load tokenized calibration data."""
     if not cache_path.exists():
         print(f"❌ Calibration cache not found at {cache_path}!")
-        print("   Please run: python calibration.py --fallback --samples 64")
+        print("   Please run: python build_diverse_calib.py --orig-model <snap> --ctm-data <dir> --out <path>")
         sys.exit(1)
     with open(cache_path) as f:
         samples = json.load(f)

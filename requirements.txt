@@ -7,3 +7,5 @@ numpy
 tqdm
 datasets
 huggingface_hub
+bitsandbytes>=0.41.0      # 8-bit/4-bit Adam (--adam8bit / --adam4bit in block_qat)
+galore-torch>=1.0.0       # GaLore gradient projection (--galore in block_qat; enables G=4)

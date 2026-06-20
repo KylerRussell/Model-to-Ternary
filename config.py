@@ -57,7 +57,11 @@ LINEAR_VALUE_HEAD_DIM = 128
 # ──────────────────────────────────────────────────────────────────────
 # Quantization parameters
 # ──────────────────────────────────────────────────────────────────────
-BLOCK_SIZE = 128      # group size for per-block scaling (g128)
+BLOCK_SIZE = 256      # per-block scale granularity. MUST match the TQ2_0 deploy grid (one fp16
+                      # scale per 256 weights) so training and export use the SAME grid — training
+                      # at 128 then exporting at 256 collapsed every scale-pair (+24pt ppl ratio,
+                      # measured). 256 divides every quantized in_features. Block-AP, E2E-QP, and
+                      # QAT all read this, so the whole pipeline is now g256-native end to end.
 TERNARY_VALUES = (-1, 0, 1)
 
 # ──────────────────────────────────────────────────────────────────────
@@ -115,6 +119,17 @@ if PROTECT_UNROTATED_INPUTS:
     KEEP_FP16_PATTERNS = KEEP_FP16_PATTERNS + [".o_proj", ".down_proj"]
 # ────────────────────────────────────────────────────────────────────────────
 
+# ── Mixed precision: keep full-attention layers at FP16 ─────────────────────
+# When True, the 16 full-attention layers' self_attn projections (q/k/v/o) stay FP16;
+# only the 48 DeltaNet layers and all MLP projections are ternarized.
+# Rationale (Quamba/Q-Mamba literature): linear-attention/SSM layers carry larger output
+# outliers and are more quantization-sensitive than standard attention — ternarizing the
+# DeltaNet layers while keeping full-attention at FP16/Q4 gives disproportionate quality
+# for a small bpw increase, and is fully compatible with GGUF TQ2_0 as a per-tensor choice.
+# NOTE: this changes the quantization target — a new Phase 1→3 run is required.
+MIXED_PRECISION_FULL_ATTN = False
+# ────────────────────────────────────────────────────────────────────────────
+
 # ── Experiment 3: bug-vs-ceiling — quantize ONLY a few layers (DIAGNOSTIC) ──
 # Quantize the normal target tensors ONLY in these layer indices; every other layer
 # stays FP16-rotated. Ternarizing a few standard (full-attention) layers out of 64
@@ -152,6 +167,11 @@ def should_quantize(tensor_name: str) -> bool:
             if QUANTIZE_ONLY_LAYERS is not None:
                 li = _layer_index(tensor_name)
                 if li is None or li not in QUANTIZE_ONLY_LAYERS:
+                    return False
+            # Mixed-precision gate: keep full-attention self_attn projections at FP16
+            if MIXED_PRECISION_FULL_ATTN and ".self_attn." in tensor_name:
+                li = _layer_index(tensor_name)
+                if li is not None and LAYER_TYPES[li] == "full_attention":
                     return False
             return True
     return False
