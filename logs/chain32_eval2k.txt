@@ -1,0 +1,5 @@
+chain32 @32L — eval2k (NP=1946 SEQ=1024) — Sun Aug  9 04:46:09 PM CDT 2026
+  stage1 = arm F (down, 16M tok) = 78.35 / 0.3637 | target after E2E: 80.86 / 0.2977
+stage      agreement%   meanKL
+c2_up      78.35        0.3636
+c3_attn    78.35        0.3636

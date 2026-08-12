@@ -5,7 +5,15 @@ safetensors
 gguf>=0.13.0
 numpy
 tqdm
+psutil                    # src/memutil.py — RAM headroom checks / fail-closed memory guard
+pyarrow                   # src/build_diverse_calib.py — reads the local CTM parquet folders
 datasets
 huggingface_hub
-bitsandbytes>=0.41.0      # 8-bit/4-bit Adam (--adam8bit / --adam4bit in block_qat)
-galore-torch>=1.0.0       # GaLore gradient projection (--galore in block_qat; enables G=4)
+bitsandbytes>=0.41.0      # src/qat.py AdamW8bit. NOTE the CPU-resident assignment latents use
+                          # src/adam8bit_cpu.py instead (bnb's 8-bit optimizers are CUDA-only)
+
+# Fused Gated-DeltaNet recurrence kernels (Triton). Validated numerically equivalent to the
+# torch fallback (argmax-identical, ppl Δ~4e-4) and faster. fla is a namespace shim; fla-core holds
+# the actual fla.ops kernels. causal-conv1d intentionally NOT added (CUDA-13 build risk, marginal).
+flash-linear-attention
+fla-core

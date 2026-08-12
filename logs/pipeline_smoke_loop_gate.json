@@ -1,0 +1,15 @@
+{
+ "model": "output_smoke/e2eqp/modified_model",
+ "n": 48,
+ "think": true,
+ "temp": 0.6,
+ "maxnew": 2048,
+ "tau": 4.0,
+ "loop_rate": 0.375,
+ "trunc_rate": 0.3541666666666667,
+ "commit_rate": 0.6458333333333334,
+ "mean_comp_ratio": 3.519625214700301,
+ "max_comp_ratio": 18.198237885462554,
+ "mean_think_len": 818.1290322580645,
+ "n_closed": 31
+}

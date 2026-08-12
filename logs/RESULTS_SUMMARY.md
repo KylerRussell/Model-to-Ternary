@@ -1,0 +1,1118 @@
+# Condensed Experiment Results (distilled from logs/ before cleanup)
+
+Metrics: **in-domain ppl ratio (ternary/FP) / OOD ppl ratio / free-gen degeneration rep4% at bin7**
+(lower = better; teacher degen ≈ 40–46%). "recall" = multi-key associative-recall probe MEAN restr
+(FP≈0.9975). All 4B unless noted. Raw logs deleted after this summary; the mechanism narrative lives in
+`research_reports/PRIORITIZED_MECHANISM_CHECKLIST.md` + memory.
+
+## 1. Scale runs & GPTQ-vs-QAT crossover (the key scaling data)
+Post-E2E in-domain / OOD / degen (deployable). Both arms = same E2E (ema + γ2 + diverse calib; feat=0).
+
+| model | GPTQ+E2E | QAT+E2E | winner |
+|---|---|---|---|
+| **4B** (pipeline_test_4b) | ~1.399 | **1.3264** | QAT (Δ+0.073) |
+| **9B** (run_pipeline_test_9b, 4M tok) | **1.3194 / 1.7186 / 64.8%** | 1.8579 / 2.8085 / 83.1% | **GPTQ (Δ+0.539)** |
+| **27B** (4M tok) | **1.0791 / 1.4507 / 70.6%** | (worse) | **GPTQ (Δ+0.386)** |
+
+→ **Crossover confirmed: QAT>GPTQ at 4B, but GPTQ>QAT at 9B AND 27B (large margin).** GPTQ scales, QAT doesn't.
+**Mechanism (9B block-AP stage, pre-E2E):** QAT block-AP collapses to **14.08×** in-domain (OOD 24.6×) vs GPTQ's
+**2.64×** (OOD 5.08×) — the latent-weight scale-only QAT reconstruction breaks down at scale, and E2E can't
+rescue such a broken init. (GPTQ-vs-QAT-at-scale gets its own research prompt now that we have this data.)
+Note: 9B GPTQ deployable (1.3194/1.7186/64.8%) beats the 4B deployable on all 3 → good scaling.
+
+**Setup gotcha (fixed):** feature distillation (`--feat-weight>0 --cache-hidden`) makes a ~34GB hidden
+teacher cache; E2E `torch.load`s the WHOLE cache in EACH DDP rank → 2×34GB > 60GB RAM → swap-death + DDP
+socket-timeout hang. Dropped feat (unvalidated anyway; 4B baselines used feat=0). Re-enable only with a
+memory-safe (mmap/streamed/single-rank) cache loader.
+
+## 2. 4B mechanism campaign (block-AP=single QAT → E2E variants; run_4b_dg / exp_4b)
+| config | evals |
+|---|---|
+| baseline (single QAT, γ=1 E2E) | 1.3264 / 1.8846 / 88.5% |
+| **(b) γ=2 decision-weighted E2E — the deployable** | **1.3429 / 1.9305 / 68.8%** ✅ (degen win) |
+| (a) multi-layer N=4 QAT + γ2 | 1.3691 / 2.0481 / 72.1% ✗ |
+| γ=3 E2E | 1.3646 / 1.9805 / 84.0% ✗ |
+| (d) Tequila deadzone→bias + γ2 | 1.6317 / 2.4158 / 92.7% ✗✗ |
+Verdict: only **γ=2 decision-token weighting** helped (degen 88.5→68.8 at tiny ppl cost).
+
+## 3. Moonshot mechanism sweep (2026-07-01/02; C-clusters from the checklist)
+| mechanism | test | result | verdict |
+|---|---|---|---|
+| **C4 super-outlier** | per-256-block domination pre/post QuaRot | post-rot blocks ~Gaussian (exkurt≈0); 50–60× super-weights → 13–18× | **DEAD** — rotation already solved FM1 |
+| **C2 angular key** | ternarize only K, MSE vs angular, rest FP | recall: K-MSE 0.9875, K-angular 0.9675 (FP 0.9975) | **DEAD** — key not the bottleneck, no headroom |
+| **C3 contraction clamp** | α→α(1−ε) sweep on decay gate | recall 0.44→0.74 (peak ε≈.15–.2) BUT degen 68.8→99.2% @ε.05, 91% @ε.01; ppl worse | **REJECTED** — recall gain = forgetting artifact, destroys fluency |
+| **component ablation** | splice real ternary weights per-component into FP | recall collapse: **MLP ~79%**, whole DeltaNet recurrence ~27% (key least), full-attn ~18% | MLP is the source, recurrence the amplifier |
+| **C1 decision-weighted recon** | decision-token-weighted MLP Hessian | rel-err 0.673≈baseline; no recall gain | no cheap benefit (payoff downstream-only) |
+| **C6 joint MLP** (down absorbs gate/up err) | probe: −41% MLP out-err (0.673→0.399); pipeline GPTQ+C6→γ2 E2E | **1.4113 / 2.1302 / 79.6%** — worse than baseline | didn't beat baseline; α=0.5 retry was a wash (block-AP 2.46>2.35). Helps GPTQ path but GPTQ<QAT |
+Overall: of the reports' foldable mechanisms, **none beat the QAT+E2E baseline** → E2E is the real lever
+(see `research_reports/e2e_deep_research_prompt.md`).
+
+## 3b. E2E-QP improvement tests (4B, GPTQ block-AP init; fast metrics only, no MMLU/GPQA)
+Clean isolation: SAME GPTQ block-AP → baseline γ2 E2E vs mechanism γ2 E2E (`run_onpolicy_4b.sh` etc.).
+GPTQ→γ2-E2E baseline @4B = **1.4278 / 2.0738 / 82.5% degen / recall .705** (note: worse degen than the
+QAT deployable's 68.8% — consistent with QAT>GPTQ@4B — but better recall .705 vs .44).
+
+| mechanism | in / OOD / degen-b7 / recall | vs baseline |
+|---|---|---|
+| **A1+B2 on-policy** (25%, rollout96+96, unlik0.5) | 1.4363 / 2.0778 / **78.3%** / .7425 | degen −4.2pp, ~4.7× cost, under-dosed — **PARKED** |
+| **undertrain 4000 steps** (=2 epochs) | **1.3977 / 2.0714 / 71.7% / .830** | **🏆 BIG WIN — E2E under-converged** (degen −10.8pp, recall +.125) |
+| LR 1e-5 | 1.4575 / 2.1025 / 85.2% / .703 | worse (4B wants higher LR) |
+| A2 skew-KL α.1 | 1.5670 / 2.4557 / 86.9% / .745 | worse everywhere |
+| B4 Fisher-EMA | 1.4284 / 2.0756 / 91.5% / .748 | neutral ppl, worse degen (Adam already preconditions) |
+| A3(ii) MLP-input scale (norm-fold) | 1.4276 / 2.0699 / 87.9% / .708 | ran OK (fold works), no gain |
+| A4 down_proj moves (STE, 8-bit Adam) | 1.4262 / 2.0732 / 87.5% / .765 | neutral-to-worse (flat ppl, degen +5pp, recall +.06) |
+
+**E2E campaign verdict:** the report's mechanisms (A2/B4/A3) were all neutral-to-worse; the ONLY win was
+**"E2E was under-converged" → 2× steps (2000→4000, 1→2 epochs over the same 4M calib): degen 82.5→71.7%,
+recall .705→.830.** 2000 steps already = ~1 full epoch. **Decision (user): 2 epochs is the compute
+sweet-spot; don't chase 4 epochs (8000 steps) — real headroom is MORE DATA (bigger calib), not more passes.**
+
+**On-policy verdict (2026-07-03):** mechanism WORKS directionally (degen/slope/recall all improve, ppl
+flat) but the win is SMALL and it costs ~4.7× baseline E2E wall-clock (rollout generation). **Diagnosed
+UNDER-DOSED: rollout len 96 ≪ the 480-token degen-eval regime**, so the student is never exposed to its
+own drift at the LONG contexts where looping actually happens. **PARKED for now due to time cost** —
+future work: re-test with rollout→256-480, higher on-policy frac, more steps to see how far it pushes
+degen; run it LAST after the cheaper mechanisms. Impl lives in `src/e2e_qp_distill.py` (`--on-policy-*`).
+
+## 4. Reference baselines
+- **4B deployable:** QAT→γ2 E2E = **1.3429 / 1.9305 / 68.8%** (teacher free-gen degen 46%).
+- **27B deployable:** GPTQ→scale-only E2E, 4M tok = **1.0791 / 1.4507 / 70.6%**.
+- Recall probe: FP ≈ 0.9975, full-ternary ≈ 0.4425.
+- The real bar: beat 9B-q8 (MMLU-Pro 0.542 / GPQA 0.428) on downstream — not yet measured on our model.
+
+---
+## 5. GPTQ-init QAT strengthening + downstream + data-scaling (2026-07, post-cleanup condense)
+
+**Mechanism recap:** QAT was never broken — the old arm was a strawman (cold FP-init, hot 1e-4 LR). The win is
+layer-type-conditional: attention/DeltaNet are OPTIMIZER-bound (STE polish helps), MLP is near-Babai-optimal
+(GPTQ≡CVP, keep-best reverts every MLP polish). Recipe = GPTQ-init + freeze MLP + STE-polish attn-only + keep-best.
+
+**4B strengthening sweep (block-AP ppl, in-domain):** gptq_op 2.7851 → decider full-QAT (GPTQ-init, name-route,
+polish-then-revert-MLP) 2.5173 → best A1 attn-only STE **a1_lr1e-4_ep4 = 1.8315** (freeze-MLP-up-front beats
+polish-then-revert; LR/epoch-hungry, reverts=0). A4 saliency helps at moderate LR (3e-5/ep4 = 1.8932 vs matched MSE 1.9170). A2 AdaRound
+= NO-OP (reverts all, step-starved: needs ~2-20k steps not ~64-256). A3 coupling-route underperforms plain A1.
+
+**4B post-E2E (NP=24 ID/OOD/KL/flips):** plain-GPTQ→E2E 1.4278/2.0738/0.4535/24.07 · decider qatgi_lr1e-5 1.4227/
+2.0126/0.4447/23.73 · **A6 (a1_lr1e-4_ep4 ×2E2E) 1.3566/1.9798/0.3904/22.05** (overall carry) · saliency×hiLR
+1.3499/2.0224/0.3875/21.87 (best ID/KL/flips but WORST OOD = overfit; contradicts researcher Pareto prediction).
+No ppl↔KL/flips decoupling at matched NP. Carry A6 to 27B; pick polish-LR by OOD (high-LR overfits OOD).
+
+**4B DOWNSTREAM (MMLU-Pro / GPQA, samples=4):** tern4b-A6(1.81GB) 18.2/17.4 · q0.8b(0.81GB) 17.8/13.3 ·
+q2b(2.01GB) 27.4/25.3 · q4b-FP(4.48GB) 47.7/36.0. → 4B ternary CATASTROPHIC (−62% rel MMLU vs FP), loses to
+same-mem 2B-q8. BUT prior UNOPT 27B ternary: MMLU 61.7/**50.3**/54.2(9B) · GPQA 48.4/**38.8**/42.8(9B) — 27B
+absorbs ternary ~3.4× better (−18% not −62%), only ~4pts short of 9B-q8. 27B is the right regime; 4B = mechanism
+testbed only. TARGETS: beat 9B-q8 54.2/42.8; improve unopt-27B 50.3/38.8; FP ceiling 61.7/48.4.
+
+**4B E2E DATA-SCALING (fixed A6 skeleton, --epochs 2; tokens→ID/OOD/KL/flips):** 0.5M 1.4357/2.1237/0.4396/23.97 ·
+4M 1.3541/1.9848/0.3910/22.02 · **16M 1.2421/1.9469/0.2901/18.28** · 64M 1.2784/1.8997/0.3264/19.85. KEY: OOD
+monotonic↓ (unsaturated) BUT KL/flips/ID form a U — best @16M, REGRESS @64M (broader mix → better OOD, less
+in-domain-specialized). Since KL/flips=downstream proxy, **27B E2E sweet spot = ~16M tokens, NOT more** (also ~4×
+cheaper). ~1807 sec/Mtok (linear at fixed epochs). Block-AP weights SATURATE ~few-k samples; only E2E scales w/ data.
+Plot: calib_sweep_curve.png.
+
+**Tooling added:** src/block_ap_recovery.py --qat-gptq-init/--qat-keep-best/--qat-attn-only/--qat-adaround/
+--qat-route-coupling/--qat-loss saliency; src/build_saliency.py; src/kl_flips_eval.py; e2e_qp_distill.py --epochs +
+mmap teacher-load; run_4b_strengthen_sweep.sh, run_4b_saliency_himlr.sh, run_4b_calib_sweep.sh, export_4b_gguf.sh,
+eval_harness/run_evals_4b.sh; converter qwen2-tokenizer fix for 0.8B.
+
+---
+## 6. Placement thesis (CDQuant, margin-Jacobian) — ALL NEGATIVE (2026-07-04) + NP=48 degen ref
+
+Thesis "place the error, don't fight it" — better ASSIGNMENT placement (beyond greedy GPTQ) survives E2E?
+Verdict: exhausted/negative — GPTQ is already near-optimal placement; scale-only E2E redoes any placement gain.
+- **CDQuant** (coordinate-descent assignment refinement, same on-grid objective): block-AP byte-identical to
+  plain GPTQ (no-op); GPTQ+CDQuant→E2E = **1.4274 / 2.0748** ≡ baseline 1.4278/2.0738. No survival.
+- **#4 Margin-Jacobian** (re-quantize MLP with a margin-sensitivity-weighted Hessian): FAILED badly at every
+  strength — raw λ=1 → **1.6966 / 2.7795**; shrinkage λ=0.2 → **1.6796 / 2.7371** (both ≫ baseline; recall UP
+  = the recall-probe-gaming pattern). Metric-aligned placement HURTS (ill-conditioned).
+- Together with CDQuant no-op → placement thesis fully refuted. Levers are convergence × DATA, not placement.
+
+**NP=48 degen reference (the low-noise degen metric; NP=8 was ~7pp noisy):** plain-GPTQ→E2E b7=**90.6%**
+(slope +70.8pp); gptq_cdqE2E b7=89.1%; teacher b0=9.9%→b7=58.4%. (Strengthening post-E2E degen was measured
+at NP=48/24 — see §5; e.g. A6 b7≈90.3% comparable to baseline 90.6%, i.e. degen flat while KL/flips improved.)
+
+## 7. Assignment-QAT retirement → fresh-token scaling saga → scale-axis tests (2026-07-09→18)
+
+**Arm-B assignment-QAT (PV-Tuning-style sparse proximal flips), CORRECTED + GATE-HONEST → RETIRED.**
+Naive STE diverged; corrected arm (fresh-grad probe, proximal gate Δ<0, trust-region ρ for η, disjoint
+256-seq PAIRED-ΔKL generalisation gate) is stable and the gate works (caught winner's-curse events with
+in-sample realΔ<0 but out-of-sample ΔKL_G>0 at 4σ). Gate-honest result: mlp-scope flips == scale-only
+step-for-step (0.2889 vs 0.2890 held-out; 151 flips of 2.3B). Root cause (researcher-confirmed): ~60%
+skeleton saturation (GPTQ≈Babai/CVP-optimal) + ~30% scale/assignment threshold coupling. Runs: armb_smoke /
+armb_mlp / armb_mlp_gate / scaleonly_4m (models deleted).
+
+**Fresh-token scale-only scaling (Stage 0, canonical tables kept: scaleonly_fresh_results.txt +
+eval2k_scores.txt).** 1-epoch fresh curve FLOORS on fixed eval: 4M .4110 · 8M .3438 · 16M .3301 · 32M .3254
+· 64M .3250 (K∞=.3247, α≈2.1, floor beats power by 22 AIC) while OOD falls monotonically (2.01→1.7923 best
+ever) and per-run own-held-out (top-64 metric) keeps falling. Resolution of the paradox (researcher rounds
+6-7, predictions committed then SCORED): **EPOCHS DOMINANT** — 16M_2ep .2922 (+2nd epoch −.0379) vs recipe
+(constant-LR+EMA-select) only −.0109; researcher's B-dominant weighting INVERTED by data (1 hit, 3 range
+misses across (a)-(d)). Muennighoff equivalence VIOLATED: 16M×2ep (.2922) ≫ 32M×1ep (.3254) at identical
+steps/schedule/LR-integral. Controls: constlr-2ep .3058 → epoch gain ≈ 64% plain second-pass + 36% LR-tail
+consolidation; constlr REGRESSES OOD (1.9945) → annealing protects robustness. Fresh-draw falsifier
+16Md2_2ep .3002 fixKL / .2988 eval2k (≈16M_2ep's .2981 → draw-variance nil, mechanism real). 32M_2ep .2988
+fixKL / .3022 eval2k → epoch gain SHRINKS toward a common in-mixture floor (~.298-.302 eval2k for ALL 2-ep
+runs); tokens buy OOD only (32M_2ep OOD 1.8516). **SETTLED PRODUCTION RECIPE: 2 epochs × linear-decay-to-
+zero × final-select (no EMA); token count chosen by OOD/benchmark budget, not KL. Endgame (researcher,
+accepted): E2E protocol ≤0.2-0.4 MMLU-Pro pts — remaining 3.9/4.0-pt gap lives in the frozen skeleton
+(upstream axes) + mixture. User decision: protocol program CLOSED; no (g) 64M_2ep, no mixture enrichment.**
+
+**eval2k referee:** frozen 1946-seq same-mixture draw (seed 9001, output_4b/eval2k.json) + per-seq PAIRED
+dumps (output_4b/eval2k_perseq/, kl_flips_eval PER_SEQ_OUT). Old 24-seq fixed eval has ~±0.008 draw noise;
+eval2k paired resolves 0.0004 at 5σ. kl_flips_eval now streams (no FP-logit cache; NP~2000 OK).
+
+**Scale-axis tests (user Q, 2026-07-15→18).** TQ2_0 scale cost: 0.0625 bpw = 3.03% (~190MB @27B).
+(1a) Post-hoc scale rounding (eval2k, base .2981): 8-bit +0.0002 FREE · 6-bit +0.0013 · 5-bit +0.0051 ·
+4-bit +0.0260 cliff. (1b) 4-bit scale-QAT (STE log-grid): .3099 = recovers ~55% of cliff, +0.0118 residual.
+OPTION TABLE (all require ggml fork — TQ2_0 kernel reads fp16 d): 8-bit ~95MB free; 6-bit ~120MB near-free;
+4-bit ~140MB not worth it. (2) Perpendicular col-scales (per-input-channel, foldable: MLP-in→norm γ,
+down-in→up rows; o_proj not foldable under GQA): **v1 "exact null" was a FOLD BUG (user caught it)** —
+Qwen3_5RMSNorm is ZERO-CENTERED (fwd = x·(1+w)) and rotation leaves stored w≡0, so the w·a3 fold DISCARDED
+the trained a3 (also invalidates the historical §3b A3(ii) "no gain" verdict). Fixed fold: w'=(1+w)·a3−1.
+**v2 (fold verified, a3 range [.994,1.006]): real but tiny — paired ΔKL −0.00038±0.00007 (t=−5.5, 57.6%
+seqs improved), all 7 metrics up.** Downstream-of-block-AP saturation CONFIRMED on valid footing (3 probes:
+gate-honest flips null, col-scale ~1% of an epoch-gain, half the scale bits informationally dead).
+--col-scale kept in the final 27B recipe (free at deploy). KEPT MODELS: scaling/16M_2ep (settled-recipe
+baseline for paired comparisons) + scaling/16M_2ep_colscale_v2 (current-best incl. micro-win); KEPT DATA:
+test1_data/{calib_16M.json, teacher_16M.pt} (standard 16M×2ep probe pair for the axes program).
+
+## 8. Bonsai pivot → ternary embed+head → free-gen collapse → granularity → commit fix (2026-07-21→30)
+
+**TARGET PIVOT.** New target = Ternary Bonsai 27B (94.6% of FP16, full-QAT to 30B tokens). Thesis = TOKEN-
+EFFICIENT conversion (match within 5% at 100M-1B tok). Consequence: **ternarize embed_tokens AND lm_head** for
+footprint parity (each [248320,2560] = 1.27B params ≈ 29% of the 4B). g128/g64 allowed (not TQ2_0-servable;
+needs Bonsai-style packing).
+
+**8a. THE FREE-GEN COLLAPSE (ternary lm_head) — diagnosed + FIXED.** Ternarizing embed+head scored 6% MMLU-Pro
+/ 1% GPQA (BELOW random 10%/25%) while teacher-forced KL-agreement was 79-84% — i.e. **teacher-forced KL is
+BLIND to free-gen collapse**. RAW completion was coherent; CHAT looped `<think>\n<think>…`. Diagnostic ladder
+(3 researcher rounds): (1) plumbing ruled out; (2) lm_head special-row fp16 protection FAILED; (3) logit-gap
+scan on FP hidden → ternary head ranks `<think>` LOWER than FP (head innocent); (4) ternary-BODY hidden makes
+`<think>` top through BOTH heads; (5) embed deviation UNIFORM (special .435 ≈ content .434). ⇒ **context-
+specific DISTRIBUTION COLLAPSE at the generic-calib-ABSENT `assistant\n<think>\n` position**, not a row defect.
+FIX = chat/reasoning-format E2E + chat-context block-AP/GPTQ Hessians (+ trained lm_head assignments). Result:
+below-random → functional. Gate built (src/freegen_gate.py, M1-M4 at induced boundaries): start_think argmax-
+agreement **0.000 → 0.850**.
+
+**8b. GRANULARITY SWEEP — g64@Q8 WINS (settled).** Size arithmetic: g64+8-bit scales == g128+fp16 == ~1.71 bpw.
+8-bit scales are ~free even POST-HOC (g128: 80.65% fp16 → 80.62% post-hoc-8bit); QAT-8bit is tighter still.
+Anchors (old generic pipeline, eval2k agreement / KL / OOD): **g256@fp16 79.31 / .3619 / 2.2171 (= TQ2_0) ·
+g128@fp16 80.65 / .3244 / 2.1414 · g64@QAT-8bit 82.06 / .2793 / 2.0255**. g64@Q8 beats g128@fp16 by +1.4pt at
+IDENTICAL size, +2.75 over TQ2_0, and beats the fp16-embed/head reference (80.85/.2981) — finer body
+granularity outweighs ternarizing embed+head. Reasoning proxy (g64 anchor): late-gen 84.02%, answer 84.51%.
+Also g128@Q8 (~1.65bpw = TQ2_0 size) = 80.62% ⇒ +1.3 free upgrade over g256 IF packable. On the CHAT recipe:
+g256 72.77 → **g64@Q8 73.65** (+0.88, free-gen unchanged); g32@Q4 73.56 = tied/worse (4-bit scales cancel the
+finer grid) ⇒ **trend flattens at g32; g64@Q8 is the deploy point.**
+
+**8c. THE COMMIT / OVER-THINKING PROBLEM (4 runs; 3 failed) and its RESOLUTION.** After the collapse fix the
+model still over-thought (wouldn't emit `</think>`) and looped. **Free-gen ledger @2048-token budget (48
+prompts, temp .6; the 768 budget was CONFOUNDING "won't stop" with "budget too small" — FP itself only committed
+48% @768): FP 75.0 commit / 25.0 trunc / 25.0 loop / 2.40 compR · V1(50% chat) 62.5/37.5/29.2/3.34 ·
+combined-2560(10% chat) 56.2/43.8/39.6/3.15 · StageB 50.0/41.7/56.2/3.91.**
+- FAILED #1 — density-within-chat: seq 1024 packing SPLITS `<think>`(pos0) from `</think>`(pos~1786) into
+  different chunks; max_new alone moved corpus density only 0.6%→1.9%. Fixing seq to 2560 gave 4.3% but commit
+  stayed 25%. (max-new close-rate sweep, src/sweep_maxnew_close.py: 5%@768 · 31%@1792 · 49%@2560 · 62%@4096;
+  median close position 1786, 75th pct 2514.)
+- FAILED #2 — Stage A commit-token REWEIGHT (α=3, require-close corpus 9.6% density): **exactly 25.0% = no-op.**
+  Root cause: commit-window tokens are **0.135% of corpus**, and in a NORMALIZED weighted mean `Σ(kl·c·w)/Σ(c·w)`
+  they got 0.40% of the weight (per-token multiplier 1.004×). Reweighting a rare class inside a normalized mean
+  cannot move the objective.
+- FAILED #3 — Stage B offline semi-on-policy (1000 student rollouts, teacher-scored, 30% own-trajectories):
+  **WORSE on every axis** (commit 25→20.8 @768; @2048 50.0 commit / 56.2 loop). Cause: 58% of rollouts never
+  closed, so uniform forward-KL over them = **self-distillation on the pathology** (model collapse,
+  arXiv:2305.17493) + "KL Agreement Trap" (teacher/student stay close on degraded prefixes → weakest signal
+  exactly where needed).
+- ★ **SUCCEEDED — the ONE RUN (`output_4b/final_g64q8`): 50% require-close chat + 50% generic, `</think>`
+  density 47.2%, 16M tok, seq 2560, g64@Q8, from combined-2560, lr 1e-5, + ADDITIVE commit objective
+  `L = CAKLD_all + β·mean(KL over commit window)`, β=1.5.** The additive form is un-diluted by rarity
+  (per-token weight 133× vs the reweight's 1.004×) and is SAFE at large β because the term is KL-TO-TEACHER
+  (self-limiting), not a CE/reward close-bonus (which causes length attractors, arXiv:2010.07174).
+  **Gate @2048: eval2k 80.46% · commit 75.0% · trunc 20.8% · loop 29.2% · compR 3.08 — ALL FOUR TARGETS PASSED
+  (≥77 / ≥68 / — / ≤30 / ≤3.1). Commit is EXACT FP parity (both 36/48); trunc NOMINALLY BEATS FP (20.8 vs 25.0).**
+  eval2k 80.46% is the highest of any full-recipe model. **The Pareto trade-off is broken** — previously only
+  one of {high agreement, good commit} was attainable (V1 72.8/62.5 vs combined 79.8/56.2). Held-out fell
+  monotonically 0.1841→0.1691 over all 20 evals ⇒ β=1.5 stable. Residual gap: compR 3.08 vs FP 2.40 (max 18.52
+  ⇒ ≥1 severe loop persists); loop 29.2 vs 25.0 (within n=48 noise, ±12pt).
+
+**8d. METHODOLOGY CORRECTIONS (each invalidated earlier numbers).**
+- **Loop-gate bugs:** pad_token == `<|im_end|>` == EOS == 248046 and `config.eos_token_id` is None ⇒ generate
+  never stopped and filled the budget repeating `<|im_end|>`; batch padding was also scored. Counting that as
+  generation produced FAKE ~90% "loop" rates (FP included). Fix: pass `eos_token_id` AND truncate each gen at
+  its first EOS. Second bug: 5-gram×3 / sentence×3 n-gram detector over-flags legitimate reasoning that
+  restates drafts (flagged clean FP at 42%) → raised to ×5/×4; **zlib comp-ratio is the primary metric**
+  (FP≈2.4, loopy >4). These two bugs inflated every loop number reported before 2026-07-24.
+- **Held-out KL/flips are NOT comparable ACROSS runs** (user caught): the held-out slice is the last
+  `--heldout-n` seqs of *that run's own corpus*. comb2560 held-out was 4% chat → KL .2497/flips 21.3%; stageB
+  42% chat → **.1538/17.8%**; FINAL 46% → .1849/19.7%. FP-authored thinking traces are low-entropy and
+  teacher-authored ⇒ trivially predictable. **StageB had the BEST held-out KL of any run and was the WORST
+  model** (its held-out contained 30% of its own rollouts). Only eval2k (fixed 1946-seq set) and the loop-gate
+  (fixed prompts) are cross-run valid.
+- **False-positive abort:** the divergence guard `ho_worse*eval_every >= 300*abort_patience/3` reduces to
+  `ho_worse>=1` at eval_every=300 ⇒ aborted the FINAL run at step 600/6244 on a +1% wobble, while also measuring
+  PLAIN CAKLD during a `--commit-beta` run (the intended trade looks like divergence). Fixed: `--abort-patience 30`.
+- **Perf:** ternary decode is ~18× slower than FP (packed TernaryScaleLinear dequantizes every step); batch 8 on
+  1 GPU projected 36h for a rollout phase → data-parallel 2 GPUs + batch 24 = **5.7× faster**.
+
+**8e. NEW TOOLING.** src/{freegen_gate,loop_gate,commit_diag,sweep_maxnew_close,gen_student_rollouts,
+augment_corpus,fold_think_scale}.py; build_diverse_calib gained `--chat-frac/--chat-src` (chat as a SOURCE in
+the diverse split, scales with `--tokens`); build_chat_calib gained `--require-close/--easy-frac/--seed/--device`;
+e2e_qp_distill gained `--commit-beta/--commit-pre/--commit-post` (additive), `--scale-qat-bits`,
+`--onpolicy-teacher-cpu` (accelerate cpu_offload — a PURE-CPU teacher fails: fla Gated-DeltaNet Triton kernels
+are GPU-only), `--onpolicy-calib`, `--abort-patience`. Post-hoc `</think>`-row lm_head calibration built
+(run_thinkcal.sh + fold_think_scale.py): lm_head IS a TernaryScaleLinear so scaling `scale[row*40:(row+1)*40]`
+by c leaves assignments untouched = on-grid/TQ2_0-exact. **NOT applied — FINAL is already at FP-parity commit,
+so the smallest c reaching parity is c=1.0.**
+
+**8f. GGUF BENCHMARK — recipe VALIDATED, TQ2_0 packing FATAL for g64 (2026-07-30).**
+MMLU-Pro (300q) / GPQA (198q), 4 samples, non-think MCQ, llama.cpp served:
+
+model                          size    MMLU-Pro   GPQA     runtime(mmlu/gpqa)
+FP-4B (Q8_0, ceiling)          4.2GB   47.7%      36.0%    2.5 / 1.7 min
+** FINAL Q8_0 (faithful g64)   4.9GB   25.7%      30.3%    6.3 / 4.9 min
+Qwen-2B fp8 (Q8_0)             2.1GB   27.4%      25.3%    2.0 / 1.3 min
+Qwen-0.8B fp8 (Q8_0)           0.85GB  17.8%      13.3%    2.3 / 2.0 min
+OLD tern4b (A6, g256 TQ2_0)    1.0GB   18.2%      17.4%    34.8 / 24.1 min
+** FINAL TQ2_0 (g256 requant)  1.8GB   10.6%      16.8%    28.6 / 21.4 min
+(the ternary-embed+head COLLAPSE we fixed: 6% / 1% — below random 10% / 25%)
+
+TWO CONCLUSIONS:
+(1) **THE RECIPE IS VALIDATED.** At faithful precision the FINAL model scores 25.7 / 30.3 vs the old ternary's
+    18.2 / 17.4 (+7.5 / +12.9 pt). **On GPQA it BEATS Qwen-2B fp8 (30.3 vs 25.3) — a 2x-larger model** — and
+    reaches 84% of the FP-4B ceiling; on MMLU-Pro it is just under the 2B (25.7 vs 27.4) at 54% of FP.
+    Runtime 34.8→6.3 min is independent confirmation that it now STOPS instead of rambling (the commit fix).
+(2) **TQ2_0 CANNOT HOLD A g64 MODEL.** Requantizing g64→g256 costs ~15pt MMLU-Pro / ~13.5pt GPQA and lands at
+    random. Verified mechanically BEFORE exporting: the weights are on-grid at block 64 and NOT at block 256,
+    so TQ2_0 (inherently g256) remaps the ternary assignments. The 28.6/21.4-min runtimes are the tell.
+    Exporting Q8_0 alongside is what made this diagnosable — a TQ2_0-only run would have read as
+    "the whole recipe failed".
+CAVEAT ON THE SIZE THESIS: the validated quality is currently only reachable at Q8_0 (4.9GB), which defeats the
+footprint argument. The weights ARE ternary at ~1.71 bpw — only the llama.cpp container cannot express g64.
+DEPLOYMENT OPTIONS: (a) retrain BLK=256 → TQ2_0-exact, costs ~2.75pt agreement (pipeline supports it, one env
+var); (b) custom g64 packing (Bonsai-style, needs a ggml fork) → full quality at ~1.71 bpw; (c) g128@Q8
+(~1.65 bpw = TQ2_0 size, +1.3pt over g256, still not TQ2_0-exact).
+RULE: always verify on-grid-ness at the TARGET block size before trusting a GGUF export, and always export a
+faithful reference (Q8_0) alongside to separate model quality from packing loss.
+
+**8g. TQ1_64 CUSTOM FORMAT — end-to-end benchmark (2026-07-31).** llama.cpp fork branch `tq1_64`;
+format spec TQ1_64_SPEC.md; 512-weight superblock, 114 B, **1.7812 bpw** (27B projects to 6.01 GB).
+
+model                        size    MMLU-Pro        GPQA
+FP-4B Q8_0 (ceiling)         4.20 G  47.7% / 2.5m    36.0% / 1.7m
+our model @ Q8_0             4.91 G  25.7% / 6.3m    30.3% / 4.9m
+** our model @ TQ1_64 **     1.09 G  24.4% / 13.3m   28.8% / 11.2m
+our model @ TQ2_0 (broken)   1.81 G  10.6% / 28.6m   16.8% / 21.4m
+Qwen-2B fp8                  2.10 G  27.4% / 2.0m    25.3% / 1.3m
+Qwen-0.8B fp8                0.85 G  17.8% / 2.3m    13.3% / 2.0m
+old ternary A6 (g256 TQ2_0)  1.00 G  18.2% / 34.8m   17.4% / 24.1m
+
+CONCLUSIONS.
+(1) **TQ1_64 matches Q8_0 within noise** (-1.3 MMLU-Pro, -1.5 GPQA; n=300/198 x4 samples => ~+-5 pt CI) at
+    **4.5x smaller**. Confirms the lossless prediction from eval2k (80.47 vs 80.46) and the 0.06% weight RMS.
+(2) **vs the broken TQ2_0 export: +13.8 MMLU-Pro, +12.0 GPQA at 40% smaller.** Same weights, same recipe —
+    the ONLY difference is g64 vs g256 scale granularity. This single row justifies the whole fork.
+(3) **Same-memory claim holds**: vs Qwen-0.8B fp8 (0.85 G, the honest same-size competitor) +6.6 MMLU-Pro /
+    +15.5 GPQA. vs Qwen-2B fp8 at 2x our size we win GPQA (28.8 vs 25.3), lose MMLU-Pro (24.4 vs 27.4).
+(4) vs the old ternary at the same 1 GB: +6.2 MMLU-Pro / +11.4 GPQA (recipe + format together).
+
+CUDA KERNEL PERF (RTX 3090, tg t/s): dequant->cuBLAS 16.7 -> superblock-per-thread 8.0 (SLOWER: uncoalesced)
+-> superblock-per-warp 53.9 -> +shared trit staging & float4 y loads 74.2 -> +y amortised over 8 rows 76.9.
+pp 462 -> 547. Both big wins were memory ACCESS SHAPE, not arithmetic.
+
+**NEGATIVE RESULT — batched/MMQ kernel for prompt processing (REVERTED).** Traffic analysis said a fused
+batched kernel should move ~19x less data than dequant->cuBLAS (5.3 vs 100 MB per 2560x9216 layer at batch 32)
+and that the op is memory bound (~22 us of tensor-core math vs ~105 us of memory). Built it anyway and it LOST:
+**pp 547 -> 286 (NB=4) -> 234 (NB=8)**. Two reasons the analysis was wrong: (a) register limits force NB
+columns per pass, so batch 32 means 32/NB SEQUENTIAL passes that each re-read AND re-unpack the whole weight
+matrix — the amortisation never materialises; (b) the NB inner columns are `ncols` floats apart, so their
+float4 loads land on unrelated cache lines (raising NB made it worse, not better). Beating cuBLAS+tensor-cores
+here needs a properly TILED MMQ (weights staged in shared and reused across a column tile), not a widened GEMV.
+Reverted; prompt processing stays on dequant->cuBLAS. Generation keeps the fused GEMV.
+
+**8h. TILED MMQ — SECOND ATTEMPT, ALSO REVERTED (2026-07-31).** After the widened-GEMV failure (§8g), tried a
+lane-per-column mapping: lane L owns output column L, so accumulators are 1/lane (no register cap, ONE pass
+over the weights) and trit reads become perfect shared-memory broadcasts. **pp 547 -> 129 t/s (4x worse).**
+Cause: it trades the register wall for a MEMORY wall — each lane then streams its own activation column, so the
+warp's float4 loads are `ncols` floats apart and each becomes a separate transaction (~4096 scattered loads per
+warp per superblock). VERDICT ACROSS BOTH ATTEMPTS: you can amortise the unpack over columns OR make the
+accumulators cheap, but not both, unless BOTH operands are staged in shared — i.e. a real tiled GEMM
+(weight tile [BM x BK] unpacked to shared + activation tile [BK x BN] loaded coalesced to shared + per-thread
+register micro-tile; BM=64/BN=64/BK=128 ~ 40 KB shared). That is a project, not an increment, against a
+tensor-core cuBLAS already at 547 t/s. Prompt processing is also NOT the deployment bottleneck — generation is,
+and that path is ours (fused GEMV, 77 t/s vs 16.7 for dequant->cuBLAS). Both attempts reverted; tree clean at
+commit 3cbe66492.
+
+**8i. FIRST END-TO-END `run_full_pipeline.sh` RUN — PLUMBING VALIDATED, GATES FAILED (2026-08-01).**
+4B cold start (WORK=output_4bpipe, ORIG=untied_4b), TOTAL 19:59:20. Phase timings: rot 0:00:16 · chat pool
+10:12:39 · calib 0:00:18 · Block-AP 1:15:56 · teacher 0:29:44 · E2E 6:44:04 · gates 1:16:39.
+WHAT WORKED: corpus `</think>` density 47.5% (ref 47.2%); skeleton verified exactly on the g64 ternary grid
+incl. embed_tokens + lm_head (sparsity .455); E2E held-out fell MONOTONICALLY over all 20 evals
+(0.6828 -> 0.4265, flips 31.26% -> 25.79%), no divergence, no abort; commit term confirmed firing
+(_add_commit_term has an empty-mask guard, so NOT a repeat of the Stage-A no-op).
+**GATES FAILED: commit 41.7% (target >=68, ref 75.0) · trunc 58.3% (ref 20.8) · loop 33.3% (<=30) ·
+compR 3.12 (<=3.1) · GateA top-1 68.86%.** Failure signature = the original over-thinking pathology.
+**ROOT CAUSE (hypothesis): E2E UNDERTRAINING, not a recipe bug.** The reference FINAL was warm-started
+(skeleton -> E2E on combined-2560 -> SECOND E2E at lr 1e-5) ~ 32M tokens of E2E reaching held-out 0.1691;
+this cold run did ONE pass at lr 2e-5 (16M) reaching 0.4265 with the curve STILL DESCENDING at step 6000.
+=> the script encodes a SINGLE-pass Phase 5 but the validated model needed TWO. Fix under test: second pass
+at lr 1e-5 warm-started from output_4bpipe/e2eqp (reuses the same calib + teacher cache; no regeneration).
+ALSO FIXED THIS RUN: Phase 2a was single-GPU (GPU1 idle ~11h) -> now shards one model per GPU inside ONE
+memguard scope; and build_chat_calib.py gained --device-map/--gpu-mem/--cpu-mem because a plain .to(device)
+load CANNOT hold the 27B (51.8 GiB) on a 24 GiB card -> Phase 2a would have hard-OOM'd at 27B.
+NOTE: sharding gave only ~6% (not 2x) — see the thermal-coupling finding.
+
+**8j. E2E PASS 2 (warm-start refinement) — NULL on the deploy gate (2026-08-02).** Testing the §8i
+undertraining hypothesis: warm-started from the §8i cold-run E2E, lr 1e-5, 2ep, SAME calib + teacher cache
+(no regeneration), 06:29:20. Held-out fell 0.4270 -> 0.3907 but PLATEAUED (last 300 steps moved 0.0004).
+**Gate B: commit 41.7% (20/48) — IDENTICAL to pass 1's 20/48 · trunc 58.3->54.2 · loop 33.3->31.2 ·
+compR 3.12->3.13 (max 22.16->12.75) · GateA 68.86->69.00%.** => a second E2E pass is NOT the missing
+ingredient; ~2x E2E exposure moves commit by exactly zero.
+**METHOD ERROR CORRECTED:** the hypothesis rested on comparing this run's held-out KL (0.4265) to the
+reference's (0.1691). INVALID — different held-out sets (ours 47.5% chat = model-generated reasoning traces,
+the reference's ~10% chat = mostly generic text; traces are intrinsically harder to predict). Only Gate B is
+comparable across runs.
+**ALSO ELIMINATED:** chat-pool quality. Ours vs the reference's chat_pool_final.json are statistically
+indistinguishable — close-rate 95.1 vs 94.5%, close pos 1120 vs 1076 tok (frac 0.438 vs 0.420),
+repeated-5gram .0305 vs .0299, 100% unique 64-tok prefixes in both.
+SURVIVING HYPOTHESIS = corpus PATH (curriculum): reference did skeleton+pass1 on the 4.3% corpus and
+introduced 47.2% chat only at pass 2; the pipeline uses 47.5% everywhere incl. the Block-AP Hessians.
+Test running: run_curriculum.sh.
+
+**8k. ROOT CAUSE — THE ROTATION WAS BROKEN; §8i/§8j/CURRICULUM ALL INVALID (2026-08-02).**
+Chasing why C4 scored eval2k 70.53% (below V1's 72.77) with an absurd mean KL of 3.4764 nats and only
+49/1,990,758 positions at FP p_max>0.5, the FP *reference* turned out to be broken:
+  OLD rot (output_4b/rot, 2026-07-01): KL 0.0009 | agreement 99.06% | FP-confident 79.08%   <- lossless
+  NEW rot (every rotation this campaign): KL 3.9949 | agreement 91.49% | FP-confident  0.00%  <- BROKEN
+Diff of the two rotated models: 738/739 tensors IDENTICAL; only `lm_head.weight` differs. rms shows why —
+original .013029, GOOD .040807 (x3.13), BROKEN .013029 (x1.00): the broken run ZEROED the final norm without
+absorbing its gain. The final norm's effective gain is (1+w), mean 3.195, so FP logits shrank ~3.1x, softmax
+went flat, and the model became confident essentially nowhere.
+**MECHANISM:** the Bonsai pivot (2026-07-21) added 'lm_head.weight' to config.QUANTIZE_PATTERNS so block_ap
+could ternarize the head. `is_rotatable_projection()` was defined as "matches QUANTIZE_PATTERNS", so this
+silently flipped lm_head False->True, routing it into convert.py's FIRST branch (line ~203), which only
+absorbs .self_attn./.linear_attn. layer norms. convert.py's dedicated lm_head handler — the one doing
+`norm_w + 1.0` — became UNREACHABLE DEAD CODE. Timeline: good rot 07-01 (pre-change) · config rewrite 07-21 ·
+all campaign rotations 07-31+ (broken). The reference final_g64q8 used the pre-pivot output_4b/rot, so ALL
+REFERENCE NUMBERS STAND.
+**BLAST RADIUS:** the teacher cache is built from $ROT, so every student in §8i/§8j/curriculum was distilled
+toward a teacher that is never confident — which IS the "won't commit to </think>" pathology (commit 41.7%,
+trunc 58.3%). Every gate/agreement number from 2026-07-31 onward is void, and the curriculum hypothesis was
+explaining a symptom; it remains UNTESTED.
+**FIX (verified):** is_rotatable_projection() now returns False for lm_head/embed_tokens, decoupled from
+QUANTIZE_PATTERNS (which still returns True for lm_head so block_ap keeps ternarizing the head). Re-run
+rotation is BIT-IDENTICAL to the 07-01 good one (max|diff| 0.000e+00) and reproduces KL 0.0009 / 99.06% /
+79.08% confident.
+**REUSABLE ACROSS THE REDO:** chat_pool.json and calibration_data.json/calib_eval.json are generated from the
+UNROTATED untied_4b + CTM data, so they are UNAFFECTED — the 10.2h chat-pool generation does NOT repeat.
+Regenerate: rotation (16s) + skeleton + teacher cache + E2E + gates ~= 9.8h.
+
+**8l. RERUN WITH FIXED ROTATION — ROOT CAUSE CONFIRMED, 3/4 GATES PASS (2026-08-02).** run_full_pipeline.sh
+cold, WORK=output_4bpipe, TOTAL 10:55:44 (chat pool + calib REUSED — rotation-independent — so the 10.2h
+generation did not repeat). New fail-closed Phase-1 guard PASSED: rot-check KL 0.0006 / agreement 98.66% /
+FP-confident orig 75.96% vs rot 76.13% (broken run: 0.00%).
+**GATE B: commit 75.0% (36/48) = EXACT FP PARITY and matches the reference exactly · trunc 16.7% (BEATS both
+the reference's 20.8 and FP's 25.0) · compR mean 3.04 (< ref 3.08) max 13.70 (< ref 18.52) · loop 37.5% (target
+<=30, ref 29.2) · think_len 630 over 40 closers.**
+**GATE A (now TRUE eval2k, frozen 1946-seq referee): 77.53% — PASSES the >=77 gate** (ref 80.46). Sanity
+restored: mean KL 0.4012 nats (was 3.4218) and FP-confident>0.5 at 1,315,619/1,990,758 positions (was 49).
+E2E held-out fell 0.3243 -> 0.2160 monotonically (v1 broken: 0.6828 -> 0.4265).
+=> **The ENTIRE commit pathology (41.7% -> 75.0%) was the broken FP teacher of §8k**, not undertraining, not
+warm-restart, not chat-pool quality, not curriculum. §8i/§8j conclusions are void; the curriculum hypothesis
+is UNTESTED and now live again.
+OUTSTANDING: loop 37.5% vs <=30. CAUTION — n=48 gives a +/-12pt binomial CI, so 37.5 vs ref 29.2 is WITHIN
+NOISE, and both continuous measures of the same pathology IMPROVED (compR mean and max). Tighten n before
+spending a 17h curriculum run on it. Residual eval2k gap 77.53 vs 80.46 (-2.93) is consistent with the
+chat-throughout cost seen historically (V1 chat-throughout 72.77 vs combined-2560 79.76 vs FINAL 80.46).
+
+**8m. QAT DATA-SCALING SWEEP — skeleton scales with DATA not epochs, saturates ~512 samples (2026-08-04).**
+Block-AP skeleton only (NO E2E; absolute eval2k 61-64% is far below the E2E'd 77.53% — comparable only within
+the sweep, per eval-stage-comparability). Corpus = the fixed 47.5% calib; frozen eval2k referee, NP=512.
+RAM solved via ACT_SPILL_GB=4 (see §8-RAM / [[nvme-activation-spill]]).
+  point  samples  epochs  tokens   updates  eval2k-agree  KL
+  A      128      4       0.33M    512      61.88         0.9954
+  B      256      4       0.66M    1024     63.18         0.9158
+  C      512      4       1.31M    2048     64.01         0.8627
+  D      1024     4       2.62M    4096     63.80         0.8739
+  E      256      16      0.66M    4096     61.89         0.9676
+VERDICT:
+ 1) SCALES WITH DATA, NOT OPTIMISATION. The update-matched control (D vs E, both 4096 updates): D (4x the
+    distinct data) = 63.80 beats E (4x the epochs, same data) = 61.89 by +1.91 agree / -0.094 KL. And the
+    epochs axis at fixed data (B 256x4=63.18 vs E 256x16=61.89) shows MORE EPOCHS ON THE SAME DATA slightly
+    HURT (overfit the calib). So the skeleton wants distinct tokens, not more passes.
+ 2) DATA SATURATES FAST. A->B->C rises 61.88->63.18->64.01, then D (2x C's data) = 63.80 ~ C (TIED, 0.21pt =
+    noise; KL likewise C .8627 ~ D .8739). Knee at ~512 samples ~ 1.3M tokens.
+ 3) IN-SAMPLE KEEPS FALLING, HELD-OUT DOESN'T. Block-MSE(L31) 4.00->3.80->3.56->3.40e-2 (A->D) monotone, but
+    held-out agreement peaks at C — beyond ~512 samples extra data cuts training error without generalising
+    (mild overfit regime).
+IMPLICATION FOR 27B: the block-AP skeleton needs only ~512-1024 samples (~1.3-2.6M tok) x 4 epochs to
+saturate — cheap. Do NOT pour the token budget into skeleton calibration or extra QAT epochs. Reserve tokens
+for E2E, which DOES scale with tokens (OOD) at 2 epochs (§7). Skeleton calib can stay modest at 27B.
+
+**8n. STAGE-0 DIAGNOSTIC — CAPACITY CEILING CONFIRMED (2026-08-04, tools/gram_diagnostic.py).** Retraining-free
+test of the report's capacity-vs-estimation question, from the FP model's activation Gram H=XᵀX (layers 8/16/24,
+1024 calib + 256 held-out seqs @2560). TWO clean results:
+ (1) H-SHAPE SATURATES AT THE SWEEP KNEE. Trace-normalized covariance-shape distance ‖Ĥ_n−Ĥ_1024‖_F/‖·‖:
+     L16 128:0.057 256:0.034 512:0.016 → within ~3% of converged by 512 samples (=1.3M tok), exactly where
+     eval2k agreement plateaus (§8m). r_eff=tr/λmax ≈ 2.3/2.7/4.7 (L8/16/24) — Gram dominated by 1-2 massive
+     directions; stable rank 5-21; top-256 eigvecs hold 62-73% energy. (NOTE: the raw run's 'spectral_conv'
+     0.88/0.75/0.50 was a SCALE ARTIFACT — H is an unnormalized SUM so H_1024≈2·H_512; trace-normalize first.)
+ (2) CALIB H SPANS HELD-OUT. Held-out energy captured by CALIB top-k eigenbasis vs held-out's OWN top-k:
+     ratio 0.94-0.985 across layers/ranks (L16 top-256: calib .686 vs own .700 = 0.98). Only ~1.5-6% of
+     recoverable second-moment energy is missing ⇒ more/better calibration data cannot help.
+VERDICT: the §8m plateau is a CAPACITY/ASSIGNMENT gap on the ternary grid, NOT a data/estimation problem —
+confirms [[fixed-teacher-ceiling]] directly. By the report's threshold (>2pt from shrinkage+held-out-selection
+⇒ estimation), we can predict shrinkage WON'T lift it (≤6% Gram headroom), so we SKIP that experiment. The lever
+is the report's Stage 2: bounded CE + MOBILE trit assignments (warm-start 77.5%), the only objective that
+reintroduces data-scaling. Raw Grams saved logs/gram_diag_grams.npz (re-analyzable without re-running forwards).
+
+**8o. ORACLE (ASSIGNMENT LEVER) — FIRST-ORDER FLIP RANKING IS INVALID; explains the cascade (2026-08-05).**
+`tools/oracle_assignment.py`: freeze the 77.5% model, fresh gradient of held-out CE+KL wrt down_proj effective
+weights (Arm-B mutable trits + grad accumulator), rank candidate trit changes by first-order Δ̂=ḡ·s·(t'−t),
+commit top-K UNCONSTRAINED, measure actual held-out loss + FP-agreement, revert, sweep K. Baseline KL .2949 /
+CE 1.4403 / agreement 77.72% (FP gap 22.28 pt; matches the deployed 77.53% — harness sane).
+**RESULT: every budget makes it WORSE, monotonically —** K=1e-6 (736 flips) agree −0.15pt · 1e-5 −2.18 ·
+1e-4 −25.5 · 1e-3 −71.0 · 1e-2 −77.7 (0% agreement). Best "recovery" −0.7%.
+**INTERPRETATION: the test measured the SEARCH, not the lever.** We commit only flips with predicted Δloss<0
+yet actual loss RISES every time ⇒ first-order ranking cannot identify beneficial trit flips. Reason: a flip
+moves a weight by s·d where s ≈ that weight's own magnitude ⇒ a ~100% perturbation, so the linear Taylor term
+is meaningless at that step size.
+**⇒ THIS EXPLAINS THE §8-CE CASCADE (bimodality).** STE-latent flipping uses the SAME first-order signal, so
+flips systematically damage the model → loss ↑ → grads ↑ → more boundary crossings → runaway. Bimodality and
+the oracle failure are ONE root cause. Also retro-explains Arm-B: its accept/reject gate was empirically
+screening out these bad predictions, hence stable-but-only-0.0001%-committed.
+**NOT evidence of capacity-limited** — a null from a broken search says nothing about whether good assignments
+exist. To actually measure the assignment lever, need a SECOND-ORDER method: OBQ/GPTQ Hessian saliency
+Δ=(Q(w)−w)²/[H⁻¹]_ii WITH the compensating update (which is exactly what block-AP's GPTQ init already does
+per-layer), or AdaRound-style relaxation, or direct held-out screening of small flip batches.
+
+**8p. SECOND-ORDER ORACLE (GPTQ re-solve) — ALSO WORSE; current model is a strong JOINT optimum (2026-08-05).**
+`tools/oracle_gptq.py`: collect H=XᵀX at each down_proj input at the CURRENT operating point (post-E2E, 24
+seqs), re-run `_gptq_ternary(W_fp, H, g64)` (Hessian-weighted rounding WITH H⁻¹ error compensation — the thing
+first-order lacks) from the rotated FP weights, install, measure.
+  baseline (current)                    agreement 77.72%  CE+KL 1.0151
+  GPTQ re-solve, own absmax scales      62.48% (−15.24)   1.9776   [19.66% of assignments changed]
+  GPTQ re-solve, E2E scales KEPT        67.61% (−10.11)   1.5873   [same 19.66%]
+Keeping the trained scales recovers ~5pt of the damage (scales matter) but the ASSIGNMENT change still costs
+10pt ⇒ NOT a scale confound: the 19.66% of assignments GPTQ prefers are genuinely WORSE for the end loss.
+**CONCLUSION (with §8o): two independent principled searches both fail to beat the current assignment.**
+(a) first-order end-loss ranking is invalid (flip = ~100% weight perturbation); (b) second-order GPTQ is
+optimal for the LAYER-WISE proxy ‖X(W_fp−Q)‖², which is NOT the end loss — E2E spent 16M tokens co-adapting
+scales to the EXISTING trits, and a fresh layer-wise solve discards that joint optimum. The deployed model sits
+in a strong JOINT optimum of (assignments × scales).
+**STILL NOT proof no better assignment exists** — both failed methods optimize the wrong thing (invalid step
+model / wrong objective). Untested: a method optimizing the END loss over discrete assignments (AdaRound-style
+relaxation, or V/P alternation with MANDATORY held-out screening). But the cheap routes are closed.
+
+**8q. STAGE 0 (assignment-mobility fix) — BUILT; init repaired but NOT sufficient alone (2026-08-05, partial).**
+Implemented in e2e_qp_distill.py per the data-appetite report: (1) `--latent-init fp-spread --fp-model <rot>` =
+bin-clamped FP-spread latent init `L=clamp(w_fp,(t∓0.5)s)` (asserts no assignment changes ⇒ byte-identical
+function at init; logs the near-boundary fraction); (2) `--latent-warmup-steps` = hold latent lr at 0 while Adam
+accumulates v̂ (verified on GPU that the group-wise lr mask freezes/releases latents correctly); (3) TALR
+`--target-tr/--tr-every/--tr-final-frac` = servo the latent lr to a target TRANSITION RATE (lr alone can't
+control flip count), annealed coarse→fine, clamping harder on overshoot (x0.6) than opening up (x1.3). Also
+lowered CE weight to 0.1 per the report (keep the bounded KL dominant).
+**PARTIAL RESULT (run stopped early, init variable only — NO warmup, NO TALR):** near-boundary fraction
+**0.000% → 26.06%** (real FP ≈9.8%) ⇒ the degenerate init IS repaired. But at the same latent-lr 5e-3 that
+cascaded before, it still cascaded — and FASTER (assign-moved 15.37% and KL 15.59 by step 5, vs 0.015% at step
+5 previously). Consistent: 26% near-boundary is ~2.7x FP density, so an even larger poised population crosses at
+once when the step is that large.
+**⇒ init is NECESSARY BUT NOT SUFFICIENT (as the report predicted).**
+**FOLLOW-UP RUN (init + warmup + TALR, latent-lr 1e-4, warmup 50, target-tr 5e-4) — DECISIVE NEGATIVE, and it
+indicts the DESIGN not the init: at step 20 the LATENTS ARE FROZEN (warmup holds latent lr = 0) yet
+assign-moved is already 2.85% and KL has exploded 0.21 → 3.30.** Latents cannot move, so those flips come from
+the SCALES (still training at lr 1e-5): with fp-spread latents sitting NEAR boundaries, ordinary scale training
+moves the quantization boundary UNDER them and flips assignments wholesale. Reproduced twice (KL 3.47 / 3.30).
+**⇒ THE WARMUP FROZE THE WRONG THING.** Bin-centre init was accidentally "protecting" assignments from scale
+motion (latents 0.5s from a boundary); fp-spread removes that protection, so scales and assignments become
+tightly coupled — which is exactly the (assignment x scale) coupling of §8p's joint optimum, now observed
+dynamically. **This is direct evidence for the report's Q4: co-training scales and assignments is the LEAST
+stable option; the V/P alternation (V-phase = assignments move with s FROZEN; P-phase = s refit with
+assignments frozen) is REQUIRED, not optional.** Next: freeze scales entirely during the V-phase (lr 0 on the
+scale group, not the latent group) and only then apply TALR to the latents.
+(Also fixed en route: the diagnostics themselves OOM'd — a float32 755M-trit snapshot is 3GB; assign-moved% and
+TALR now share ONE fixed 1M-weight sample. Runs still OOM near the end at 22.7GB: fp32 latents 3GB + paged Adam
++ activations is simply at the edge on 24GB for down_proj scope.)
+
+**8r. V-PHASE (scales FROZEN) — GRADED REGIME ACHIEVED; kill-criterion-1 does NOT fire (2026-08-06).**
+Config: fp-spread init + `--lr 0` (scales FROZEN = the V-phase) + latent-lr 1e-4 + warmup 20 + TALR target
+5e-4→1e-4, 8 down_proj layers (`--tw-layer-stride 4`, added because 32-layer fp32 latents ≈3GB sits at the very
+edge of 24GB and OOM'd repeatedly).
+**THE DECISIVE CONTRAST (same setup, step 20): scales TRAINING → KL 3.30 (destroyed); scales FROZEN → KL 0.2612
+(intact).** Scale motion was driving the cascade: with fp-spread latents sitting NEAR boundaries, training the
+scales moves the quantisation boundary UNDER them and flips assignments wholesale. V/P separation is REQUIRED.
+**TALR works as a controller:** measured 1.81e-3/step overshoot, cut latent-lr 2.16e-5→1.30e-5, rate fell to
+6.89e-4 → 5.7e-4 → ... → 1.4e-4, tracking the annealing target. Flip rate CONVERGED instead of running away
+(contrast: every earlier run went 0.015% → 18% → 37%).
+**BUT the net effect on a POST-E2E model was NEGATIVE:** KL 0.2612 → 0.4122 (burst at step 40) → recovered
+monotonically to 0.3277 by step 240; flips 21.90% → 24.71%. `assign-moved` burst to 10.09% at step 40 then
+FROZE (10.09→10.18 over the next 200 steps) ⇒ **the un-servoed first post-warmup steps did ALL the movement AND
+all the damage**; the controlled phase could only partially undo it. TALR has no measurement to act on until
+tr_every steps after warmup, so the base latent-lr is applied raw. FIX: start latent-lr LOW (~5e-6) and let TALR
+ramp UP (it opens x1.3 when below target) instead of starting hot and clamping down.
+**INTERPRETATION (user's point, correct): testing on the post-E2E model is the WRONG subject.** That model has
+16M tokens of scale co-adaptation to its existing trits — the §8p joint optimum — so moving assignments with
+scales frozen can only hurt. **In implementation the order is block-AP → assignment stage → E2E**, so the
+assignment stage should be tested on the RAW block-AP skeleton, whose scales have NOT been co-adapted. Next test
+does exactly that (and per user: NO E2E afterwards until the assignment stage is optimised — E2E is 6+h).
+
+**8s. ASSIGNMENT STAGE ON THE RAW BLOCK-AP SKELETON — PRODUCTIVE (2026-08-06). The lever works.**
+Same V-phase machinery as §8r (fp-spread init + scales FROZEN `--lr 0` + TALR), but applied to the RAW
+block-AP skeleton (`output_4bpipe/modified_model`, pre-E2E) instead of the post-E2E model — the actual
+implementation order (block-AP → assignment stage → E2E). Base latent-lr lowered 1e-4 → 5e-6 so TALR ramps UP
+from below instead of bursting. 8 down_proj layers (stride 4), 240 steps, scales frozen throughout.
+  step  20 (baseline, latents still frozen)  KL 0.7358  flips 35.54%  assign-moved 0.000%
+  step  60                                   KL 0.5118  flips 30.27%  assign-moved 3.350%
+  step 120                                   KL 0.4788  flips 29.35%  assign-moved 3.556%
+  step 240 (final)                           KL 0.4625  flips 28.97%  assign-moved 3.655%
+**KL −37% (0.7358→0.4625); agreement 64.5% → 71.0% (+6.5 pt); MONOTONE at every eval; no cascade, no OOM.**
+Only 3.66% of assignments moved — sparse targeted flips, not wholesale churn. TALR tracked its annealing target
+the whole way (8.96e-4 → 2.3e-5 as the target annealed 4.3e-4 → 1.0e-4). The low starting lr fully fixed §8r's
+burst (3.21→3.66% gradual vs 10.09→10.18% front-loaded).
+**THE CONTRAST IS THE FINDING — same machinery, opposite sign:**
+  post-E2E model (77.5%): KL 0.2612 → 0.3277  ⇒ HURTS
+  raw block-AP skeleton : KL 0.7358 → 0.4625  ⇒ HELPS (−37%)
+The post-E2E model's scales are co-adapted to its trits over 16M tokens (§8p joint optimum), so assignment moves
+can only break it; the raw skeleton's assignments are genuinely suboptimal and improvable. **The assignment
+stage belongs BETWEEN block-AP and E2E, never after E2E.**
+CAVEATS: 8/32 layers, 4-seq held-out slice, 240 steps — trend is strong and monotone but magnitude needs a
+fuller run. NO E2E run yet (deliberate, per user: optimise the assignment stage first; E2E is 6+h).
+
+**8t. TEST 1 — LAYER COVERAGE (2026-08-06). Full 32 needs offload; more coverage is NOT free.**
+INFRA ADDED: `--latent-offload` — assignment latents (and their grads) live in CPU RAM, streamed to GPU inside
+each layer's CHECKPOINTED forward, so only one layer's latent is GPU-resident; autograd routes the grad back to
+the CPU leaf. Frees 6.04GB ⇒ full 32-layer coverage fits. Forces `torch.optim.Adam` (bitsandbytes CANNOT step
+CPU params — verified) and **single-GPU (DDP rejects mixed cpu/cuda module params — ValueError)**. Also added
+`--tw-layer-stride` (subset of layers). bf16 latents are NOT an option: the Adam update is ~2.5e-4 of the latent
+magnitude vs bf16's 3.9e-3 resolution ⇒ swamped entirely.
+**METHODOLOGICAL CATCH: `--target-tr` is a FRACTION of all latents, so holding TR fixed while raising coverage
+raises ABSOLUTE flips/step proportionally** (32 layers @5e-4 = 377k flips/step vs 8 layers @5e-4 = 94k). The
+first 32-layer run was therefore 4x more aggressive, not a coverage test — it degraded (0.7355 → 0.7925) and was
+CPU-bound at ~46s/step (~6h), so it was killed. Matching ABSOLUTE flips is the right control for perturbation
+size (matching the FRACTION would instead hold per-layer optimisation constant — the two answer different
+questions; neither is uniquely "fair").
+**COVERAGE AT MATCHED ABSOLUTE FLIPS (baseline 0.7355):**
+  step:        +20     +40     +60     +80    +100    +120
+  8L @5e-4   0.5804  0.5118  0.4942  0.4840  0.4788  (final 0.4625, −37%)
+  16L @2.5e-4 0.7535  0.6173  0.5725  0.5548  0.5392  0.5261 (still descending at step 150/240)
+16L dips first then recovers monotonically — NOT the flat degradation of the over-aggressive 32L run, which
+supports "the 32L result was flip-rate, not a coverage ceiling". But 16L tracks ~0.06 BEHIND 8L at equal step
+count, i.e. at matched perturbation, spreading the same flips over 2x the layers gives each layer half the
+optimisation. **Provisional: more coverage is not free; 8 layers (stride 4) is the better cost/benefit so far.**
+16L also ran ~35s/step vs 8L's ~10s/step. Final 16L number pending.
+
+**8u. DEPTH IS A GENUINE PROBLEM — inter-layer error COMPOUNDING, not per-layer imbalance (2026-08-06).**
+Checked explicitly because the 27B is 64 layers, so anything broken at 32 is worse at 64. Added a PER-LAYER
+flip diagnostic (sampled, logged as per-layer[min/med/max/ratio] each eval).
+**Per-layer flip rates are UNIFORM** — 32L run shows min 2.63 / med 3.10 / max 4.05 (ratio ~2x, tightening to
+~1x later) ⇒ the single global latent-lr and global TR target are NOT producing per-layer imbalance, and no
+layer is cascading while others sit inert.
+**Yet at the SAME per-layer flip rate (TR 5e-4), first-post-warmup damage scales sharply with coverage:**
+  8 layers  0.7358 → 0.5804  (improves immediately)
+  16 layers 0.7353 → 0.7535  (small dip, recovers to 0.5054 final)
+  32 layers 0.7355 → 1.9080  (2.6x WORSE than baseline; recovering 1.36 → 1.20 → 0.83 but still above baseline
+                              at step 100)
+Uniform flips + sharply worse aggregate damage ⇒ **INTER-LAYER ERROR COMPOUNDING**: each layer's assignment
+change perturbs its output and downstream layers see shifted inputs, so simultaneous updates compound
+multiplicatively through depth. With stride 4 the 24 untouched layers act as a stabilising scaffold.
+**⇒ STRUCTURAL, and WORSE AT 64 LAYERS (27B). Do NOT move all layers' assignments simultaneously.**
+FIX (added): `--tw-layer-offset` — with `--tw-layer-stride N`, select layers where idx%N == offset, so N
+SEQUENTIAL GROUP passes (offset 0..N-1, each warm-starting from the previous) cover every layer while only ever
+perturbing 1/N at a time. This is the same reason block-AP already goes layer-by-layer.
+ALSO CORRECTED: the earlier 8>16>32 ordering (§8t) was NOT a floor result — 8L had PLATEAUED (0.4648→0.4637→
+0.4625) while 16L was still descending; and matched-ABSOLUTE-flips starves each layer of updates. More
+trainable assignments must have a LOWER floor (32L strictly contains 8L's degrees of freedom); the correct
+control is matched FRACTION + matched steps. 16L final at matched-absolute = 0.5054.
+
+**8v. PER-LAYER TALR — implemented, but does NOT fix the depth blowup (2026-08-06).**
+Built one optimizer group PER LATENT LAYER + a per-layer flip-rate servo (`--per-layer-tr`, default on;
+`--no-per-layer-tr` restores the shared group). Motivated by a measured burst: on an 8-layer run ONE layer moved
+15.5% of its assignments in the first post-warmup steps while the median layer sat at 3.3% (5x), invisible to a
+global controller that only sees the aggregate.
+**RESULT ON 32 LAYERS (TR 5e-4, the config that failed): global TALR 0.7355 → 1.9080; PER-LAYER TALR 0.7355 →
+2.0105.** No improvement ⇒ **per-layer imbalance is NOT the cause of the depth blowup.** The controller does
+work (per-layer gains differentiate, 0.05–0.36), but the failure is AGGREGATE perturbation across depth: 32
+layers each moving ~3% compounds; 8 layers each moving ~3% does not.
+CORRECTION to §8u: the burst layer IS present in 32L runs too (max 14.90 vs med 3.05 here) — the earlier
+"uniform, ratio 2x" reading was one run's numbers and does not generalise. Per-layer TALR is still worth keeping
+as robustness (it fixes a real, otherwise-invisible pathology), it is just not the depth lever.
+REMAINING PATHS for full coverage: (a) SEQUENTIAL GROUP PASSES — pass 0 (8 layers, 120 steps) already reached
+KL 0.7358 → 0.5126 and is preserved at output_4bpipe/seqassign/pass0; (b) 32 layers at a MUCH LOWER TR
+(1.25e-4 = matched aggregate perturbation vs 8L@5e-4), the direct analogue of 16L@2.5e-4 which dipped then
+recovered to 0.5054.
+
+**8w. ★ FULL 32-LAYER COVERAGE WORKS — the depth "blowup" was an un-servoed BASE-LR burst (2026-08-06).**
+The TR target barely mattered: 32L@TR5e-4 gave assign-moved 3.379% / KL 1.908, and 32L@TR1.25e-4 gave 3.354% /
+1.864 — nearly identical. Reason visible in the TALR trace: measured rate 7.45e-4 vs a 9.17e-5 target (8x over)
+with the gain already clamped to 0.22 → **the damage happens in the ~5 steps between warmup ending and TALR's
+first measurement, where the BASE latent-lr is applied raw.** With 32 layers x ~24% of latents near a boundary,
+that one window flips ~3.3% of ALL assignments at once. TR is irrelevant because the burst precedes the
+controller; the real control for those steps is the base latent-lr, which had been tuned on 8 layers (5e-6).
+**FAIR TEST — 32L with base latent-lr 5e-7 (10x lower):**
+  step 20 (baseline) KL 0.7355   assign-moved 0.000%
+  step 40            KL 0.7079   assign-moved 0.002%   [talr] rate 0 < target ⇒ gain OPENED to 2.20
+  step 60            KL 0.6293   assign-moved 0.227%   [talr] rate 1.34e-4 vs target 7.5e-5, gain 0.79-2.86
+Monotone improvement from the first eval, NO blowup, gradual flips, TALR in genuine two-sided control (it opens
+up when under target, clamps when over).
+**⇒ REVISES §8u: depth compounding is NOT the barrier. Simultaneous full-coverage assignment-QAT is viable;
+the base latent-lr must simply be scaled DOWN as coverage grows** (8L:5e-6 → 32L:5e-7). For the 64-layer 27B,
+size the base lr to the coverage (or ramp it from 0) rather than assuming layer-group passes are required.
+(The per-layer ratio 9155x at step 40 is a divide-by-near-zero artifact — median 0.00% — not real imbalance;
+by step 60 it is a healthy 3x.)
+
+**8x. BUG — save path hung the worker under --latent-offload (2026-08-06, fixed).**
+Symptom: after the last training step the run stalled indefinitely; RSS 44.9GB, CPU 385%, GPU idle, and
+torchrun emitted continuous `RendezvousTimeoutError` heartbeat failures. Cause was the CPU-save path added for
+the earlier save-time OOM (§ CE-stage work): it unconditionally did `core.to("cpu")` + dequant-in-RAM whenever
+`_mem_eff` was on. Two faults: (1) under `--latent-offload` the latents are ALREADY off-GPU (only 7.2GB VRAM in
+use, 16GB free) so the CPU move is unnecessary — and it cost a ~45GB CPU dequant that blocked the worker long
+enough for torchrun's rendezvous heartbeat to time out; (2) `_dev = next(core.parameters()).device` resolved to
+**cpu** when the first parameter was an offloaded latent, so `core.to(_dev)` never returned the model to the GPU.
+FIX: only take the CPU-save path when `_mem_eff and NOT latent_offload`, and resolve `_dev` from the first CUDA
+parameter with a fallback to `device`.
+
+**8y. BUG — torch.optim.Adam `foreach=True` blew host RAM and wedged the offloaded run (2026-08-06, fixed).**
+Symptom: the 32L offloaded run stopped progressing at step 100, log silent for 50 min, process in **D state**
+(uninterruptible sleep), RSS **43.8GB**, CPU 167%, GPU 0%. The cgroup guard was MemoryHigh=42G, so RSS crossed
+it and the kernel throttled the cgroup into synchronous reclaim — the same signature as the block-AP throttle.
+ROOT CAUSE: identified host-RAM budget was only ~19.6GB (latents 3.02 + Adam state 6.04 + grads 3.02 + teacher
+cache 6.10 + Wlm 1.27 + calib 0.13), a 24GB gap. `torch.optim.Adam` defaults to **foreach=True**, which
+allocates same-size temporaries across the WHOLE param group during the step — for a 755M-param CPU group that
+is many extra GB.
+FIX: `torch.optim.Adam(opt_groups, foreach=False)` for the offload path (per-tensor stepping; bounded memory).
+**RSS 43.8GB → 23.9GB, state D → S, CPU 167% → 690%, and ~8s/step vs ~36s/step** — so most of the "CPU offload
+is slow" impression was actually this reclaim thrashing, not PCIe traffic. Guard for offloaded runs sized to
+MemoryHigh 47G / MemoryMax 50G (steady 24G sits far below; deliberately under the 52G that froze the host
+2026-06-18).
+NOTE: the `lr=0.00e+00` shown on step lines is NOT a bug — that field prints the SCALE lr, which is 0 by design
+under `--lr 0` (V-phase). The latent lr appears in the `[talr]` lines.
+
+**8z. LATENT-LR SCALING RULE (note for the 64-layer 27B).**
+`--latent-lr` is applied RAW between warmup ending and TALR's first measurement (~tr_every steps); too large for
+the coverage ⇒ that window flips a large fraction of ALL assignments and the model blows up (TALR clamps too
+late). Measured on 4B down_proj: 8L/189M latents @5e-6 = OK (first-eval 3.2%, KL→0.4625); 32L/755M @5e-6 =
+BURST 3.3% ⇒ KL 1.91; 32L/755M @**5e-7** = OK (first-eval 0.002%, KL→0.4513 still falling). So 4x the latents
+needed ~10x lower lr (≈N^-1.66, faster than 1/N).
+27B: 64 layers x down_proj[5120,17408] = **5704M latents** = 7.6x the 4B-32L case ⇒ extrapolates to 6.6e-8
+(∝1/N) … 1.7e-8 (∝N^-1.66), i.e. **~1e-8..7e-8 — but CALIBRATE, don't extrapolate**: run with a small
+--eval-every and require first post-warmup `assign-moved` ≲0.05%; drop 10x and repeat if higher. Starting too
+LOW is self-correcting (TALR opened gain to 2.20 on the good 32L run); starting too HIGH is not.
+BETTER FIX (unimplemented): ramp the latent lr from 0 over ~tr_every x4 steps after warmup so no raw lr is ever
+applied — removes the per-coverage hand-tuning entirely.
+
+**8aa. ★ TEST 1 SETTLED — FULL 32-LAYER COVERAGE IS BEST (2026-08-06).** 360 steps, base latent-lr 5e-7,
+TR 1.25e-4, scales FROZEN, fp-spread init, latent-offload.
+  step:   20(base)   40      80     120     160     200     240     280     320     360
+  KL:     0.7355  0.6684  0.5329  0.4819  0.4708  0.4675  0.4587  0.4513  0.4495  0.4493  (converged)
+  FINAL COMPARISON (from the same 0.7355 skeleton baseline):
+    8L  120 steps  trits moved 4.75%  KL 0.5126  (-30%)
+    8L  240 steps  trits moved 3.66%  KL 0.4625  (-37%)
+    16L 240 steps  trits moved 3.43%  KL 0.5054  (-31%)
+    **32L 360 steps trits moved 0.80%  KL 0.4493  (-39%)  ← best floor, ~5x FEWER flips**
+Gradual TALR-controlled flips are far better targeted than a burst. Per-layer spread stayed healthy (2x).
+INTEGRITY VERIFIED on the saved 10.59GB model: down_proj trits changed 0.754% and its scales are BIT-IDENTICAL
+(Δ=0.00e+00 ⇒ `--lr 0` genuinely froze them, a pure V-phase); gate_proj/up_proj TRITS 100% unchanged (0.000%)
+with only a ~0.2% per-block scale shift from `--scale-qat-bits 8` re-quantising onto the 8-bit log grid at save;
+output is foldable g64 ternary. Save completed cleanly (the §8x fix held).
+**⇒ The "depth barrier" of §8u was TWO ORDINARY BUGS — an un-rescaled base latent-lr (§8z) and
+Adam(foreach=True) exhausting host RAM (§8y) — NOT anything about depth. More trainable assignments do have a
+lower floor, as expected. For the 27B: full simultaneous 64-layer coverage should work; no sequential
+layer-group passes needed.**
+
+**8ab. ★ TEST 2 — TR SWEEP: 1.25e-4 IS NEAR-OPTIMAL, CLEAN INTERIOR OPTIMUM (2026-08-06).**
+32L config held fixed (base latent-lr 5e-7, scales frozen, fp-spread init, offload, 360 steps, annealed
+schedule --tr-final-frac 0.2); ONLY --target-tr varied. Baseline 0.7355.
+  TR 5e-5    trits moved 0.396%   final KL 0.4572   converged (0.4573→0.4572)
+  TR 1.25e-4 trits moved 0.796%   final KL **0.4493**  converged (0.4495→0.4493)   ← BEST
+  TR 5e-4    trits moved 2.633%   final KL 0.4849   NOT converged (0.4948→0.4849, still descending)
+**Both neighbours worse ⇒ genuine interior optimum, not an edge.** Too few flips plateaus HIGHER (5e-5 had
+converged, so it is a real ceiling from insufficient movement, not slower pacing); too many flips picks WORSE
+ones (5e-4 moves 3.3x more trits and is still 0.036 behind at equal budget).
+CAVEAT: 5e-4 had NOT converged, so its ceiling is unknown — the defensible claim is that it is less efficient
+per step at equal budget, not that its floor is higher.
+**KEY CONFIRMATION: TR 5e-4 was completely STABLE here (0.7355→0.4849 monotone), whereas the SAME TR at base
+latent-lr 5e-6 destroyed the model (→1.91).** So the transition rate was never the destabilising variable — the
+earlier catastrophe was entirely the pre-TALR base-lr burst (§8z). Under proper control a high TR merely
+degrades quality; it does not blow up.
+⇒ RECIPE SETTING for the 27B: target-tr ~1.25e-4 (annealed to 0.2x), with the base latent-lr CALIBRATED to the
+coverage (§8z), NOT swept.
+
+**8ac. GRADIENT RELEASE — the right way to fit larger assignment scopes (2026-08-07).**
+Goal: full MLP scope (gate+up+down) at 32 layers = 2.26B latents. With offloaded fp32 latents the host budget is
+16B/latent (params 4 + grads 4 + Adam m 4 + v 4) = 36.2GB + ~12.9GB fixed = **49.1GB ⇒ throttles** at
+MemoryHigh=47G.
+REJECTED: swapping Adam for SGD+momentum (12B/latent). It saves the memory but CHANGES THE OPTIMISER SEMANTICS,
+and the probe stalled with no steps in 3.5min for unrelated reasons. Not worth debugging a shortcut.
+**ADOPTED — `--latent-grad-release`:** register a post-accumulate-grad hook on each latent so it takes its Adam
+step the instant its gradient exists, then sets `.grad = None`. At most one layer's gradients are ever live, so
+the 4B/latent grad term leaves the peak: **16B → 12B/latent ⇒ mlp@32L ≈ 40GB (fits)**. Crucially this is EXACT
+Adam (the update is per-parameter): a unit test vs standard Adam over 5 steps gives **max|Δparam| = 0.000e+00**
+and confirms the grad is freed. Integration details: the lr schedule + TALR must be applied BEFORE backward
+(latents step during it), and the latent groups' lr is zeroed inside `opt.step()` so they cannot double-step.
+VALIDATED on the known-good down@32L config: KL @40/@80 = 0.6624/0.5237 vs the 0.6684/0.5329 reference (tracks,
+slightly better), steady RSS **21.1GB vs 24-26GB**, saved cleanly.
+OPEN: the SAVE transient spiked to 46.1GB on down@32L (it completed, but that is at the 47G line). mlp@32L
+trains at ~40GB steady, so the save spike — not training — is the remaining risk for the full-MLP scope.
+
+**8ad. SAVE-TRANSIENT FIX — peak RSS 46.1GB → 21.1GB (2026-08-07).**
+Root cause: `save_student` claims to stream "shard-by-shard", but this student has **ONE shard**, so its
+per-shard dict accumulates the ENTIRE dequantised fp16 model (~10.6GB at 4B) and `save_file()` copies it again
+during serialisation — a ~20GB transient on top of whatever training still holds. `safetensors.save_file` has no
+streaming API (it takes a full dict), so the fix must reduce what is resident BEFORE the call.
+FIX: `save_export(tag, final=True)` on the final save now also clears the OPTIMIZER STATE (Adam's 2 fp32 buffers
+per latent) — training is over at that point, so the state is dead weight. Grads were already dropped.
+MEASURED on down@32L: peak RSS **46.1GB → 21.1GB**, "[save] released 6.5GB of optimizer state before writing",
+model saved cleanly.
+PROJECTION for mlp@32L (2.26B latents) with grad-release + this fix: training 40.0GB steady, final save 43.1GB
+(would have been 61.2GB) — both under the MemoryHigh=47G cap.
+
+**8ae. mlp@32L (full MLP scope, 2.26B latents) — NOT REACHED on this box (2026-08-07).**
+Built three memory mechanisms, all correct and unit-tested, and still could not run it:
+  1. `--latent-grad-release` — per-latent Adam step in a post-accumulate-grad hook, frees each grad
+     immediately. EXACT Adam (unit test max|Δ|=0.000e+00). Validated on down@32L: RSS 24-26 → 21.1GB, KL
+     trajectory preserved (0.6624/0.5237 vs 0.6684/0.5329 reference).
+  2. §8ad save fix — release optimizer state before the final save. down@32L peak 46.1 → 21.1GB.
+  3. `--latent-state-nvme` — Adam exp_avg/exp_avg_sq in np.memmap buffers (unit test vs in-RAM: 0.000e+00
+     over 20 steps). Frees 18.1GB of RAM at mlp@32L.
+MEASURED COST at mlp@32L: **18.1 bytes/latent** (not the predicted 12) ⇒ ~48GB resident, over the 47G cap. With
+NVMe state it trained but at 47.6GB (memmap dirty pages count toward the cgroup until written back) — 10 steps
+per 3 min, i.e. throttled. Lowering MemoryHigh to 38G to force early writeback made it worse: 9 min with ZERO
+steps, D state, load 15.6, no state files created — stuck thrashing in the FIRST backward.
+**STATUS: full-MLP scope at full 32-layer coverage is not reachable on a 60GB host with this design.** The
+mechanisms are sound and reusable (grad-release + save fix are pure wins already in use); the blocker is that
+2.26B fp32 latents + their transients simply exceed the box. Options for the scope question: (a) gate+down @32L
+= 1.51B latents (~34GB, fits, keeps full coverage); (b) mlp @16L (~27GB, but confounds scope with coverage);
+(c) revisit with q8/bf16 latents once the fp32 requirement is re-examined (bf16 was ruled out because the Adam
+update ~2.5e-4 is below bf16 resolution 3.9e-3 — but a fp32 master-copy + bf16 compute variant was never tried).
+
+**8af. bf16 LATENT COMPUTE — REJECTED, it degrades the result (2026-08-07).**
+Tried standard mixed precision: fp32 master latent on the CPU, BF16 copy streamed to the GPU for the forward
+(and hence a bf16 grad). Rationale was that the model already runs bf16 and `forward()` casts dequant()'s
+output to x.dtype anyway, so the fp32 GPU copy looked free to drop (~6B/latent = 13.6GB at mlp@32L).
+**MEASURED on down@32L (same seed/config as the fp32 grad-release reference): step40 KL 0.9495 vs 0.6624,
+step80 0.6741 vs 0.5237 — clearly WORSE, with FEWER flips (0.154% vs 0.209%) at the same ~21-24GB RSS.**
+WHY (the reasoning I got wrong): the STE gate is `|L| < 1.5·s` and the update is driven by each latent's
+DISTANCE FROM ITS DECISION BOUNDARY — a small difference of similar-magnitude numbers (s ~1e-2, latents sitting
+NEAR the boundary by construction after fp-spread init). bf16's ~3 decimal digits cannot resolve that
+difference, so the gate admits/blocks the wrong latents and gradients land on the wrong weights. **The fp32
+requirement is not only about the Adam update magnitude (2.5e-4 vs bf16 3.9e-3) — the STE FORWARD itself needs
+fp32 to resolve boundary proximity.** Reverted.
+⇒ Full-MLP scope at 32 layers stays out of reach on this box. Falling back to gate+down @32L (1.51B latents,
+~34GB) which keeps FULL layer coverage and isolates the scope variable against the down@32L reference.
+
+**8ah. ★ TEST 3 — SCOPE vs COVERAGE: coverage is ~2.5x the better lever (2026-08-07).**
+Matched pair, both 8 layers (stride 4), TR 1.25e-4 annealed, 360 steps, scales FROZEN, fp-spread init,
+grad-release + offload. Baseline 0.7355.
+  down only (0.189B latents, lr 8e-7)      final KL 0.4718   (-36%)
+  mlp gate+up+down (0.566B, lr 1.5e-7)     final KL 0.4631   (-37%)
+⇒ **3x the trainable assignments buys 0.0087 KL.**
+CROSS-REFERENCE with the coverage result (same TR/steps, down scope):
+  8 layers  0.189B -> 0.4718
+  32 layers 0.755B -> 0.4493
+⇒ **4x the COVERAGE buys 0.022 KL — ~2.5x more per unit of latent budget than scope**, and coverage is the
+CHEAPER one to run (one projection across all layers needs less memory than three across a quarter of them).
+CAVEAT: the pair differs in lr as well as scope (1.5e-7 vs 8e-7) because more latents need a lower lr to avoid
+the burst; "scope doesn't pay" and "the lr penalty for scope outweighs it" are not fully separable here. The
+queued ablation's gate/up/down arms are IDENTICALLY SIZED (0.189B each) so they share one lr and settle that.
+**ACTIONABLE FOR THE 27B: prioritise full 64-layer coverage of down_proj over adding projections at partial
+depth.** It also reframes §8ae/§8ag — the mlp@32L memory fight was chasing a lever worth only ~0.009.
+
+**8ai. ★ SCOPE ABLATION @8L — ATTENTION IS THE BEST SINGLE SCOPE (2026-08-07).**
+All arms: 8 layers (stride 4), TR 1.25e-4 annealed, 240 steps, scales FROZEN, fp-spread init, grad-release +
+offload, from the same block-AP skeleton (baseline KL 0.7355). MLP arms are IDENTICALLY sized (0.189B latents)
+so gate/up/down share lr 8e-7 — no calibration confound between them.
+  arm    latents     KL     gain   gain/B-latent
+  attn    0.630B  0.4668  0.2687      0.427     <- BEST
+  down    0.189B  0.4935  0.2420      1.280
+  up      0.189B  0.4966  0.2389      1.264
+  gate    0.189B  0.5022  0.2333      1.234
+**FINDINGS:** (1) attention beats the best MLP projection by 0.027 — 3x the ENTIRE spread among the three MLP
+projections, and more than full 3-projection MLP scope gained in §8ah. (2) The three MLP projections span only
+0.009 ⇒ largely SUBSTITUTABLE; which one you pick barely matters (down marginally best, consistent with it
+consuming the SwiGLU intermediate and writing the residual stream). (3) **attn is 3x LESS EFFICIENT PER LATENT** (0.427 gain/B vs
+~1.27 for every MLP projection): it has 3.3x more trainable weights, and that size is the whole reason it wins
+in absolute terms. (I first wrote the opposite here — 'competitive per-latent' — which the gain/B column I had
+just computed directly contradicts. Corrected.)
+**⇒ WHICH SCOPE TO PICK DEPENDS ON THE BINDING CONSTRAINT:** best ABSOLUTE result from a single scope = attn
+(0.4668); best VALUE per unit of memory/compute = any MLP projection (~1.27 vs 0.43). On the 27B memory is the
+binding limit, so the per-latent figure is the relevant one and MLP projections stay preferable there; attention
+is only worth it with spare headroom.
+**SURPRISE / CORRECTION:** this whole test line focused on down_proj because block-AP's QAT is `--qat-attn-only`
+and I assumed attention was already handled and the MLP was the untapped part. For the ASSIGNMENT stage the
+opposite holds — attention has the most recoverable assignment error.
+Sequential chain (down->up->gate->attn, each warm-starting from the previous) running to test complementarity.
+
+**8aj. ★ SEQUENTIAL CHAIN BEATS SIMULTANEOUS — and costs LESS memory (2026-08-07).**
+Chain @8L (240 steps/stage, each warm-starting from the previous saved model, scales frozen throughout):
+  down            0.4935
+  + up            0.4555   (-0.038)   <- big
+  + gate          0.4580   (+0.003)   <- NOTHING (MLP projections are substitutable, cf §8ai spread of 0.009)
+  + attn          0.4536   (-0.004)   <- small but real
+COMPARISONS:
+  all-MLP SIMULTANEOUSLY (§8ah, 360 steps) 0.4631  — the chain reaches 0.4536 in 240 steps/stage
+  single scope at 32L coverage (§8aa)      0.4493  — chain@8L nearly matches it with 1/4 the coverage
+**⇒ THE KEY OPERATIONAL FINDING: sequential scope holds only ONE projection's latents at a time, so peak memory
+stays at the single-scope level (~26GB at 32L) NO MATTER how many stages are chained.** Simultaneous mlp@32L
+needed 48GB and was OOM-killed (§8ag). The memory wall that consumed much of this session is avoidable by
+ORDERING, not by more offload engineering — the more useful lesson for the 64-layer 27B.
+**⇒ RECIPE IMPLICATION: chain down -> up (skip gate, it is redundant) and optionally -> attn.**
+NEXT (queued): `run_seq32.sh` = the same chain at FULL 32-layer coverage (down -> up @32L, then attn @16L
+because attn@32L = 2.52B latents ~ 77GB by the measured 29.1 B/latent model and will not fit). Tests whether
+the two levers COMPOSE: coverage (-0.022) + sequential scope (-0.038) should land below the current best 0.4493.
+
+**8ak. BUG — grad-release leaked a DUPLICATE Adam state; RSS 23.9→42.8GB and wedged (2026-08-07, fixed).**
+seq32's first stage (down@32L, a config that had run stable at 21-26GB) climbed to 42.8GB anon by step 100 and
+wedged in D state with the GPU at 0%. cgroup memory.stat showed **anon 39.4GB / file 2.0GB** ⇒ a real leak, not
+page-cache accounting.
+ROOT CAUSE: with `--latent-grad-release` the latents step inside backward via `_adam_step_one`, and I stopped
+`opt.step()` from double-UPDATING them by zeroing the latent groups' lr. But **a zero-lr Adam step still
+ALLOCATES exp_avg/exp_avg_sq** (verified directly: one step at lr=0.0 creates both buffers). So every latent
+carried TWO sets of Adam state — an extra 6.0GB at 32L plus allocator slack.
+Why it was missed: the grad-release validation runs were 30-90 steps; the leak only becomes fatal past ~100.
+FIX: temporarily REMOVE the latent groups from `opt.param_groups` around `opt.step()` instead of zeroing their
+lr, so the optimizer never visits them. **Verified: RSS flat at 15-24GB through step 90** (the buggy version was
+at 42.8GB and wedging by step 100).
+LESSON: validate memory behaviour over a run length comparable to the real one — a 30-step smoke cannot see a
+per-step allocation leak.
+
+**8al. ★ ROOT CAUSE of the repeated step-100 wedges: the PERIODIC CHECKPOINT SAVE, not a leak (2026-08-07).**
+Three seq32 attempts all stalled at EXACTLY step 100 in D state. I chased it as a memory leak and made two
+real-but-secondary fixes (see below). The user's observation — "it's a ~20GB SPIKE, system goes 35GB->50GB" —
+identified it: **`--ckpt-every` defaults to 100**, so at step 100 `save_export()` runs `save_student()`, which
+builds the entire fp16 model dict (~10.6GB at 4B) plus `save_file()`'s serialisation copy = a **~20GB
+transient** on top of ~30GB of training state. That crosses the cgroup limit and throttles the process into
+uninterruptible sleep. Explains everything: the exact step number, the spike shape, the D-state (throttle, not
+OOM-kill, hence nothing in the journal), and why my "leak fixes" moved the number without curing it (they
+lowered base RSS, so the same spike landed at 33.7GB/R-state instead of 40.9GB/D-state).
+The §8ad fix released optimizer state only on the FINAL save, not on periodic checkpoints.
+**FIXES:** (1) `--ckpt-every 0` in run_seq32.sh — we use `--select final`, so mid-training checkpoints are
+useless here. (2) **`SAVE_MAX_SHARD_GB` (new, opt-in, default off)** — re-shards the OUTPUT into bounded files
+so `d` and save_file's copy are each capped. The student has ONE source shard, so the default path always
+accumulated the whole model. At 2GB: final-save peak ~34GB instead of ~51GB. VERIFIED: writes 5 shards +
+rewritten index, and `build_student` loads it back (each seq32 stage warm-starts from the previous, so this had
+to work). Deploy/export path unchanged (flag off by default).
+**SECONDARY FIXES made while chasing this (both genuine, both kept):**
+  - `_snap()` cloned all of `scales` (which INCLUDES the 3GB of latents) on every held-out improvement ⇒
+    repeated multi-GB alloc/free. Now preallocated buffers, copied into: O(1) allocations for the run.
+  - `_adam_step_one` computed `(exp_avg_sq.sqrt()/c).add_(eps)`, allocating TWO full-size fp32 temporaries per
+    latent per step (~3GB/step of churn at 32L). Now one reusable scratch buffer, all ops in-place. Unit-tested
+    identical to torch Adam (max|Δ| 4.8e-07 over 30 steps).
+**LESSON: an exact, reproducible failure STEP is a code path, not a gradual leak.** I should have grepped for
+step-100 triggers before hypothesising about allocator fragmentation.
+
+---
+
+## 9. Assignment-stage program (2026-08-05→11): cold-start fix → data scaling → scope decomposition → E2E composition
+
+**HEADLINE: the assignment stage DOES scale with data (+1.67 pt eval2k agreement per doubling, no
+saturation to 16M tokens) — that was the open problem. But every STRUCTURAL change we tried lands in the
+noise, because whatever the first intervention fixes is nearly all that any of these mechanisms can fix at
+this data budget.** Deployable best = **assignments + E2E, 81.32% / KL 0.3042** (`output_4bpipe/e2e_on_assign`).
+
+### 9a. Data scaling of `down`@32L (from the raw skeleton, scales frozen, eval2k NP=1946 SEQ=1024)
+
+| arm | steps | unique seqs | tokens | agreement% | meanKL |
+|---|---|---|---|---|---|
+| A | 360 | 120 (×3ep) | 0.31M | 71.03 | 0.6075 |
+| B | 360 | 360 | 0.92M | 71.49 | 0.5868 |
+| C | 1080 | 1080 | 2.77M | 73.72 | 0.5100 |
+| D | 3240 | 3240 | 8.29M | 76.21 | 0.4289 |
+| E | 3240 | 360 (×9ep) | 0.92M | 73.66 | 0.5083 |
+| **F** | **6244** | **6244** | **15.97M** | **78.35** | **0.3637** |
+
+Both axes pay and ADD: fixed compute + 9× data = **+2.55**; fixed data + 9× compute = **+2.17**; both = **+4.72**.
+Fresh tokens ≈ **3× repeats** (E lands on C: 9 epochs over 360 seqs == 1 epoch over 1080). ⇒ **+0.685 pt per
+doubling of STEPS** on fixed data. Unique calib caps at **15.0M tok** (6244×2560).
+
+### 9b. THE DIMINISHING-RETURNS LAW (five independent confirmations)
+
+Every mechanism gains hugely on a weak model and ~nothing on a strong one:
+
+| intervention | on a weak model | on a strong model |
+|---|---|---|
+| E2E scale distillation | skeleton 61-64% → **80.86** (+18) | assign-trained 78.35 → **81.32** (+2.97) |
+| assignment training | skeleton 61-64% → **78.35** (+15) | E2E'd 80.86 → **81.32** (+0.46) |
+| `attn` after `down` | 0.4575 → 0.4488 (crossed) | from arm F 0.2341: **never crossed** in 3000 steps |
+| later layer groups | group0 **+0.3836** | groups 1/2/3 +0.0144 / +0.0040 / **0.0000** |
+| joint all-MLP vs `down` alone | mlp8 0.4631 vs down8 0.4718 | **+0.5 pt** at 32L (75.09 vs ~74.6 interp) |
+
+**Scale-training and assignment-training are SUBSTITUTES, not complements**, despite touching disjoint
+parameters (`W ≈ scale_g ⊙ trit`). Research prompt filed: `research_prompts/e2e_diminishing_returns_prompt.md`.
+
+### 9c. Scope decomposition — what works and what does not
+
+- **A 2nd MLP projection sequentially ALWAYS damages** (4×, incl. 3000 steps from the 16M `down`: entry
+  0.2341 → 0.3261, never beat entry). SwiGLU `down(silu(gate)·up)` — gate/up multiply, so tuning one
+  co-adapts the others' CURRENT assignments. **Recipe = `down` + `attn` only.**
+- **Layer-sequential DOES stack** (group-joint, stride 4, all-MLP): every group dipped ~4%, recovered, and
+  finished ahead — vs the scope axis's 39% dip that never recovered. The decomposition is sound; its
+  *value* is only +0.5 pt, so the joint-scope program is **CLOSED**.
+- `attn` was never budget-matched (half the steps, half the data, half the coverage) — still open.
+
+### 9d. Two silent measurement bugs, both fixed in `src/e2e_qp_distill.py`
+
+1. **No entry baseline** ⇒ `best_ho_kl` started at ∞, so the first post-training eval "won" by default and a
+   stage could ship a model 33% WORSE than its input while logging a clean `best=`. Fixed: a step-0 held-out
+   eval logs `<- ENTRY BASELINE` and seeds `best_ho_kl`/`best_ho_snap`.
+2. **Abort threshold is in STEPS**, not evals (`ho_worse × eval_every ≥ 100 × abort_patience` ⇒ 300 at the
+   default 3). At a coarse `--eval-every` that is ONE eval. It killed E2E at step 3000/12488 **while it was
+   improving monotonically**. `init_ho_kl` is now deliberately anchored to the first POST-training eval, NOT
+   the entry, so dip-then-recover stages (attn, E2E) are not aborted. Long stages need `--abort-patience 30+`.
+
+Also fixed: the cold-start latent-lr burst (linear lr ramp + TALR gated until the ramp completes) — paired
+proof 0.4935 → 0.4891 from 11% fewer flips in 17% fewer effective steps.
+
+### 9e. Memory model — CORRECTED
+
+Old **27.3 B/latent** came from only the two 8L points (40.6M apart, a weak lever arm) and was **44% high**.
+Refit over the full range (attn@8L 336.9M→13.11GB, gateup@8L 377.5M→14.22GB, down@32L 755M→21.14GB):
+
+> **18.9 B/latent + 6.92 GB base** (predicts all three within 0.2 GB)
+
+= 4 (fp32 latent) + 4 (exp_avg) + 4 (exp_avg_sq) + 4 (snapshot) + ~2.9 overhead.
+
+**27B latent inventory, measured from the checkpoint: 26.049B** quantizable (excl. embed; MLP 17.11B = 66%,
+attention 5.54B, lm_head 1.271B, mtp ~0.42B). RAM for ALL latents at 64 layers: **499 GB** today, **239 GB**
+with 8-bit Adam + snapshot eviction, **111 GB** for bare fp32 latents alone. Does not fit 42 GB by any route
+(would need 1.35 B/latent). `down`@64L alone = 5.704B = 115 GB (58 GB patched).
+
+### 9f. Built but NOT yet applied
+
+- `src/adam8bit_cpu.py` — block-wise 8-bit Adam moments for CPU-resident latents (bitsandbytes' 8-bit
+  optimizers are CUDA-only; our latents are host-side under `--latent-offload`). **Measured: −6.0 B/latent,
+  99.85% identical flip decisions vs fp32 at a ~10% flip rate, +10.3% step time.**
+- `tools/apply_mem_wins.py` — applies both wins behind opt-in flags (`--adam8bit`, `--snap-nvme`);
+  `--check` verifies anchors + parse without writing. Snapshot eviction measured to keep 4 B/latent off
+  ANONYMOUS rss (memmap ⇒ reclaimable page cache).
+- `run_full_pipeline.sh` **Phase 4.5** (assignment training) is wired: `down` 1 epoch + `attn` stride 2,
+  Phase 5 now starts from `$ASSIGNED`. `ASSIGN=0` restores the old behaviour exactly.
+
+---
+
+## 10. Condensed from removed raw artifacts (logs/*.log, logs/*.json — deleted 2026-08-11)
+
+Everything below was the *only* copy of these numbers. The raw files are gone; the `.txt` tables remain.
+
+### 10a. Free-gen gate, 2048-token budget (n=48, think mode, temp 0.6, tau 4.0)
+
+| model | loop | trunc | commit | mean comp-ratio | think len | n_closed |
+|---|---|---|---|---|---|---|
+| **FP teacher** (`output_4b/rot`) | 25.0% | 25.0% | 75.0% | 2.399 | — | — |
+| **TQ1_64 sim, FINAL gate** | **22.9%** | **18.8%** | **79.2%** | 2.849 | 674 | 39/48 |
+| TQ1_64 sim (earlier) | 27.1% | 20.8% | 75.0% | 2.838 | 652 | 38/48 |
+| final_g64q8 | 29.2% | 20.8% | 75.0% | 3.080 | 648 | 38/48 |
+| chatfix v1 | 29.2% | 37.5% | 62.5% | 3.338 | — | — |
+| combined-2560 | 39.6% | 43.8% | 56.3% | 3.153 | — | — |
+| stageB | 56.3% | 41.7% | 50.0% | 3.911 | — | — |
+
+**The deployed TQ1_64 sim BEAT the FP teacher on loop rate (22.9 vs 25.0) and commit (79.2 vs 75.0).** Max
+comp-ratio is the outlier metric: FP 3.86 vs ternary 8.5-18.5, i.e. the tail degenerates even when the mean
+does not. stageB (56.3% loop) is the clearest example of a variant that fails free-gen while looking fine
+teacher-forced.
+
+### 10b. Oracle: first-order flip ranking is DEAD (`down`, 755M trits, ce_weight 0.5)
+
+Baseline KL 0.2949 / CE 1.4403 / agreement **77.72%** (FP gap 22.28 pt). Rank candidate trit flips by
+`ḡ·s·(t′−t)`, commit top-K unconstrained, measure true held-out:
+
+| committed flips | KL | agreement | Δ agreement |
+|---|---|---|---|
+| 736 | 0.2963 | 77.57 | −0.15 |
+| 7,520 | 0.3492 | 75.54 | −2.18 |
+| 75,498 | 1.8215 | 52.21 | −25.51 |
+| 755,008 | 14.93 | 6.75 | −70.97 |
+| 7.55M / 37.8M | 36.7 / 50.9 | 0.00 | −77.72 |
+
+**Monotonically worse at every budget**, and only flips with *predicted* Δloss<0 were ever committed. A flip
+moves a weight by ~100% of its own magnitude, so the linear term carries no information.
+
+### 10c. Oracle: GPTQ re-solve at the post-E2E operating point is DEAD
+
+19.66% of assignments change. Agreement 77.72 → **62.48%** (own absmax scales) / **67.61%** (E2E-trained
+scales kept). Keeping the trained scales recovers ~5 pt, so it is NOT a scale confound — GPTQ's preferred
+assignments are genuinely worse for the END loss because it optimises `‖X(W_fp−Q)‖²`, not the task.
+
+### 10d. Activation-Gram diagnostic (rotbase, d=2560, 2.62M tokens/layer)
+
+| layer | stable rank | r_eff (tr/λmax) | spectral conv. (rel F-norm vs 1024 samples) | held-out energy in calib top-512 |
+|---|---|---|---|---|
+| 8 | 5.4 | 2.3 | 128→0.878, 256→0.753, 512→0.502, 1024→0.0 | 0.776 |
+| 16 | 7.0 | 2.7 | same shape | 0.773 |
+| 24 | 21.0 | 4.7 | same shape | 0.693 |
+
+The Gram is extremely low-rank (stable rank 5-21 out of d=2560) and converges by ~1024 calibration samples.
+**This is the mechanistic reason fixed-teacher block-local stages saturate so early** — data enters only
+through an O(d²) statistic that is essentially converged after ~1M tokens. Deeper layers are richer
+(stable rank 21 at L24 vs 5.4 at L8) and retain less held-out energy in the calib subspace (0.693 vs 0.776).
+
+### 10e. Long-context KL gap (83 seqs, `eval_long8k.json`) — NO degradation with length
+
+| ctx | 512 | 1024 | 2048 | 4096 | 8192 |
+|---|---|---|---|---|---|
+| mean KL | 0.3274 | 0.3151 | 0.3156 | 0.3263 | 0.3377 |
+
+gap growth **+0.0103** against SE **0.0136** ⇒ **not significant**. Training at seq 2560 does not cost
+long-context fidelity out to 8192.
+
+### 10f. Misc single numbers from deleted logs
+
+- `e2e_pass2` (second E2E pass): agreement **69.00%**, loop rate 31.2% (15/48).
+- `eval2k_c4`: KL 3.4764 nats, agreement **70.53%**.
+- `grcheck`: best held-out KL 0.5237.
+- `mlp32` / `granularity_test`: recorded FAILED (the 32-layer all-MLP OOM and the granularity sweep aborts);
+  superseded by §9's corrected 18.9 B/latent memory model.
+
+---
+
+## 11. FULL-PIPELINE COLD-START VALIDATION (2026-08-11/12, 4M smoke test) — PIPELINE WORKS
+
+`run_full_pipeline.sh` run end-to-end from scratch on the 4B (ORIG_MODEL=output_4b/untied_4b, fresh
+ROT_BASE, CALIB_TOKENS=4000000, NGPU=1, EVAL_EACH=1). **19:23:35 total, ZERO failures**, valid final artifact.
+Models deleted afterwards; records kept in `logs/pipeline_smoke_*`.
+
+| phase | wall | result |
+|---|---|---|
+| 1 rotation (cold) | **0:00:43** | **rot-check PASS**: KL 0.0006, agreement 98.66%, FP-confident **75.96 → 76.13%** |
+| 2a chat pool | 3:32:46 | 1866 rollouts → **705 kept** (require-close ≈38% yield), 1.80M tok, 843 `<think>` |
+| 2b calib | 8s | — |
+| 3 block-AP skeleton | ~1:55 | eval2k **63.09%** / KL 0.9211 |
+| 4 teacher cache | 8m | — |
+| **4.5a `down`** (1555 steps) | ~3:54 | eval2k **76.49%** / 0.4299 (**+13.40**) |
+| **4.5b `attn`** (1555, stride 2) | ~3:40 | eval2k **77.96%** / 0.3844 (**+1.47**) |
+| 5 E2E (2ep, 3110 steps) | ~3:30 | eval2k **81.00%** / 0.3194 (**+3.04**) |
+| 6 gates | 2:12:19 | Gate A **PASS** · Gate B **FAIL** |
+
+**The rotation post-condition works on a cold rotation** — 75.96→76.13% FP-confident is the exact metric that
+read 78.87→0.00% during the §8k lm_head norm-fold bug.
+
+**Phase 4.5 (assignments in-pipeline) works**, and **`attn` EARNS its slot at realistic budgets**: +1.47 pt
+here from a 4M `down`, versus a complete no-op from arm F's 16M `down`. Same diminishing-returns law — the
+two stages are partly INTERCHANGEABLE, not additive. Do not drop `attn` from the pipeline.
+
+**TOKEN EFFICIENCY — the strongest datapoint we have.** Correct per-stage accounting (the "16M path" is a
+misnomer: its `attn` got 3000 steps AND was a no-op):
+
+| | `down` | `attn` | E2E | total token-steps | unique | final |
+|---|---|---|---|---|---|---|
+| 16M path | 6244 / 16.0M | 3000 / 8.3M **(no-op)** | 12488 / 16.0M ×2ep | **55.6M** | 16.0M | 81.32% |
+| **4M smoke** | 1555 / 4.0M | 1555 / 4.0M | 3110 / 4.0M ×2ep | **15.9M** | 4.0M | **81.00%** |
+
+**3.5× fewer token-steps and 4× less unique data for −0.32 pt.** NOT a controlled comparison (different
+calib AND skeleton) — the clean test is this same pipeline at 16M.
+
+### 11a. GATE B WAS NEVER ENFORCED — found and fixed
+
+The free-gen gate printed its targets and printed its results but **never compared them**; the
+`|| echo "...continuing"` caught only a crash. This 4M model — **Gate A 81.00% PASS** — fails every
+free-gen criterion and would have gone to GGUF export and printed ALL DONE:
+
+| metric | got | target | FP teacher |
+|---|---|---|---|
+| loop_rate | **37.5%** (18/48) | ≤30% | 25% |
+| commit_rate | **64.6%** | ≥68% | 75% |
+| mean_comp_ratio | **3.52** (max 18.2) | ≤3.1 | 2.40 |
+
+Now **fail-closed** in Phase 6 (parses `loop_gate.json`, exits 1 on any breach; `GATE_ADVISORY=1` restores
+the old print-only behaviour). This is the script's own stated philosophy — "GATES ARE FREE-GEN,
+teacher-forced KL is PROVEN BLIND" — which it was not actually implementing.
+
+Likely cause of the failure is the 4M budget starving the chat pool (commit rate tracks corpus
+`</think>`-density; §8). Validated 16M recipe reference: loop 29.2% / commit 75.0% / comp 3.08.

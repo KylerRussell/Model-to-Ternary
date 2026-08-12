@@ -1,0 +1,31 @@
+FREE-GEN GATE — canonical results (src/loop_gate.py, 48 interleaved prompts, temp 0.6, thinking mode)
+Metrics: commit = closed </think> + non-empty non-looping answer | trunc = hit budget still inside <think>
+         loop = zlib comp-ratio > 4.0 OR 5-gram x5 / sentence x4 | compR = mean zlib compression ratio
+NOTE: numbers before 2026-07-24 are INVALID (batch-padding scored as generation + over-loose n-gram; see
+RESULTS_SUMMARY §8d). n=48 => binomial CI is about +/-12pt on the rate metrics.
+
+=== 2048-token budget (primary gate; <= the 2560 training window) ===
+model                          commit   trunc    loop     compR   eval2k
+FP teacher (rot/modified_model) 75.0%   25.0%    25.0%    2.40    -
+V1 (chatfix_v2/e2e_v1, g256)    62.5%   37.5%    29.2%    3.34    72.77%
+combined-2560 (10% chat, g64)   56.2%   43.8%    39.6%    3.15    79.76%
+stageB (semi-on-policy, g64)    50.0%   41.7%    56.2%    3.91    79.61%
+** FINAL (final_g64q8) **       75.0%   20.8%    29.2%    3.08    80.46%
+gate target                     >=68     -       <=30     <=3.1   >=77
+=> FINAL passes all four. commit == FP exactly (both 36/48); trunc nominally beats FP.
+
+=== 768-token budget (SUPERSEDED — confounds "won't stop" with "budget too small"; FP itself only 48%) ===
+FP ~48% commit | V1 42% | combined-768 27% | combined-2560 25.0% | StageA 25.0% | StageB 20.8%
+
+=== max-new close-rate sweep (src/sweep_maxnew_close.py; FP teacher, 96 STEM-derived prompts, gen@4096) ===
+max_new   768   1024  1280  1792  2560  3328  4096
+close     5%    8%    15%   31%   49%   59%   62%
+median close position 1786 tok | 75th pct 2514 | closed-ever 60/96 (62%)
+
+=== corpus </think> density vs commit (the lever that mattered) ===
+corpus                      density   commit@2048
+combined-768                0.6%      -
+combined-2560               4.3%      56.2%
+StageA (require-close 10%)  9.6%      - (25.0% @768)
+V1 (50% chat)               30.9%     62.5%
+FINAL (require-close 50%)   47.2%     75.0%

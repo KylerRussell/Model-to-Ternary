@@ -1,0 +1,8 @@
+data-scaling @32L down — eval2k (NP=1946 SEQ=1024) — Sat Aug  8 04:00:04 AM CDT 2026
+arm            tokens   agreement%   meanKL
+a_360s_120n    307k     71.03        0.6075
+b_360s_360n    922k     71.49        0.5868
+c_1080s        2765k    73.72        0.5100
+d_3240s        8294k    76.21        0.4289
+e_3240s_360n   922k*9ep 73.66        0.5083
+f_6244s_16M    15974k   78.35        0.3637

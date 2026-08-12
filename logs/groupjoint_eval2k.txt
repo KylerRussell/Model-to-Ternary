@@ -1,0 +1,5 @@
+group-joint all-MLP (stride 4 x 1561 steps = 6244 steps, 16M token-steps) — Mon Aug 10 09:43:44 PM CDT 2026
+  down-only @16M (SAME budget): 78.35% / KL 0.3637
+  scale-only E2E:               80.86% / KL 0.2977
+model          agreement%   meanKL
+groupjoint     75.09        0.4753

@@ -1,9 +1,16 @@
 # Virtual environment
 .venv/
 
-# Output artifacts
-output/
+# Generated output trees (rotation, recovery, distillation, experiments) — ANY output-prefixed dir
+output*/
 *.gguf
+
+# Logs (pipeline + diagnostics). logs/*.txt and logs/RESULTS_SUMMARY.md ARE tracked — they are the
+# condensed experimental record and the only surviving copy of most numbers.
+*.log
+
+# Cached tensors (teacher caches, eval refs, etc.)
+*.pt
 
 # Python
 __pycache__/
@@ -25,3 +32,11 @@ build/
 # OS
 .DS_Store
 Thumbs.db
+
+# Per-host path overrides (see env.sh)
+env.local.sh
+
+# Scratch
+_snap_state/
+_adam_state/
+_teacher_offload/

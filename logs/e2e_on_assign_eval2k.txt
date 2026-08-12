@@ -1,0 +1,5 @@
+E2E-on-assignments — eval2k (NP=1946 SEQ=1024) — Mon Aug 10 10:08:36 AM CDT 2026
+  scale-only anchor (same recipe, raw skeleton): 80.86% / KL 0.2977
+  assignment-only (arm F down 16M):              78.35% / KL 0.3637
+model                  agreement%   meanKL
+assign+E2E             81.32        0.3042
