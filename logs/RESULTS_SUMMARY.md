@@ -1116,3 +1116,41 @@ teacher-forced KL is PROVEN BLIND" — which it was not actually implementing.
 
 Likely cause of the failure is the 4M budget starving the chat pool (commit rate tracks corpus
 `</think>`-density; §8). Validated 16M recipe reference: loop 29.2% / commit 75.0% / comp 3.08.
+
+---
+
+## 12. Gate B across the stage chain (2026-08-12) — E2E is MANDATORY, and teacher-forced is blind
+
+Ran the free-gen gate (n=48, 2048 tok, think, temp 0.6) on every stage of the 16M chain, to test whether
+the 4M pipeline's Gate-B failure was (A) too little data or (B) the assignment stage damaging generation.
+
+| model | eval2k | loop | commit | trunc | comp mean/max | gate |
+|---|---|---|---|---|---|---|
+| block-AP skeleton | 63.09% | **97.9%** | **2.1%** | 87.5% | 20.02 / 82.7 | catastrophic |
+| + `down` 16M (arm F) | 78.35% | 47.9% | 72.9% | 25.0% | 3.34 / 10.8 | FAIL |
+| **+ E2E (best model)** | **81.32%** | **27.1%** | **75.0%** | 22.9% | **2.90 / 10.6** | **PASS** |
+| scale-only E2E (no assignments) | 80.86% | 29.2% | 75.0% | — | 3.08 | PASS |
+| FP teacher | — | 25.0% | 75.0% | 25.0% | 2.40 / 3.86 | — |
+
+**(B) is DEAD — assignment training does NOT hurt free-gen.** The assignment-trained model at 16M *beats*
+the previously validated no-assignment model on loop (27.1 vs 29.2) and comp (2.90 vs 3.08), matching
+commit exactly, within 2.1 pt of the FP teacher's own loop rate. **(A) was right: 4M was too little data.**
+
+**Per-stage contributions — both stages matter, for DIFFERENT reasons:**
+```
+commit:  2.1 → 72.9 → 75.0    assignments +70.8, E2E +2.1    (assignments do 97%)
+loop:   97.9 → 47.9 → 27.1    assignments −50.0, E2E −20.8   (assignments do 71%)
+comp:  20.02 → 3.34 → 2.90    assignments −16.7, E2E −0.44   (assignments do 97%)
+```
+Assignments do the BULK of the repair; E2E does the final approach on loop rate, and that is what crosses
+the 30% line. **This revises §9b**: the two stages are substitutes on eval2k AGREEMENT only — on
+free-generation they are not interchangeable, and E2E cannot be skipped no matter how good agreement looks.
+
+Likely mechanism for the split: assignments sharpen top-1 while leaving the distribution tail rougher
+(hence assignments+E2E has better agreement but *worse* meanKL than scale-only E2E, 0.3042 vs 0.2977), and
+a rough tail is what degenerate repetition feeds on; E2E re-fits the per-g64 scales and smooths it.
+
+**The skeleton row is the case for Gate B existing**: 63.09% teacher-forced agreement, loops on 98% of
+prompts, emits `</think>` on 2%. Teacher-forced metrics are blind to this by construction.
+
+Raw table: `logs/gateB_compare.txt`.

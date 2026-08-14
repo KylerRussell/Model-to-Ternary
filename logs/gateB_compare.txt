@@ -1,0 +1,8 @@
+Gate B free-gen comparison — Wed Aug 12 02:01:46 AM CDT 2026
+  targets: commit >=68% · loop <=30% · comp-ratio <=3.1   [FP teacher: 75% / 25% / 2.40]
+  ref (no assignments, 16M, validated): loop 29.2% · commit 75.0% · comp 3.08
+  4M pipeline (WITH assignments):       loop 37.5% · commit 64.6% · comp 3.52  FAILED
+model                      loop%    commit%  trunc%   comp(mean/max)
+assign_e2e_16M             27.1     75.0     22.9     2.90/10.6
+assign_only_16M            47.9     72.9     25.0     3.34/10.8
+skeleton                   97.9     2.1      87.5     20.02/82.7
