@@ -36,6 +36,7 @@ import argparse
 import gc
 import json
 import math
+import time as _t
 import os
 import random
 import shutil
@@ -151,15 +152,53 @@ class TernaryScaleLinear(nn.Module):
                 # doubling the transient AND producing an fp32 grad (~6B/latent, 13.6GB at mlp@32L).
                 # Autograd routes the bf16 grad back through the .to() and accumulates into the fp32 leaf.
                 _dt = torch.bfloat16 if getattr(self, "_latent_bf16_compute", False) else self.latent.dtype
-                self.latent_gpu = self.latent.to(self.scale.device, dtype=_dt, non_blocking=True)
+                # LOCAL, not self.latent_gpu — this used to be a module ATTRIBUTE, which pinned the GPU
+                # copy alive until that module's next forward. The comment above claims checkpointing
+                # frees it; checkpointing frees the autograd-held activation, but the attribute is an
+                # independent strong reference that survives. Cost = 4 B/latent of VRAM per trained
+                # layer, permanently: invisible at the 4B testbed (8 layers, 755 MB total) but 22.8 GB
+                # for `down`@64L on the 27B — measured OOM at 22.14 GiB on a 24 GB card — and ~104 GB
+                # for full arm B, which no GPU configuration can satisfy. As a local it dies with the
+                # frame and only the layer currently in flight holds a copy, which is what the comment
+                # above always intended.
+                if _PF_ON:
+                    _buf = _pf_take(self)
+                    # hand off to the NEXT latent module before we compute, so its copy overlaps this
+                    # layer's dequant + matmul instead of stalling when we reach it
+                    _i = getattr(self, "_lat_idx", -1)
+                    if 0 <= _i < len(_LAT_ORDER) - 1:
+                        _pf_start(_LAT_ORDER[_i + 1], _dt)
+                    latent_gpu = (_UseTransferred.apply(self.latent, _buf) if _buf is not None
+                                  else self.latent.to(self.scale.device, dtype=_dt, non_blocking=True))
+                else:
+                    latent_gpu = self.latent.to(self.scale.device, dtype=_dt, non_blocking=True)
             else:
-                self.latent_gpu = self.latent
+                latent_gpu = self.latent
             # A4: ASSIGNMENT MOVES. A trainable FP latent (init = the GPTQ ternary*scale) is re-ternarized
             # each step; STE passes gradient to the latent so assignments can flip {-1,0,+1}, while the
             # scale keeps its own gradient. Under no_grad (save) this returns the HARD moved ternary*scale,
             # which repacks to TQ2_0 losslessly. Gated STE (grad only inside the clamp band) keeps it stable.
-            Lb = self.latent_gpu.reshape(self.n_blocks, self.block_size)
-            s = self.scale.unsqueeze(1).clamp_min(1e-8).to(Lb.dtype)
+            Lb = latent_gpu.reshape(self.n_blocks, self.block_size)
+            s_all = self.scale.unsqueeze(1).clamp_min(1e-8).to(Lb.dtype)
+            # CHUNKED over blocks for very large tensors. The expression below materialises ~6 full-size
+            # temporaries (Lb/s, round, clamp, mask, q*s, the STE term). At 89M latents (a 27B down_proj)
+            # that is fine; at 1.271B (lm_head under --train-weights all) it needs ~20GB and OOMs a 24GB
+            # card on a SINGLE weight — measured: "tried to allocate 4.74 GiB" with 19.92 GiB resident.
+            # Every op here is ELEMENTWISE and the scale is per-block, so slicing along the block axis is
+            # exact: same values, same gradients, just a bounded working set. Only the output stays
+            # full-size. Small tensors take the original single-shot path (no chunking overhead).
+            _n = Lb.numel()
+            _chunk = _LATENT_DEQUANT_CHUNK_BLOCKS
+            if _chunk and _n > _LATENT_DEQUANT_MIN_ELEMS and self.n_blocks > _chunk:
+                outs = []
+                for i in range(0, self.n_blocks, _chunk):
+                    L_i = Lb[i:i + _chunk]
+                    s_i = s_all[i:i + _chunk]
+                    q_i = torch.clamp(torch.round(L_i / s_i), -1, 1)
+                    m_i = (L_i.abs() < 1.5 * s_i).to(L_i.dtype)
+                    outs.append(q_i.detach() * s_i + (L_i - L_i.detach()) * m_i)
+                return torch.cat(outs, dim=0).reshape(self.out_features, self.in_features)
+            s = s_all
             q = torch.clamp(torch.round(Lb / s), -1, 1)
             mask = (Lb.abs() < 1.5 * s).to(Lb.dtype)         # STE grad gate (inside the rounding band)
             deq = q.detach() * s + (Lb - Lb.detach()) * mask  # fwd = q*s; grad→scale (term1) & latent (term2)
@@ -181,6 +220,14 @@ class TernaryScaleLinear(nn.Module):
 
 
 # ─────────────────────────── distillation loss (top-k KL) ──────────────────────────
+
+# Chunking thresholds for the latent STE dequant (see TernaryScaleLinear.dequant).
+# Only tensors above _MIN_ELEMS chunk at all, so the common case keeps the original single-shot path.
+# 65536 blocks x 256 = 16.7M elements ~= 67MB fp32 per temporary, so the working set stays bounded no
+# matter how large the weight is. Env-overridable for tuning on different card sizes.
+_LATENT_DEQUANT_CHUNK_BLOCKS = int(os.environ.get("LATENT_DEQUANT_CHUNK_BLOCKS", "65536"))
+_LATENT_DEQUANT_MIN_ELEMS = int(os.environ.get("LATENT_DEQUANT_MIN_ELEMS", str(256 * 1024 * 1024)))
+
 
 DECISION_GAMMA = 1.0   # CAKLD confidence-weight exponent; set from --decision-gamma (1=plain CAKLD)
 SKEW_ALPHA = 0.0       # A2 (DistiLLM skew-KL, arXiv:2402.03898): KL(p || a*p+(1-a)*q). 0=plain KL
@@ -500,12 +547,37 @@ def _fp_weight_lookup(fp_model_path):
     from safetensors import safe_open
     f = safe_open(str(Path(fp_model_path) / "model.safetensors"), framework="pt")
     keys = set(f.keys())
+    _warned = set()
+
     def get(name):
         wn = name + ".weight"
         if wn in keys:
             return f.get_tensor(wn)
-        cand = [k for k in keys if k.endswith(name.split("model.")[-1] + ".weight")]
-        return f.get_tensor(cand[0]) if cand else None
+        # Suffix fallback: module paths are `model.layers.N...` while checkpoint keys carry the tower
+        # prefix `model.language_model.layers.N...`, so the exact lookup above always misses here.
+        #
+        # BUG THIS FIXES (2026-08-19): the suffix `layers.0.mlp.down_proj.weight` matches BOTH
+        #   model.language_model.layers.0.mlp.down_proj.weight   (correct)
+        #   mtp.layers.0.mlp.down_proj.weight                    (multi-token-prediction head)
+        # and the old code took cand[0] from a SET, whose iteration order varies per process under
+        # Python's string hash randomisation. So ~50% of runs initialised layer 0's fp-spread latents
+        # from the MTP head's weights. Only layer 0 was affected because the MTP tower has one layer.
+        # Symptom: latent init landed in one of two discrete states on byte-identical commands
+        # (near-decision-boundary 19.633% vs 25.251%), which silently de-paired every A/B comparison.
+        # Fix: sort for determinism, and prefer the main `model.` tower over auxiliary towers
+        # (mtp / visual). Warn once if anything is still ambiguous rather than silently guessing.
+        suffix = name.split("model.")[-1] + ".weight"
+        cand = sorted(k for k in keys if k.endswith(suffix))
+        if not cand:
+            return None
+        if len(cand) > 1:
+            main = [k for k in cand if k.startswith("model.")]
+            if main:
+                cand = main
+            if len(cand) > 1 and suffix not in _warned:
+                _warned.add(suffix)
+                print(f"   [fp-lookup] AMBIGUOUS {suffix}: {cand} -> using {cand[0]}", flush=True)
+        return f.get_tensor(cand[0])
     return get
 
 
@@ -687,6 +759,251 @@ def heldout_kl_flips(model, cache, held_idx, batches, device, loss_fn, temperatu
     return (mean_kl, pct, seq_kl) if per_seq else (mean_kl, pct)
 
 
+
+# ── latent placement: GPU-resident budget + pinned host memory ───────────────────────────────────
+# Measured on the 27B: step time scales almost LINEARLY with latent count (64/249/497 latent tensors ->
+# 102.6/165.7/327.1 s per step), and halving the BYTES moved (--latent-bf16-compute) did NOT help
+# (+3.8%). So the cost tracks the NUMBER of per-latent operations, not bandwidth. Two levers follow:
+#   * --latent-gpu-budget GB : keep the largest possible prefix of latents ON the GPU, so those layers
+#     do no host->device transfer at all (dequant() already takes the no-copy path when
+#     latent.device == scale.device). This is the cleanest test of the transfer hypothesis: if
+#     eliminating transfers outright does not help, the cost is dequant compute, not movement.
+#   * --latent-pin : keep offloaded latents in PINNED host memory. Pageable H2D copies are SYNCHRONOUS
+#     (they stall the calling thread); pinned ones can be async, which is the difference between 497
+#     serialised stalls per forward and transfers that overlap compute. Pinned memory is unswappable,
+#     so this trades RAM flexibility for latency.
+_LAT_PLACE = {"budget_bytes": 0, "used": 0, "pin": False, "n_gpu": 0, "n_cpu": 0, "n_pin": 0}
+
+
+def _place_latent(L, lat_off, dev):
+    """Return the latent tensor placed per the GPU budget / pinning policy."""
+    if not lat_off:
+        return L
+    b = _LAT_PLACE
+    # NOTE: GPU residency is NOT applied here. build_student runs BEFORE train() extracts the lm_head
+    # weight, which needs a ~5GB transient; claiming VRAM for latents first starved it and OOM'd
+    # (measured: 42 latents resident at 8.0GB -> lm_head dequant found 2.01GB free and died).
+    # promote_latents_to_gpu() runs after that extraction instead, against real remaining VRAM.
+    out = L.cpu()
+    if b["pin"]:
+        try:
+            out = out.pin_memory(); b["n_pin"] += 1
+        except Exception:
+            pass
+    b["n_cpu"] += 1
+    return out
+
+
+
+# ── LATENT PREFETCH ──────────────────────────────────────────────────────────────────────────────
+# Pinning bought ~15-20% by removing the driver's staging memcpy, which identified per-transfer CPU
+# cost (not bandwidth, not GPU compute) as the bottleneck. Prefetch attacks the rest: start layer
+# i+1's host->device copy on a side stream while layer i computes, so the copy overlaps instead of
+# stalling. Requires pinned host memory to be genuinely async (--latent-pin).
+#
+# THE SUBTLETY: the transfer is part of the AUTOGRAD GRAPH — grad flows back through .to() into the
+# CPU leaf. A side-stream copy done outside autograd would silently detach the latents and produce
+# zero gradients, which the frozen (lr=0) speed tests would NOT catch. _UseTransferred keeps the graph
+# intact: forward hands back the already-transferred buffer, backward ships the gradient back to CPU.
+_PF_ON = False
+_PF_BUF = {}                 # id(module) -> (gpu_tensor, cuda_event)
+_PF_SIDE = {}                # device -> side stream
+_LAT_ORDER = []              # latent modules in execution order
+
+
+# Pinned staging buffers for the gradient's trip back to the host, one per latent.
+# WHY: py-spy put 19.5% of all samples in this backward's `g.to("cpu")`. `Tensor.to("cpu")` allocates
+# PAGEABLE memory, so the driver stages every gradient through an internal pinned buffer — the exact
+# cost that pinning the FORWARD direction removed for ~19%. This is the mirror image, and it needs no
+# VRAM, which matters because every VRAM-spending idea in this project OOM'd.
+# NOTE this cost is paid even at --latent-lr 0: gradients are still computed and shipped home whether
+# or not the optimizer consumes them.
+_GRAD_PIN = {}          # id(param) -> pinned host buffer
+_GRAD_PIN_ON = False
+
+
+def _grad_pin_buf(like, key):
+    b = _GRAD_PIN.get(key)
+    if b is None or b.shape != like.shape or b.dtype != like.dtype:
+        b = torch.empty(like.shape, dtype=like.dtype, pin_memory=True)
+        _GRAD_PIN[key] = b
+    return b
+
+
+class _UseTransferred(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, cpu_src, gpu_copy):
+        ctx.src_device = cpu_src.device
+        ctx.src_dtype = cpu_src.dtype
+        ctx.key = id(cpu_src)
+        return gpu_copy
+
+    @staticmethod
+    def backward(ctx, g):
+        # mirror of `.to(device, dtype)`: send the gradient back to the CPU leaf
+        if _GRAD_PIN_ON and ctx.src_device.type == "cpu":
+            if g.dtype != ctx.src_dtype:
+                g = g.to(ctx.src_dtype)
+            buf = _grad_pin_buf(g, ctx.key)
+            # D2H into PINNED memory: no driver staging copy. Safe to hand the buffer straight to
+            # autograd because --latent-grad-release consumes and clears param.grad within the same
+            # step, so it is never live across two backwards (guarded at setup for --accum > 1).
+            buf.copy_(g)
+            return buf, None
+        return g.to(ctx.src_device, ctx.src_dtype), None
+
+
+def _pf_side(dev):
+    if dev not in _PF_SIDE:
+        _PF_SIDE[dev] = torch.cuda.Stream(device=dev)
+    return _PF_SIDE[dev]
+
+
+def _pf_start(mod, dtype):
+    """Kick off `mod`'s latent transfer on a side stream (no-op if resident or already queued)."""
+    if mod is None or id(mod) in _PF_BUF:
+        return
+    L = getattr(mod, "latent", None)
+    if L is None or L.data.device.type != "cpu":
+        return
+    dev = mod.scale.device
+    if dev.type != "cuda":
+        return
+    st = _pf_side(dev)
+    st.wait_stream(torch.cuda.current_stream(dev))
+    with torch.cuda.stream(st):
+        buf = L.data.to(dev, dtype=dtype, non_blocking=True)
+        ev = torch.cuda.Event()
+        ev.record(st)
+    _PF_BUF[id(mod)] = (buf, ev)
+
+
+def _pf_take(mod):
+    """Return this module's prefetched buffer if ready, else None."""
+    ent = _PF_BUF.pop(id(mod), None)
+    if ent is None:
+        return None
+    buf, ev = ent
+    cur = torch.cuda.current_stream(buf.device)
+    cur.wait_event(ev)
+    buf.record_stream(cur)          # keep the allocator from reusing it while this stream reads it
+    return buf
+
+def promote_latents_to_gpu(model, budget_bytes, reserve_bytes=2_000_000_000):
+    """Move as many latents as fit onto their own layer's GPU, newest-free-VRAM aware.
+
+    Called AFTER the lm_head weight extraction so it budgets against VRAM that is actually free.
+    A resident latent costs 4 B/latent of VRAM but removes that layer's host->device copy entirely
+    from every forward (and every checkpoint recompute), which is the cost the pinning result showed
+    dominates. `reserve_bytes` keeps headroom for activations so we do not trade a transfer win for
+    an OOM.
+    """
+    if budget_bytes <= 0:
+        return
+    mods = [m for m in model.modules() if getattr(m, "latent", None) is not None]
+    used = 0
+    n = 0
+    for m in mods:
+        L = m.latent.data
+        if L.device.type != "cpu":
+            continue
+        dev = m.scale.device                      # follow the layer this latent belongs to
+        if dev.type != "cuda":
+            continue
+        nbytes = L.numel() * L.element_size()
+        free, _tot = torch.cuda.mem_get_info(dev)
+        if used + nbytes > budget_bytes or nbytes + reserve_bytes > free:
+            continue
+        m.latent.data = L.to(dev)
+        if getattr(m, "_cand_mask", None) is not None:
+            m._cand_mask = m._cand_mask.to(dev)
+        used += nbytes; n += 1
+    if n:
+        print(f"   latent PROMOTION: {n}/{len(mods)} latents moved to GPU ({used/1e9:.1f}GB) — "
+              f"those layers do no host->device copy", flush=True)
+
+def shard_model_across_gpus(model, n_dev, keep_latent_cpu=True):
+    """LAYER-SPLIT MODEL PARALLELISM: put contiguous blocks of decoder layers on different GPUs.
+
+    WHY THIS EXISTS. A 27B ternary student does NOT fit on one 24GB 3090 at seq 2560 — measured: OOM
+    at ~22.7GB during the step-0 held-out eval, with expandable_segments already on. DDP does not help
+    (data-parallel replicates the whole model per rank, so per-GPU memory is unchanged), and the code
+    has no activation checkpointing. Splitting the LAYER axis is also the only decomposition this
+    project permits: cross-layer coupling is additive via the residual stream, whereas splitting the
+    scope axis (gate/up within an MLP) is multiplicative and always damages (RESULTS_SUMMARY §4.5).
+
+    WHAT THIS IS NOT. This is naive model parallelism, not a pipeline: with one microbatch in flight
+    GPU0 idles while GPU1 computes, so utilisation is ~1/n_dev. It buys MEMORY (the thing that blocks
+    us), not speed. 1F1B microbatch pipelining on top would recover utilisation — bubble = (p-1)/m,
+    so 8 microbatches over 2 stages is ~94% — and is the natural follow-up.
+
+    PLACEMENT. Decoder layers are split contiguously; embeddings, final norm and lm_head stay on
+    device 0, and the boundary is bridged by hooks that move activations. Outputs are returned to
+    device 0 so the loss/teacher path is unchanged. Latents stay CPU-resident under --latent-offload
+    (dequant() pulls them to self.scale.device on demand, so they follow their layer automatically).
+    """
+    devs = [f"cuda:{i}" for i in range(n_dev)]
+    # decoder layers = the longest ModuleList (64 for the 27B; beats the 1-layer MTP tower)
+    best = None
+    for name, mod in model.named_modules():
+        if isinstance(mod, nn.ModuleList) and (best is None or len(mod) > len(best[1])):
+            best = (name, mod)
+    if best is None or len(best[1]) < n_dev:
+        raise SystemExit(f"model-parallel: could not find a decoder layer list to split ({best[0] if best else None})")
+    lname, layers = best
+    n = len(layers)
+    owner = [devs[min(i * n_dev // n, n_dev - 1)] for i in range(n)]
+
+    def _move(x, dev):
+        if torch.is_tensor(x):
+            return x.to(dev, non_blocking=True)
+        if isinstance(x, (list, tuple)):
+            return type(x)(_move(v, dev) for v in x)
+        if isinstance(x, dict):
+            return {k: _move(v, dev) for k, v in x.items()}
+        return x
+
+    def _mk_pre(dev):
+        def hook(module, args, kwargs):
+            return _move(args, dev), _move(kwargs, dev)
+        return hook
+
+    def _mk_post(dev):
+        def hook(module, args, output):
+            return _move(output, dev)
+        return hook
+
+    for i, layer in enumerate(layers):
+        dev = owner[i]
+        # stash CPU latents (and their candidate masks) so .to(dev) cannot drag them onto the GPU
+        stash = []
+        for m in layer.modules():
+            if keep_latent_cpu and getattr(m, "latent", None) is not None:
+                # remember whether this latent was OFFLOADED (cpu) or GPU-RESIDENT
+                # (--latent-gpu-budget). layer.to(dev) would drag the offloaded ones onto the GPU;
+                # forcing all of them to cpu afterwards would silently undo GPU residency. Restore
+                # each to where it belongs: cpu stays cpu, resident follows its layer.
+                stash.append((m, m.latent.data, getattr(m, "_cand_mask", None),
+                              m.latent.data.device.type == "cpu"))
+        layer.to(dev)
+        for m, ldata, cmask, was_cpu in stash:
+            m.latent.data = ldata.cpu() if was_cpu else ldata.to(dev)
+            if cmask is not None:
+                m._cand_mask = cmask.cpu() if was_cpu else cmask.to(dev)
+        # Hook EVERY layer, not just the device boundaries. The HF decoder loop computes the rotary
+        # position embeddings ONCE in the outer forward (on device 0) and passes the same cos/sin to
+        # every layer, so a boundary-only hook leaves layers 33..63 reading cuda:0 tensors and
+        # apply_rotary_pos_emb dies with "found at least two devices". Same for attention masks and
+        # cache objects. On the owning device the .to() is a no-op, so this costs nothing.
+        layer.register_forward_pre_hook(_mk_pre(dev), with_kwargs=True)
+    layers[n - 1].register_forward_hook(_mk_post(devs[0]))   # hand the tail back to device 0
+
+    counts = {d: owner.count(d) for d in devs}
+    print(f"   MODEL-PARALLEL: {n} layers of `{lname}` split across {n_dev} GPUs {counts} "
+          f"(naive layer-split; ~1/{n_dev} utilisation until microbatch pipelining is added)", flush=True)
+    return model
+
+
 def build_student(student_path, orig_config_path, block_size, device):
     """Instantiate the architecture, then stream the recovered weights in: quantized linears
     become packed TernaryScaleLinear (~7 GB total), everything else loads as bf16."""
@@ -813,7 +1130,7 @@ def build_student(student_path, orig_config_path, block_size, device):
         for name, m in model.named_modules():
             if isinstance(m, TernaryScaleLinear) and name.endswith("mlp.down_proj"):
                 _L = init_latent(m, _fp_get(name) if _fp_get else None, _lat_mode)
-                m.latent = nn.Parameter(_L.cpu() if _lat_off else _L)
+                m.latent = nn.Parameter(_place_latent(_L, _lat_off, device))
                 n_a4 += 1
         print(f"   A4: latent assignment-moves enabled on {n_a4} down_proj "
               f"(STE, init={_lat_mode}, folds to hard ternary at save)")
@@ -860,10 +1177,31 @@ def build_student(student_path, orig_config_path, block_size, device):
                     m.enable_arm_b()                              # Arm B: mutable ternary + flip accumulator (no latent)
                 else:
                     _L = init_latent(m, _fp_get(name) if _fp_get else None, _lat_mode)
-                    m.latent = nn.Parameter(_L.cpu() if _lat_off else _L)
+                    m.latent = nn.Parameter(_place_latent(_L, _lat_off, device))
                 n_tw += 1
         kind = "Arm-B sparse-flip (no latent)" if arm_b else f"Arm-A STE latent (init={_lat_mode})"
         print(f"   --train-weights {tw}: {kind} assignment-QAT on {n_tw} linears (folds to hard ternary at save)")
+        # ── CANDIDATE SET: restrict updates to latents near a decision boundary ──────────────────
+        # Measured (4B, 188.7M latents): 14.91% sit at d<0.001 and 15.69% at d<0.01, where
+        # d = ||L/s| - 0.5| is the distance to the nearest bin boundary. That is a SPIKE at d~0, not a
+        # tail: fp-spread clamps w_fp into the current bin, so wherever the block-AP trit disagrees with
+        # naive FP rounding the latent is pinned exactly on the bin edge. Only 3.55% of assignments ever
+        # move, and motion saturates by ~step 60 — so latents far from a boundary contribute nothing but
+        # optimizer traffic. Scales are FROZEN (§4.2), so an excluded latent's d never changes and the
+        # set can only shrink; tau is the knob that sets the candidate fraction alpha.
+        _cand_tau = float(getattr(build_student, "_cand_tau", 0.0) or 0.0)
+        if _cand_tau > 0 and not arm_b:
+            with torch.no_grad():
+                nc = tot_c = 0
+                for name, m in model.named_modules():
+                    if isinstance(m, TernaryScaleLinear) and getattr(m, "latent", None) is not None:
+                        s = m.scale.detach().to(m.latent.device).clamp_min(1e-8).unsqueeze(1)
+                        u = (m.latent.detach().reshape(m.n_blocks, m.block_size) / s).abs()
+                        msk = ((u - 0.5).abs() < _cand_tau).reshape_as(m.latent)
+                        m._cand_mask = msk
+                        nc += int(msk.sum()); tot_c += msk.numel()
+                print(f"   CANDIDATE SET tau={_cand_tau}: {100.0*nc/max(1,tot_c):.2f}% of latents "
+                      f"({nc/1e6:.1f}M of {tot_c/1e6:.1f}M) will receive updates; the rest are frozen")
         if _lat_mode == "fp-spread" and not arm_b:
             # report the near-boundary fraction — the quantity that decides whether flipping can be graded
             with torch.no_grad():
@@ -875,6 +1213,37 @@ def build_student(student_path, orig_config_path, block_size, device):
                         nb += int(((u - u.round()).abs() > 0.45).sum()); tot += u.numel()
                 print(f"   latent spread: {100.0*nb/max(1,tot):.3f}% of latents within 0.05 of a decision "
                       f"boundary (bin-centre init gives 0.000%; real FP weights ~9.8%)")
+            # ── INIT FINGERPRINT (LATENT_FINGERPRINT=1) ─────────────────────────────────────────
+            # Paired arms disagreed on the spread above (23.391% vs 28.855%) under byte-identical
+            # commands, which would invalidate any A/B comparison. That metric is also mis-specified:
+            # it tests |u - round(u)| > 0.45 on SIGNED u, so it counts latents near +-1.5 (the clamp
+            # edge of a saturated +-1 bin) as if they were near a decision boundary — but
+            # round(u).clamp(-1,1) means those CANNOT flip. Only +-0.5 is a real boundary.
+            # This logs an exact per-tensor fingerprint plus the two populations separately, so
+            # "did these two runs start from the same latents?" is answerable rather than inferred.
+            if os.environ.get("LATENT_FINGERPRINT", "0") == "1":
+                with torch.no_grad():
+                    n_dec = n_sat = n_tot = 0
+                    for name, m in model.named_modules():
+                        if isinstance(m, TernaryScaleLinear) and getattr(m, "latent", None) is not None:
+                            L = m.latent.detach()
+                            s = m.scale.detach().to(L.device).clamp_min(1e-8).unsqueeze(1)
+                            u = L.reshape(m.n_blocks, m.block_size) / s
+                            au = u.abs()
+                            dec = ((au - 0.5).abs() < 0.05).sum()      # real decision boundary
+                            sat = ((au - 1.5).abs() < 0.05).sum()      # clamp edge — CANNOT flip
+                            n_dec += int(dec); n_sat += int(sat); n_tot += u.numel()
+                            print(f"   [fp] {name:52s} sum={L.double().sum().item():+.9e} "
+                                  f"absum={L.double().abs().sum().item():.9e} n={L.numel()}")
+                    print(f"   [fp] TOTAL near-DECISION(+-0.5) {100.0*n_dec/max(1,n_tot):.3f}%  "
+                          f"near-CLAMP-EDGE(+-1.5) {100.0*n_sat/max(1,n_tot):.3f}%  "
+                          f"(the spread metric above sums BOTH)")
+    # Layer-split model parallelism LAST: everything above (packed weights, scale-QAT bounds, latent
+    # init, candidate masks) is built on one device first, then whole layers are relocated together.
+    _mp = int(getattr(build_student, "_model_parallel", 0) or 0)
+    if _mp > 1:
+        shard_model_across_gpus(model, _mp,
+                                keep_latent_cpu=bool(getattr(build_student, "_latent_offload", False)))
     return model, config
 
 
@@ -1070,8 +1439,13 @@ def train(args):
     is_main = (rank == 0)
 
     def log(*a):
+        # TIMESTAMPED. Step lines carry no time of their own and the trainer prints step 1 then every
+        # 10, so per-step rate had to be inferred from wall-clock deltas around log reads — which is how
+        # the same run produced both 291 and 327 s/step. Piping through `awk systime()` does NOT fix it:
+        # awk buffers its INPUT in blocks, so every line gets stamped when awk drains the pipe (verified:
+        # three lines emitted 1 s apart all received an identical timestamp). Stamp at the source.
         if is_main:
-            print(*a)
+            print(f"[{_t.strftime('%H:%M:%S')}]", *a, flush=True)
 
     log(f"Building ternary student (packed 2-bit){f' [DDP x{world}]' if ddp else ''}...")
     build_student._a3_mlp = getattr(args, "a3_mlp", False)     # A3(ii): per-MLP-input scale (folds to norm)
@@ -1082,15 +1456,60 @@ def train(args):
     build_student._tw_layer_offset = getattr(args, "tw_layer_offset", 0)     # sequential group passes
     build_student._latent_offload = getattr(args, "latent_offload", False)   # latents in CPU RAM
     build_student._latent_init = getattr(args, "latent_init", "center")      # Stage 0: bin-centre vs fp-spread
+    build_student._cand_tau = getattr(args, "latent_candidate_tau", 0.0)     # candidate-set sparsity (0 = dense)
+    build_student._model_parallel = getattr(args, "model_parallel", 0)       # layer-split across N GPUs
+    _LAT_PLACE["budget_bytes"] = int(float(getattr(args, "latent_gpu_budget", 0.0)) * 1e9)
+    _LAT_PLACE["pin"] = bool(getattr(args, "latent_pin", False))
     build_student._fp_model = getattr(args, "fp_model", None)
     build_student._col_scale = getattr(args, "col_scale", False)   # perpendicular col-scales (A6/A7 probe)
     build_student._sq_bits = getattr(args, "scale_qat_bits", 0)    # scale-QAT: fake-quant scales to n bits (STE)
     model, config = build_student(args.student_path, args.orig_config_path, BLOCK_SIZE, device)
+    if _LAT_PLACE["n_gpu"] or _LAT_PLACE["n_pin"]:
+        _pin_note = f", {_LAT_PLACE['n_pin']} pinned" if _LAT_PLACE["pin"] else ""
+        log(f"   latent placement: {_LAT_PLACE['n_gpu']} GPU-resident "
+            f"({_LAT_PLACE['used'] / 1e9:.1f}GB, no H2D copy), "
+            f"{_LAT_PLACE['n_cpu']} host-offloaded{_pin_note}")
     model.train()
-    try:
+    # GRADIENT CHECKPOINTING trades compute for activation memory — but on the assignment stage it also
+    # DOUBLES every per-latent cost, because the recompute pass re-runs dequant() for each trained
+    # linear: the CPU->GPU latent stream, the STE dequant, and the grad-release hook all happen twice per
+    # step. At arm B that is 205 GB/step of PCIe traffic over a measured ~5 GB/s link and 994 per-tensor
+    # dequants instead of 497. --no-grad-ckpt halves all of it at the cost of activation memory, which
+    # the latent_gpu leak fix freed up (~9 GB/card). Measured arm B step: 327 s with checkpointing on.
+    _gc_stride = int(getattr(args, "grad_ckpt_stride", 1) or 1)
+    if getattr(args, "no_grad_ckpt", False):
+        log("   gradient checkpointing DISABLED (--no-grad-ckpt): halves per-latent work, costs activations")
+    elif _gc_stride > 1:
+        # PARTIAL checkpointing. Full checkpointing re-runs dequant() for EVERY trained linear on the
+        # recompute pass (994 per-tensor dequants per step at arm B); disabling it entirely halves that
+        # but OOMs (measured: 32 layers of activations at seq 2560 exceed 24GB). Checkpoint only every
+        # Nth layer to trade a controlled slice of activation memory for a controlled slice of recompute.
+        # HF's gradient_checkpointing flag lives on the MODEL, not the layer, so wrap layer.forward
+        # directly. use_reentrant=False is required for kwargs, and it stashes/restores RNG state so the
+        # recomputed forward reproduces the original bin decisions exactly (STE-safe).
+        import torch.utils.checkpoint as _ckpt
+        _best = None
+        for _n, _mod in model.named_modules():
+            if isinstance(_mod, nn.ModuleList) and (_best is None or len(_mod) > len(_best)):
+                _best = _mod
+        _wrapped = 0
+        for _i, _layer in enumerate(_best or []):
+            if _i % _gc_stride:
+                continue
+            def _mk(_l):
+                _orig = _l.forward
+                def _fwd(*a, **kw):
+                    return _ckpt.checkpoint(_orig, *a, use_reentrant=False, **kw)
+                return _fwd
+            _layer.forward = _mk(_layer)
+            _wrapped += 1
+        log(f"   PARTIAL gradient checkpointing: {_wrapped}/{len(_best or [])} layers "
+            f"(every {_gc_stride}) — trades activation memory for fewer recomputed dequants")
+    else:
+      try:
         model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
         log("   gradient checkpointing enabled (non-reentrant)")
-    except Exception:
+      except Exception:
         try:
             model.gradient_checkpointing_enable()
             log("   gradient checkpointing enabled")
@@ -1152,8 +1571,23 @@ def train(args):
             # the whole param group during the step, which for 755M CPU latents pushed RSS to 43.8GB (vs a
             # ~20GB identified budget) and crossed the cgroup MemoryHigh line -> synchronous reclaim -> the
             # process wedged in D state with the GPU idle. Per-tensor stepping is slower but bounded.
-            opt = torch.optim.Adam(opt_groups, foreach=False)
-            log("   torch.optim.Adam (latent-offload: latents + Adam state in CPU RAM; foreach=False)")
+            # --latent-opt selects the CPU-resident latent optimizer. Adam is the calibrated default and
+            # every recorded number uses it. SGD+momentum is under evaluation purely for THROUGHPUT: it
+            # holds one state tensor instead of two (12 vs 16 B/latent touched per step), measured 3.91x
+            # faster than Adam on this bandwidth-bound box (20.7 vs 81.1 ms per 23.6M latents).
+            # CAUTION on lr: Adam's step is ~lr (gradient-normalised); SGD's is lr*|g|. They are NOT
+            # comparable, and TALR CANNOT rescue a too-small base lr (its gain is capped at
+            # _tr_gain_max=1.0 — it may only throttle). Calibrate --latent-lr for SGD, erring HIGH so the
+            # servo throttles down into range rather than starving.
+            _lopt = str(getattr(args, "latent_opt", "adam")).lower()
+            if _lopt == "sgd":
+                opt = torch.optim.SGD(opt_groups, momentum=float(getattr(args, "latent_momentum", 0.9)),
+                                      foreach=False)
+                log(f"   torch.optim.SGD momentum={getattr(args, 'latent_momentum', 0.9)} "
+                    f"(latent-offload; foreach=False) [THROUGHPUT EXPERIMENT]")
+            else:
+                opt = torch.optim.Adam(opt_groups, foreach=False)
+                log("   torch.optim.Adam (latent-offload: latents + Adam state in CPU RAM; foreach=False)")
         else:
             import bitsandbytes as bnb
             opt = bnb.optim.PagedAdam8bit(opt_groups)       # PAGED: optimizer state lives in CPU RAM (paged)
@@ -1230,8 +1664,35 @@ def train(args):
         _mem_ctx = {"Wlm": _Wlm, "norm": _base.norm, "loss_type": _ce_lt}
         log(f"   MEM-EFFICIENT hidden-state loss ON (chunked KL + chunked CE, Wlm OFFLOADED to CPU "
             f"{tuple(_Wlm.shape)}; commit-beta unavailable on this path)")
+        torch.cuda.empty_cache()          # release the lm_head dequant transient before promoting latents
     else:
         _mem_ctx = None
+
+    # GPU residency LAST: after the lm_head transient is freed, so the budget sees real free VRAM.
+    # Placing latents earlier (in build_student) starved that ~5GB transient and OOM'd.
+    promote_latents_to_gpu(model, int(float(getattr(args, "latent_gpu_budget", 0.0)) * 1e9))
+    if getattr(args, "latent_prefetch", False):
+        global _PF_ON, _GRAD_PIN_ON
+        _PF_ON = True
+        # pinned gradient staging: only safe when each backward's grad is consumed before the next
+        # (grad-release clears param.grad every step). With --accum > 1 autograd would accumulate INTO
+        # the reused buffer, so fall back to the plain pageable path there.
+        _GRAD_PIN_ON = (bool(getattr(args, "latent_pin_grad", False))
+                        and bool(getattr(args, "latent_grad_release", False))
+                        and int(getattr(args, "accum", 1) or 1) == 1)
+        if getattr(args, "latent_pin_grad", False) and not _GRAD_PIN_ON:
+            log("   [warn] --latent-pin-grad ignored (needs --latent-grad-release and --accum 1)")
+        _LAT_ORDER.clear()
+        for _m in core.modules():                 # definition order ~= execution order for a transformer
+            if getattr(_m, "latent", None) is not None:
+                _m._lat_idx = len(_LAT_ORDER)
+                _LAT_ORDER.append(_m)
+        # prime the pipeline so the FIRST latent is already in flight
+        if _LAT_ORDER:
+            _pf_start(_LAT_ORDER[0], _LAT_ORDER[0].latent.dtype)
+        log(f"   latent PREFETCH on: {len(_LAT_ORDER)} latents chained on side CUDA streams"
+            + ("" if getattr(args, "latent_pin", False) else "  [WARN: without --latent-pin the copies"
+               " are pageable and therefore synchronous, so prefetch cannot overlap]"))
 
     # Assignment-flip diagnostic: snapshot the initial hard trits of every latent (assignment-QAT) module so
     # each held-out eval can report what % of trit ASSIGNMENTS have actually moved. If this stays ~0 the STE
@@ -1311,11 +1772,109 @@ def train(args):
             denom.copy_(st["exp_avg_sq"]).sqrt_().div_(math.sqrt(bc2)).add_(group["eps"])
             param.addcdiv_(st["exp_avg"], denom, value=-group["lr"] / bc1)
 
+        @torch.no_grad()
+        def _sgd_step_one(group, param):
+            """Single-tensor SGD+momentum update — the throughput variant of _adam_step_one.
+
+            ONE state tensor (momentum_buffer) instead of Adam's two, so the step touches 12 B/latent
+            instead of 16. On this bandwidth-bound CPU that measured 3.91x faster (20.7 vs 81.1 ms per
+            23.6M latents). No scratch buffer is needed: unlike Adam's denom there is no elementwise
+            sqrt/divide, so nothing full-size is ever allocated.
+
+            Matches torch.optim.SGD semantics (dampening=0, nesterov=False): buf = mom*buf + g; p -= lr*buf.
+            NOTE the update is lr*|g| here vs Adam's gradient-NORMALISED ~lr — the two lrs are not
+            interchangeable and --latent-lr must be recalibrated per --latent-opt.
+            """
+            st = opt.state[param]
+            if len(st) == 0:
+                i = _lat_index.get(id(param), 0)
+                st["momentum_buffer"] = _state_buf(param, "m", i)
+            gr = param.grad
+            if gr.dtype != torch.float32:
+                gr = gr.float()
+            buf = st["momentum_buffer"]
+            buf.mul_(_sgd_mom).add_(gr)
+            param.add_(buf, alpha=-group["lr"])
+
+        @torch.no_grad()
+        def _adam_blockv_step_one(group, param):
+            """Adam with ONE second moment per BLOCK_SIZE-latent scale block instead of per element.
+
+            Measured 1.48x faster than the per-element step on this bandwidth-bound CPU (48.2 vs
+            71.1 ms per 23.6M latents) — the largest optimizer win that survived testing.
+
+            WHY THIS ONE WORKS where int8 (+10.3%), bf16 (+47%) and Adafactor (+14%) all LOST: those
+            compress the second moment but must reconstruct a per-element denominator, which costs a
+            full-size elementwise pass. Here the denominator is per-block and BROADCASTS over 256
+            contiguous latents — no full-size temporary, no per-element convert. It also lands exactly on
+            the existing scale-block boundary, so the normalisation granularity already matches the
+            quantiser's.
+
+            Per-coordinate normalisation is WEAKENED to per-block (256 latents share a denominator).
+            §4c showed a GLOBAL lr (SGD) destroys per-layer motion uniformity; per-block is far finer
+            than global, but the acceptance bar is the per-layer assign-moved ratio staying ~1x.
+            """
+            st = opt.state[param]
+            n = param.numel()
+            if len(st) == 0:
+                i = _lat_index.get(id(param), 0)
+                st["step"] = torch.zeros((), dtype=torch.float32)
+                st["exp_avg"] = _state_buf(param, "m", i)
+                st["v_blk"] = torch.zeros(n // _BLKV, dtype=torch.float32)
+            b1, b2 = group["betas"]
+            st["step"] += 1
+            t = float(st["step"])
+            gr = param.grad
+            if gr.dtype != torch.float32:
+                gr = gr.float()
+            st["exp_avg"].mul_(b1).add_(gr, alpha=1 - b1)
+            gb = gr.view(-1, _BLKV)
+            st["v_blk"].mul_(b2).add_(gb.pow(2).mean(dim=1), alpha=1 - b2)
+            bc1, bc2 = 1 - b1 ** t, 1 - b2 ** t
+            denom = (st["v_blk"] / bc2).sqrt_().add_(group["eps"]).unsqueeze(1)   # [nblk,1], broadcasts
+            param.view(-1, _BLKV).addcdiv_(st["exp_avg"].view(-1, _BLKV),
+                                           denom.expand(-1, _BLKV), value=-group["lr"] / bc1)
+
+        # recomputed here (not reusing _lopt) because that name is only bound on the --latent-offload path
+        _lat_opt_name = str(getattr(args, "latent_opt", "adam")).lower()
+        _BLKV = BLOCK_SIZE
+        _sgd_mom = float(getattr(args, "latent_momentum", 0.9))
+        _lat_step_one = {"sgd": _sgd_step_one,
+                         "adam-blockv": _adam_blockv_step_one}.get(_lat_opt_name, _adam_step_one)
+        if _lat_opt_name == "sgd":
+            log(f"   grad-release latent step: SGD momentum={_sgd_mom} (1 state tensor, 12 B/latent)")
+        elif _lat_opt_name == "adam-blockv":
+            log(f"   grad-release latent step: Adam with block-{_BLKV}-shared second moment "
+                f"(measured 1.48x; per-block normalisation)")
+        _grad_diag = {"done": not bool(getattr(args, "latent_grad_diag", False))}
+
+        # param -> candidate mask (set only when --latent-candidate-tau > 0)
+        _cand_of = {}
+        for _m_ in core.modules():
+            if getattr(_m_, "_cand_mask", None) is not None and getattr(_m_, "latent", None) is not None:
+                _cand_of[id(_m_.latent)] = _m_._cand_mask
+        if _cand_of:
+            log(f"   candidate-set masking ACTIVE on {len(_cand_of)} latents "
+                f"(non-candidates receive zero grad => exactly frozen)")
+
         def _mk_release(p_):
             def _hook(param):
                 g = _lat_group_of[id(param)]
+                _msk = _cand_of.get(id(param))
+                if _msk is not None and param.grad is not None:
+                    # Zeroing the grad freezes non-candidates EXACTLY: their m and v start at 0 and only
+                    # ever see g=0, so m/(sqrt(v)+eps) stays 0 and the latent never moves. Cheaper and
+                    # less error-prone than masking the update (no full-size temporary).
+                    param.grad.mul_(_msk)
+                if param.grad is not None and not _grad_diag["done"]:
+                    # One-shot calibration aid: Adam's step is ~lr, SGD's is lr*|g|, so the lr that gives
+                    # a matched effective step size is roughly adam_lr / grad_rms. Print it once.
+                    _rms = float(param.grad.float().pow(2).mean().sqrt())
+                    log(f"   [grad-diag] latent grad RMS {_rms:.3e} | Adam step~lr, SGD step~lr*{_rms:.3e} "
+                        f"=> lr_sgd ~ lr_adam / {_rms:.3e} = {(g.get('base_lr', 0.0) / max(_rms, 1e-30)):.3e}")
+                    _grad_diag["done"] = True
                 if param.grad is not None and g["lr"] != 0.0:
-                    _adam_step_one(g, param)
+                    _lat_step_one(g, param)
                 param.grad = None                          # free it either way (warmup holds lr at 0)
             return _hook
         for p_ in latents:
@@ -1361,7 +1920,12 @@ def train(args):
     # Flip rate is estimated on a FIXED RANDOM SAMPLE (~32k weights/module). Exact tracking would need a
     # 755MB snapshot plus a 3GB float transient every measurement — which OOM'd the card. A 1M-weight
     # sample resolves rates down to ~1e-6/step, far finer than the 1e-4 targets we control to.
-    _tr_idx = [torch.randperm(m.latent.numel(), device=m.latent.device)[:32768] for m in _lat_mods]
+    # Build the permutation on the CPU and move only the 32k survivors. randperm allocates an index
+    # tensor over the WHOLE latent (int64: 712MB for an 89M-element latent, and torch asked for
+    # 1.35GB), which is fine in host RAM but OOMs a 24GB card the moment a latent is GPU-RESIDENT
+    # (--latent-gpu-budget). Sampling indices is device-independent, so do it where memory is cheap.
+    _tr_idx = [torch.randperm(m.latent.numel(), device="cpu")[:32768].to(m.latent.device)
+               for m in _lat_mods]
     def _hard_trits_per_mod():
         """Sampled hard trits, PER MODULE (so per-layer flip rates are visible)."""
         out = []
@@ -1372,7 +1936,8 @@ def train(args):
     def _hard_trits_all():
         if not _lat_mods:
             return torch.zeros(1, dtype=torch.int8)
-        return torch.cat(_hard_trits_per_mod())
+        # same multi-device hazard as _lat_ref below: GPU-resident latents span both cards
+        return torch.cat([t.cpu() for t in _hard_trits_per_mod()])
     def _per_layer_moved():
         """% of sampled assignments moved since init, PER LAYER. A single global latent-lr + global flip-rate
         target can hide large per-layer imbalance (deep layers cascading while shallow ones stay inert), and
@@ -1382,7 +1947,10 @@ def train(args):
         return [100.0 * float((c != r).float().mean().item())
                 for c, r in zip(_hard_trits_per_mod(), _lat_ref_per)]
     _lat_ref_per = _hard_trits_per_mod() if _lat_mods else None   # per-layer init refs
-    _lat_ref = torch.cat(_lat_ref_per) if _lat_mods else None     # sampled init reference for assign-moved%
+    # .cpu() before cat: with --latent-gpu-budget the resident latents follow their LAYER, so under
+    # model parallelism these per-module samples span cuda:0 AND cuda:1 and torch.cat refuses to mix
+    # devices. They are tiny diagnostic samples (32k each), so CPU is the natural common ground.
+    _lat_ref = torch.cat([t.cpu() for t in _lat_ref_per]) if _lat_mods else None
     if _tr_target > 0 and _lat_mods:
         _tr_prev = _lat_ref.clone()
         log(f"   TALR ON: target transition rate {_tr_target:.2e}/step → {_tr_target*args.tr_final_frac:.2e} "
@@ -1440,10 +2008,38 @@ def train(args):
     # ratchets up (~24 -> 41GB by step 100) until the cgroup throttles and the run wedges in D state.
     # Copying into fixed buffers makes snapshot allocation O(1) for the run instead of O(#evals).
     _snap_bufs = {"s": None, "t": None}
+    # HELD-OUT SNAPSHOT. Unlike best_scales this one is load-bearing: RESULTS_SUMMARY §5 requires that a
+    # stage which never beats its step-0 entry baseline restores that entry, so weight-training always
+    # keeps one. But it is another 4 B/latent — 102.5 GB at arm B on the 27B — and that third full copy
+    # of every latent (latents + Adam moment + snapshot) is what pushed the arm B run past 629 GB.
+    # --snap-nvme backs it with a memmap instead: it is written once per improvement and read at most
+    # once at the end, so the page cache absorbs it and only dirty pages ever hit disk.
+    _snap_nvme = bool(getattr(args, "snap_nvme", False))
+    _snap_dir = None
+    if _snap_nvme:
+        _snap_dir = Path(args.out).parent / "_snap_state"
+        shutil.rmtree(_snap_dir, ignore_errors=True)
+        _snap_dir.mkdir(parents=True, exist_ok=True)
+        log(f"   held-out snapshot NVMe-backed at {_snap_dir} "
+            f"(frees {sum(x.numel()*x.element_size() for x in scales)/1e9:.1f}GB of host RAM)")
+
+    def _snap_alloc(t, tag, i):
+        """Buffer shaped like `t`: an ordinary clone, or a memmap under --snap-nvme. Allocated as raw
+        bytes and reinterpreted, so it works for any dtype (bf16 has no numpy equivalent)."""
+        if not _snap_nvme:
+            return t.detach().clone()
+        import numpy as _np
+        f = _snap_dir / f"{tag}_{i}.dat"
+        arr = _np.memmap(str(f), dtype=_np.uint8, mode="w+", shape=(t.numel() * t.element_size(),))
+        buf = torch.from_numpy(arr).view(t.dtype).view_as(t)
+        with torch.no_grad():
+            buf.copy_(t.detach())
+        return buf
+
     def _snap():
         if _snap_bufs["s"] is None:
-            _snap_bufs["s"] = [s.detach().clone() for s in scales]
-            _snap_bufs["t"] = [m.tern_b.detach().clone() for m in arm_b_mods]
+            _snap_bufs["s"] = [_snap_alloc(s, "s", i) for i, s in enumerate(scales)]
+            _snap_bufs["t"] = [_snap_alloc(m.tern_b, "t", i) for i, m in enumerate(arm_b_mods)]
         else:
             with torch.no_grad():
                 for dst, src in zip(_snap_bufs["s"], scales):
@@ -1461,7 +2057,15 @@ def train(args):
         log(f"   --epochs {args.epochs} → steps={args.steps} ({spe}/epoch; n={n} world={world} accum={args.accum})")
 
     best_kl = float("inf")
-    best_scales = [s.detach().clone() for s in scales]
+    # BEST-LOSS SNAPSHOT — allocated ONLY when `--select best` will actually read it. `scales` includes
+    # the assignment latents, so this clone is 4 B/latent: 22.8 GB at `down`@64L and 102.5 GB at arm B on
+    # the 27B. Under --select final/ema export_scales() never returns it and restore_best() is never
+    # called, so it was pure waste — and the update below RE-CLONED it on every EMA improvement, which
+    # transiently doubles it (205 GB at arm B) because the new list is built before the old one is freed.
+    # Combined with the held-out snapshot (_snap) and the latents themselves that is 3-4 full copies of
+    # every latent in host RAM, which is what OOM'd the box on the arm B run (629 GB, machine restart).
+    _keep_best = str(getattr(args, "select", "best")) == "best"
+    best_scales = [s.detach().clone() for s in scales] if _keep_best else None
     ema = None
     # Arm B proximal-gated flips + held-out select/abort (weight-training selects on HELD-OUT KL, never training KL)
     flip_every = getattr(args, "flip_every", 150); eval_every = getattr(args, "eval_every", 100)
@@ -1496,6 +2100,8 @@ def train(args):
         return 1.0                                           # constant (legacy)
 
     def restore_best():
+        if best_scales is None:                              # --select final/ema never snapshots (see above)
+            return
         with torch.no_grad():
             for s, b in zip(scales, best_scales):
                 s.copy_(b)
@@ -1592,6 +2198,14 @@ def train(args):
         best_ho_snap = _snap()
         log(f"   [held-out] step 0 KL={_b_kl:.4f} flips={_b_flips:.2f}% "
             f"assign-moved={_assign_flip_pct():.3f}% best={_b_kl:.4f} flips_used=0  <- ENTRY BASELINE")
+
+    # FAIL FAST on an empty train shard. `for bi in shard` over an empty list never advances opt_step,
+    # so the while loop below spins at 100% CPU forever with no output and no GPU work — it looks
+    # exactly like a slow run. Happens whenever --max-samples <= --heldout-n (+ grad-probe/gate seqs),
+    # which is easy to hit when shrinking a run for a smoke test.
+    if not shard:
+        raise SystemExit(f"no TRAIN sequences on this rank: --max-samples {args.max_samples} leaves "
+                         f"nothing after --heldout-n {args.heldout_n} (+probe/gate). Raise --max-samples.")
 
     while opt_step < args.steps:
         for bi in shard:
@@ -1737,7 +2351,10 @@ def train(args):
             ema = kl if ema is None else 0.9 * ema + 0.1 * kl
             if ema < best_kl:                              # identical on every rank -> stays in sync
                 best_kl = ema
-                best_scales = [s.detach().clone() for s in scales]
+                if _keep_best:                             # copy IN PLACE: re-cloning would transiently
+                    with torch.no_grad():                  # hold two full copies (205 GB at arm B)
+                        for _dst, _src in zip(best_scales, scales):
+                            _dst.copy_(_src.detach())
             # ── Arm B: proximal-gated flip EVENT (fresh grad → gate → accept/reject → η adapt) ──
             if arm_b_mods and opt_step % flip_every == 0 and reject_streak < max_rejects \
                     and gate_fail_streak < gate_max_fails:
@@ -2066,6 +2683,60 @@ def main():
                          "(post-accumulate-grad hook). Removes the fp32 grad buffer (4B/latent) from the peak: "
                          "mlp@32L 2.26B latents goes 49GB (throttles at MemoryHigh=47G) -> 40GB. EXACT Adam "
                          "maths — unlike swapping the optimizer — because Adam's update is per-parameter.")
+    ap.add_argument("--grad-ckpt-stride", type=int, default=1,
+                    help="Checkpoint every Nth decoder layer instead of all of them. 1 = all (default), "
+                         "2 = every other. Each checkpointed layer re-runs its dequant on the backward "
+                         "recompute, so a larger stride cuts per-latent work at the cost of activations. "
+                         "Ignored when --no-grad-ckpt is set.")
+    ap.add_argument("--latent-gpu-budget", type=float, default=0.0,
+                    help="GB of latents to keep RESIDENT ON GPU (per process). Those layers do no "
+                         "host->device copy in dequant(). 0 = all offloaded (default).")
+    ap.add_argument("--latent-pin-grad", action="store_true",
+                    help="Stage the latent GRADIENT's device->host trip through pinned buffers. py-spy "
+                         "attributed 19.5%% of step time to that copy; .to('cpu') allocates pageable "
+                         "memory so the driver stages it. Requires --latent-prefetch (that is where the "
+                         "backward is ours to control), --latent-grad-release and --accum 1.")
+    ap.add_argument("--latent-prefetch", action="store_true",
+                    help="Start the NEXT latent's host->device copy on a side CUDA stream while the "
+                         "current layer computes, so transfers overlap instead of stalling. Only "
+                         "meaningful with --latent-pin (pageable copies cannot be async).")
+    ap.add_argument("--latent-pin", action="store_true",
+                    help="Keep offloaded latents in PINNED host memory so H2D copies can be async. "
+                         "Pageable copies are synchronous and stall the calling thread once per latent "
+                         "per forward. Pinned memory is unswappable.")
+    ap.add_argument("--no-grad-ckpt", action="store_true",
+                    help="Disable gradient checkpointing. Checkpointing halves activation memory but "
+                         "DOUBLES per-latent cost (dequant + CPU->GPU latent stream + grad-release hook "
+                         "run again on recompute). At arm B that is 205 GB/step of PCIe traffic; this "
+                         "halves it, if activations still fit.")
+    ap.add_argument("--snap-nvme", action="store_true",
+                    help="Back the best-held-out snapshot with a memmap instead of host RAM. Saves "
+                         "4 B/latent, but ONLY worth it on FAST LOCAL STORAGE — this host has no NVMe, "
+                         "so leave it OFF here (slow disk is also why startup takes ~25 min). "
+                         "4 B/latent (102.5 GB at 27B arm B). The snapshot is write-mostly (one copy per "
+                         "held-out improvement) and read at most once, so the page cache absorbs it.")
+    ap.add_argument("--model-parallel", type=int, default=0,
+                    help="Split decoder layers across N GPUs (naive layer-split model parallelism). "
+                         "A 27B ternary student does NOT fit one 24GB card at seq 2560 (measured OOM at "
+                         "~22.7GB); DDP cannot help since it replicates the model per rank. Buys MEMORY, "
+                         "not speed: ~1/N utilisation until microbatch pipelining is added. 0/1 = off.")
+    ap.add_argument("--latent-candidate-tau", type=float, default=0.0,
+                    help="Candidate-set assignment training: update ONLY latents within tau of a decision "
+                         "boundary (d = ||L/s|-0.5|), freezing the rest. 0 = off (dense, the default). "
+                         "Measured coverage at 4B: tau=0.001 -> 14.9%%, 0.01 -> 15.7%%, 0.05 -> 19.6%%. "
+                         "Only 3.55%% of assignments ever move and motion saturates by ~step 60, so the "
+                         "frozen majority contributes optimizer traffic and nothing else.")
+    ap.add_argument("--latent-opt", choices=["adam", "sgd", "adam-blockv"], default="adam",
+                    help="Optimizer for the CPU-resident assignment latents. 'adam' is the calibrated "
+                         "default behind every recorded number. 'sgd' (momentum) holds ONE state tensor "
+                         "instead of two — 3.91x faster per step on a bandwidth-bound CPU — but its step "
+                         "is lr*|g| rather than Adam's gradient-normalised ~lr, so --latent-lr must be "
+                         "re-calibrated (err HIGH; TALR can only throttle, never amplify).")
+    ap.add_argument("--latent-momentum", type=float, default=0.9,
+                    help="Momentum for --latent-opt sgd.")
+    ap.add_argument("--latent-grad-diag", action="store_true",
+                    help="Log latent grad RMS at the first optimizer step — used to calibrate the SGD "
+                         "base lr against Adam's effective step size.")
     ap.add_argument("--latent-offload", action="store_true",
                     help="Keep assignment latents in CPU RAM (fp32 params AND grads: 6.04GB for all 32 "
                          "down_proj) and stream each layer's latent to the GPU inside its checkpointed "

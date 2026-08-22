@@ -141,9 +141,19 @@ def main():
     for n, m in targets:
         wname = n + ".weight"
         if wname not in fp_names:                      # student names may be prefixed differently
-            cand = [k for k in fp_names if k.endswith(n.split("model.")[-1] + ".weight")]
+            # Same ambiguity fixed in e2e_qp_distill._fp_weight_lookup (2026-08-19): the suffix
+            # `layers.0.mlp.down_proj.weight` matches BOTH the language-model tower and the MTP head,
+            # and picking cand[0] out of a SET is order-dependent under string hash randomisation —
+            # ~50% of runs silently grabbed the MTP head's weights for layer 0. Sort for determinism
+            # and prefer the main `model.` tower.
+            cand = sorted(k for k in fp_names if k.endswith(n.split("model.")[-1] + ".weight"))
             if not cand:
                 print(f"    SKIP {n}: no FP weight found"); continue
+            main = [k for k in cand if k.startswith("model.")]
+            if main:
+                cand = main
+            if len(cand) > 1:
+                print(f"    AMBIGUOUS {n}: {cand} -> using {cand[0]}")
             wname = cand[0]
         W_fp = fpf.get_tensor(wname).to(dev).float()
         H = Hs[n]

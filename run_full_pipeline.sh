@@ -291,6 +291,17 @@ else echo "=== [skip] Phase 4: $TEACHER exists ==="; fi
 # Unique calib caps at ~15M tok (6244 seqs x 2560), so everything past 1 epoch is repeats at ~1/3
 # efficiency. If this axis is ever pushed, GENERATE MORE CALIB rather than raising --epochs.
 ASSIGN=${ASSIGN:-1}                      # 0 = skip Phase 4.5 entirely (pre-2026-08 behaviour)
+# Latent optimizer. `adam-blockv` shares ONE Adam second moment per 256-latent scale block instead of
+# per element: 1.48x faster on a bandwidth-bound CPU (48.2 vs 71.1 ms per 23.6M latents) at no measured
+# quality cost. Validated 2026-08-19 as a 4-arm paired run on the 4B (raw skeleton, 8 down_proj layers,
+# 240 steps, verified-identical init fingerprints, frozen source):
+#     base (dense Adam)   KL 0.6234  assign-moved 3.558%  per-layer ratio 1x
+#     adam-blockv         KL 0.6225  assign-moved 2.878%  per-layer ratio 1x   <- -0.0009 KL, 1.48x
+#     sgd                 KL 0.6452  assign-moved 7.825%  per-layer ratio 1x   <- REJECTED (+0.0218)
+# Noise floor is 0.010 KL (three independent dense-Adam baselines: 0.6234 / 0.6288 / 0.6335), so
+# blockv is indistinguishable from dense and SGD is not. blockv also reaches that KL with ~19% FEWER
+# assignment flips. Set ASSIGN_OPT=adam to fall back to the per-element second moment.
+ASSIGN_OPT=${ASSIGN_OPT:-adam-blockv}
 ASSIGN_LR_DOWN=${ASSIGN_LR_DOWN:-5e-7}   # servo-calibrated at 32L; base only needs to be within ~1 order
 ASSIGN_LR_ATTN=${ASSIGN_LR_ATTN:-7.5e-7} # the servo's PLATEAUED answer (2.5e-7 starves, 5e-6 bursts)
 ASSIGN_ATTN_STRIDE=${ASSIGN_ATTN_STRIDE:-2}   # attn@32L = 1347M ~= 41GB; stride 2 = 674M ~= 23GB (proven)
@@ -311,6 +322,7 @@ if [ "$ASSIGN" != "0" ]; then
         --target-tr 1.25e-4 --tr-every 5 --tr-final-frac 0.2 \
         --lr-schedule linear --scale-ema-decay 0 --select final --loss-fn cakld --decision-gamma 2 \
         --ce-weight 0.1 --ce-positions 128 --train-weights "$2" --scale-qat-bits "$SBITS" \
+        --latent-opt "$ASSIGN_OPT" \
         --heldout-n 4 --eval-every "$5" --ckpt-every 0 --abort-patience 30 \
       || { echo "  assign_$1 FAILED"; exit 1; }
     touch "$WORK/assign_$1/.done"; ASSIGNED="$OUT"
