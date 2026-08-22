@@ -26,8 +26,10 @@ fi
 export MODEL_4B MODEL_27B HF_CACHE
 
 # ─────────── data ───────────
-# Local CTM parquet folders used by the diverse-calibration builder (Phase 2b).
-CTM_DATA=${CTM_DATA:-$HOME/Documents/CTM-Transformer/data_cache}
+# Calibration parquet folders used by the diverse-calibration builder (Phase 2b). Now IN-REPO:
+# populate with `python tools/fetch_data.py` (17 Nemotron sources, one part file each). The old
+# out-of-repo default ($HOME/Documents/CTM-Transformer/data_cache) still works if you point at it.
+CTM_DATA=${CTM_DATA:-$REPO_ROOT/data}
 # Frozen 1946-seq eval2k referee. THE cross-run comparable metric — keep it identical across hosts.
 EVAL2K_JSON=${EVAL2K_JSON:-$REPO_ROOT/output_4b/eval2k.json}
 export CTM_DATA EVAL2K_JSON

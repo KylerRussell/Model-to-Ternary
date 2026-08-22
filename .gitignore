@@ -25,6 +25,11 @@ build/
 *.bin
 *.msgpack
 
+# Calibration corpus (tools/fetch_data.py repopulates it from the Hub; ~20 GB of parquet).
+# The manifest in src/calib_sources.py is the tracked artifact — the bytes are not.
+data/
+*.parquet
+
 # IDE
 .vscode/
 .idea/

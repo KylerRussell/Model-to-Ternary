@@ -7,31 +7,16 @@ JSON (+ a disjoint held-out slice). Scale via --tokens (0.5M / 4M / 16M); same p
 
   python build_diverse_calib.py --tokens 500000 --out output_recovery/calib_diverse_0p5M.json
 """
-import argparse, json, os, glob, random
+import argparse, json, os, glob, random, sys
 import pyarrow.parquet as pq
 from huggingface_hub import hf_hub_download
 from transformers import AutoTokenizer
 
-# (label, kind, locator, fraction)   fractions sum to 1.00
-SOURCES = [
-    ("CC-HighQuality",      "hf",  ("nvidia/Nemotron-CC-v2", "High-Quality/part_000000.parquet"), 0.14),
-    ("CC-HQ-Synthetic",     "hf",  ("nvidia/Nemotron-CC-v2", "High-Quality-Synthetic/part_000000.parquet"), 0.11),
-    ("CC-Diverse-QA",       "hf",  ("nvidia/Nemotron-CC-v2", "Diverse-QA/part_000000.parquet"), 0.11),
-    ("CC-Math-4plus",       "hf",  ("nvidia/Nemotron-CC-Math-v1", "4plus/part_000000.parquet"), 0.06),
-    ("Code-Synthetic",      "hf",  ("nvidia/Nemotron-Pretraining-Code-v1", "Synthetic-Code/part_000000.parquet"), 0.06),
-    ("Wiki-Rewrite",        "ctm", "Nemotron-Pretraining-Wiki-Rewrite", 0.06),
-    ("RQA",                 "ctm", "Nemotron-Pretraining-RQA", 0.05),
-    ("STEM-SFT",            "ctm", "Nemotron-Pretraining-STEM-SFT", 0.05),
-    ("InfiniByte-Reasoning","ctm", "Nemotron-Pretraining-InfiniByte-Reasoning", 0.05),
-    ("Multiple-Choice",     "ctm", "Nemotron-Pretraining-Multiple-Choice", 0.05),
-    ("Math-Textbooks",      "ctm", "Nemotron-Pretraining-Math-Textbooks", 0.04),
-    ("Code-Concepts",       "ctm", "Nemotron-Pretraining-Code-Concepts", 0.04),
-    ("4plus_MIND",          "ctm", "4plus_MIND", 0.04),
-    ("Scientific-Coding",   "ctm", "Nemotron-Pretraining-Scientific-Coding", 0.04),
-    ("Economics",           "ctm", "Nemotron-Pretraining-Economics", 0.04),
-    ("Formal-Logic",        "ctm", "Nemotron-Pretraining-Formal-Logic", 0.03),
-    ("Unconditional-Algo",  "ctm", "Nemotron-Pretraining-Unconditional-Algorithmic", 0.03),
-]
+# The 17-source manifest now lives in calib_sources.py so tools/fetch_data.py (which downloads the
+# parquets) and this builder (which reads them) share one definition. SOURCES is unchanged.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from calib_sources import (SOURCES, HUB, dirname as src_dirname,  # noqa: E402
+                           MAX_UNIQUE_TRAIN_TOKENS, BINDING_SOURCE)
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--orig-model", required=True, help="original HF model snapshot (for the tokenizer)")
@@ -57,13 +42,20 @@ CTM = os.path.expanduser(args.ctm_data)
 
 tok = AutoTokenizer.from_pretrained(ORIG, trust_remote_code=True)
 
-def resolve(kind, loc):
+def resolve(label, kind, loc):
+    """Local `data/` first, Hub as fallback.
+
+    Prefer $CTM_DATA/<dirname>/*.parquet for EVERY source (both kinds) so a repo populated by
+    tools/fetch_data.py is fully self-contained and needs no network. The old behaviour is preserved
+    as the fallback: 'hf' sources still download on demand, 'ctm' sources still error if absent.
+    """
+    fs = sorted(glob.glob(f"{CTM}/{src_dirname(label)}/*.parquet"))
+    if fs:
+        return fs[0]
     if kind == "hf":
         return hf_hub_download(loc[0], loc[1], repo_type="dataset")
-    fs = sorted(glob.glob(f"{CTM}/{loc}/*.parquet"))
-    if not fs:
-        raise FileNotFoundError(f"no parquet in {CTM}/{loc}")
-    return fs[0]
+    raise FileNotFoundError(
+        f"no parquet in {CTM}/{src_dirname(label)} — run `python tools/fetch_data.py` to populate it")
 
 def chunks_from(path, need_seqs, seq):
     """Up to need_seqs packed token-id chunks of length seq. PACK documents into one token stream
@@ -86,13 +78,24 @@ def chunks_from(path, need_seqs, seq):
 
 train, ev = [], []
 gen_scale = 1.0 - args.chat_frac                          # generic sources share the non-chat remainder
+# Unique-token ceiling (see calib_sources.py): past this the scarcest source (Economics) runs dry and
+# its `got` silently falls short of `target`, quietly shifting the mixture away from the documented
+# fractions. It does NOT reuse tokens — it under-delivers — but the resulting draw is no longer the
+# documented mixture, so warn loudly rather than let a too-large --tokens pass unnoticed.
+_gen_tokens = args.tokens * (1.0 - args.chat_frac)
+if _gen_tokens > MAX_UNIQUE_TRAIN_TOKENS:
+    print(f"!! WARNING: {_gen_tokens/1e6:.0f}M generic tokens requested but the mixture caps at "
+          f"{MAX_UNIQUE_TRAIN_TOKENS/1e6:.0f}M (binding source: {BINDING_SOURCE}).\n"
+          f"!! Sources will fall short of quota and the mixture will NOT match the documented "
+          f"fractions — results are not comparable to recorded numbers.", flush=True)
+
 print(f"building diverse calib: {args.tokens} train tokens, seq {args.seq}, +{int(args.eval_frac*100)}% held-out"
       f"{f', {int(args.chat_frac*100)}% CHAT' if args.chat_frac>0 else ''}", flush=True)
 for label, kind, loc, frac in SOURCES:
     quota_tok = int(frac * gen_scale * args.tokens)
     n_train = max(1, quota_tok // args.seq)
     n_eval = max(1, int(n_train * args.eval_frac))
-    path = resolve(kind, loc)
+    path = resolve(label, kind, loc)
     got = chunks_from(path, n_train + n_eval, args.seq)
     random.shuffle(got)
     tr, ev_ = got[:n_train], got[n_train:n_train + n_eval]
