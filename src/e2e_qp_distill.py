@@ -2679,6 +2679,14 @@ def train(args):
         return best_scales                                   # 'best' (or 'ema' before it starts)
 
     def save_export(tag, final=False):
+        # --no-final-save: throughput runs use --lr 0 and train NOTHING, so the 52 GB checkpoint they
+        # write is pure waste -- and it is what OOM-killed the container (cgroup memory.max is 576 GB;
+        # save_student accumulates the whole model then copies it, ~108 GB transient at 27B, on top of
+        # ~89 GB anon and the page cache from reading a 52 GB student every arm). Page cache counts
+        # toward the cgroup limit; process RSS does not, which is why an RSS-based watchdog never saw it.
+        if bool(getattr(args, "no_final_save", False)):
+            log(f"   [save] SKIPPED ({tag}) — --no-final-save; measurement run, nothing to persist")
+            return
         # save_student dequantises each linear (unpack_2bit → full float). The student has ONE shard, so its
         # per-shard dict accumulates the WHOLE fp16 model (~10.6GB at 4B) and save_file() copies it again —
         # a ~20GB transient on top of whatever training still holds. With offloaded latents + Adam state
@@ -3546,6 +3554,10 @@ def main():
     ap.add_argument("--latent-gpu-budget", type=float, default=0.0,
                     help="GB of latents to keep RESIDENT ON GPU (per process). Those layers do no "
                          "host->device copy in dequant(). 0 = all offloaded (default).")
+    ap.add_argument("--no-final-save", action="store_true",
+                    help="Skip ALL model writes, including the final save. For throughput runs "
+                         "(--lr 0) whose output is discarded: the write is ~52 GB plus a ~108 GB "
+                         "transient and can OOM-kill the container against its cgroup memory.max.")
     ap.add_argument("--pipe-blocking-handoff", action="store_true",
                     help="A/B ONLY: restore the original 1F1B schedule that released the next "
                          "activation after the backward, leaving rank 1 idle for all of stage-0's "
