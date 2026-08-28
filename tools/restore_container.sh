@@ -63,6 +63,7 @@ fi
 for pkg in time rsync numactl gh; do
   case $pkg in time) probe=/usr/bin/time;; *) probe=/usr/bin/$pkg;; esac
   if [ -x "$probe" ]; then say "$pkg" "ok"; ok=$((ok+1)); continue; fi
+  if [ "$CHECK" -eq 1 ]; then say "$pkg" "MISSING (--check: not fixing)"; manual=$((manual+1)); continue; fi
   sudo apt-get install -y -q --reinstall "$pkg" >/dev/null 2>&1
   if [ -x "$probe" ] || command -v "$pkg" >/dev/null 2>&1; then say "$pkg" "restored"; fixed=$((fixed+1))
   else say "$pkg" "FAILED — apt exited 0 but $probe is still missing"; manual=$((manual+1)); fi
