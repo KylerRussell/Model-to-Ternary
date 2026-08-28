@@ -8,7 +8,11 @@
 # check). This script makes recovery one command instead of an archaeology session.
 #
 # WHAT SURVIVES (do not reinstall):  ~/Documents/Model-to-Ternary (repo, .venv, py-spy, data/, output*/),
-#   ~/.cache/huggingface, ~/_scratch_naive27b, ~/.ssh, /tmp scratchpads.
+#   ~/.cache/huggingface, ~/_scratch_naive27b, ~/.ssh.
+# WHAT DOES NOT: /tmp. An earlier version of this comment claimed /tmp scratchpads survive -- they do
+#   NOT. Two long measurement runs were lost to that assumption (a 12-arm, 11.5 h sweep with zero arms
+#   completed). Put anything a long run needs to survive under ~/Documents/Model-to-Ternary/output_*
+#   (gitignored and durable), never /tmp.
 # WHAT RESETS: /usr/lib CUDA userspace libs, apt packages (time, rsync, numactl), tailscale + its state.
 #
 #   bash tools/restore_container.sh          # restore everything

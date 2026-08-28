@@ -2927,27 +2927,50 @@ def train(args):
                                            torch.profiler.ProfilerActivity.CUDA])
                            if _trace_now else contextlib.nullcontext())
                 _tr_obj = _tr_ctx.__enter__()
-                _h_cur = _fwd0(_idxs[0])
-                _sbuf = _h_cur.detach().contiguous()
-                _sreq = dist.isend(_sbuf, dst=1)
-                for _k in range(len(_idxs)):
-                    _ta = _pnow()
-                    _h_nxt = _fwd0(_idxs[_k + 1]) if _k + 1 < len(_idxs) else None
-                    _tb = _pnow(); _pt["fwd"] += _tb - _ta
-                    _sreq.wait()                    # prior activation delivered; _sbuf now reusable
+                # --pipe-blocking-handoff restores the ORIGINAL schedule (release h(k+1) only after
+                # our own backward) purely so the 1F1B fix can be A/B'd. It leaves rank 1 idle for the
+                # whole of stage-0's backward and is never wanted in production.
+                if bool(getattr(args, "pipe_blocking_handoff", False)):
+                    _h_cur = _fwd0(_idxs[0])
+                    dist.send(_h_cur.detach().contiguous(), dst=1)
+                    for _k in range(len(_idxs)):
+                        _h_nxt = _fwd0(_idxs[_k + 1]) if _k + 1 < len(_idxs) else None
+                        _g = torch.empty_like(_h_cur)
+                        dist.recv(_g, src=1)
+                        _h_cur.backward(_g)
+                        del _h_cur, _g
+                        if _h_nxt is not None:
+                            dist.send(_h_nxt.detach().contiguous(), dst=1)
+                        _h_cur = _h_nxt
+                    _h_cur = None
                     _sreq = None
-                    if _h_nxt is not None:
-                        _sbuf = _h_nxt.detach().contiguous()
-                        _sreq = dist.isend(_sbuf, dst=1)
-                    _g = torch.empty_like(_h_cur)
-                    dist.recv(_g, src=1)
-                    _tc = _t.time(); _pt["wait"] += _tc - _tb
-                    _h_cur.backward(_g)
-                    _pt["bwd"] += _pnow() - _tc
-                    del _h_cur, _g
-                    _h_cur = _h_nxt
-                if _sreq is not None:
-                    _sreq.wait()
+                    _skip_nb = True
+                else:
+                    _skip_nb = False
+                if _skip_nb:
+                    pass
+                else:
+                  _h_cur = _fwd0(_idxs[0])
+                  _sbuf = _h_cur.detach().contiguous()
+                  _sreq = dist.isend(_sbuf, dst=1)
+                  for _k in range(len(_idxs)):
+                     _ta = _pnow()
+                     _h_nxt = _fwd0(_idxs[_k + 1]) if _k + 1 < len(_idxs) else None
+                     _tb = _pnow(); _pt["fwd"] += _tb - _ta
+                     _sreq.wait()                   # prior activation delivered; _sbuf now reusable
+                     _sreq = None
+                     if _h_nxt is not None:
+                         _sbuf = _h_nxt.detach().contiguous()
+                         _sreq = dist.isend(_sbuf, dst=1)
+                     _g = torch.empty_like(_h_cur)
+                     dist.recv(_g, src=1)
+                     _tc = _t.time(); _pt["wait"] += _tc - _tb
+                     _h_cur.backward(_g)
+                     _pt["bwd"] += _pnow() - _tc
+                     del _h_cur, _g
+                     _h_cur = _h_nxt
+                  if _sreq is not None:
+                     _sreq.wait()
                 _tr_ctx.__exit__(None, None, None)
                 if _trace_now and _tr_obj is not None:
                     for _srt in ("self_cuda_time_total", "self_cpu_time_total"):
@@ -3523,6 +3546,10 @@ def main():
     ap.add_argument("--latent-gpu-budget", type=float, default=0.0,
                     help="GB of latents to keep RESIDENT ON GPU (per process). Those layers do no "
                          "host->device copy in dequant(). 0 = all offloaded (default).")
+    ap.add_argument("--pipe-blocking-handoff", action="store_true",
+                    help="A/B ONLY: restore the original 1F1B schedule that released the next "
+                         "activation after the backward, leaving rank 1 idle for all of stage-0's "
+                         "backward. Exists so the handoff fix can be measured against it.")
     ap.add_argument("--no-fused-latent-grad", action="store_true",
                     help="Disable the fused offloaded-latent gradient path (stage into a persistent "
                          "host buffer and run the latent optimizer step inside the transfer's backward, "
