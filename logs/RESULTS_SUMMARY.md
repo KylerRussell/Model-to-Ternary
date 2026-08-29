@@ -1155,7 +1155,7 @@ prompts, emits `</think>` on 2%. Teacher-forced metrics are blind to this by con
 
 Raw table: `logs/gateB_compare.txt`.
 
-## 13. Throughput campaign for arm B on the 2x3090 box (2026-08-20→25) — 1F1B bubble (-9.1%) is the only confirmed win; fused latent grad RETRACTED; five levers refuted; four correctness bugs found
+## 13. Throughput campaign for arm B on the 2x3090 box (2026-08-20→29) — fused grad -19.6% and 1F1B -11.7% CONFIRMED; four correctness bugs; the real lesson is measurement
 
 Goal: cut s/step for full-latent assignment training (arm B) so a 160M-token run is not absurdly long.
 All timings: 27B student, seq 2560, `--train-weights all --tw-layer-stride 2`, `--lr 0 --latent-lr 0`
@@ -1226,9 +1226,11 @@ plausible indirect signal, each neutral or worse when measured.**
 * **Grad-buffer reallocation.** Reuse (`set_to_none=False`) is 26% SLOWER (316.5 vs 251.3 ms): it turns
   a straight assignment into a read-modify-write.
 * **Rebalancing the split.** The profile showed rank 1 idle 44-54 s/step and rank 0 NEVER blocking,
-  which says to move layers to rank 1. Doing it (40→36) was **15.6% WORSE** (260.0 vs 225.0). Rank 1
-  also owns the loss, so it crosses over to critical within 4 layers. **Stage idle time does not mean
-  that stage should take more work.** Split 40 stands.
+  which says to move layers to rank 1. Doing it (40→36) measured **15.6% WORSE** (260.0 vs 225.0).
+  **CORRECTED 2026-08-29 (13m): under controlled placement the real penalty is 2.2%** (241.6 vs 236.3,
+  spreads 0.46%/0.85%), not 15.6%. The DIRECTION survives -- split 40 is slightly better -- but the
+  mechanism story ("rank 1 owns the loss and crosses over to critical within 4 layers") was built on a
+  7x-inflated number and was explaining noise. Split 40 stands, barely.
 * **GPU utilisation as a bottleneck signal.** Cost three wrong diagnoses. A rank blocked in `recv`
   reads 0%; a rank doing host-bound work reads low while owning the wall clock. Only BLOCKED time
   disambiguates (`PP_PROF=1`).
@@ -1473,3 +1475,91 @@ no clear effect either way (slot 4 is fast with 16 cores) -- do not assume it he
 **METHOD NOTE, repeated for the third time in this campaign:** the `numa` treatment bundled memory
 binding AND CPU binding into one variable, so the arms could not separate them; slot 4 happened to
 disambiguate by accident. One variable per arm, always.
+
+
+### 13k. FUSED LATENT GRAD — CONFIRMED at -19.6%, and the un-retraction (2026-08-28)
+
+13i retracted this result. **The retraction was wrong**, and so was the original claim's evidence base;
+both were made on a box whose measurement noise (7-51% run to run) exceeded the effect. Once placement
+was controlled the question became answerable in four arms.
+
+**Setup that made it measurable** (all four arms identical except the one variable):
+* `numactl --interleave=0,1,2` — deterministic round-robin placement, node 3 excluded. Unbound runs
+  drew a different node each time; node 3 (distance 30) costs 55% (13j).
+* `--no-final-save` — the 52 GB checkpoint each arm wrote was pure waste at `--lr 0` AND was
+  OOM-killing the container against its 576 GB cgroup limit (13l).
+* Counterbalanced order base,nofused | nofused,base so slot position cancels.
+
+| config | run 1 | run 2 | mean | within-config spread |
+|---|---|---|---|---|
+| **fused** | 237.3 | 235.3 | **236.3** | **0.85%** |
+| `--no-fused-latent-grad` | 290.9 | 297.0 | 294.0 | 2.1% |
+
+**-19.6% (118.2 vs 147.0 s/microbatch).** The gap is 10-20x the noise; t ~ 18 on n=2 per group.
+
+**Mechanism confirmed in the same runs** — page faults on rank 0, per step:
+
+| config | run 1 | run 2 | agreement |
+|---|---|---|---|
+| fused | 2,254,592 | 2,264,782 | 0.45% |
+| nofused | 17,206,673 | 17,206,720 | **0.0003%** |
+
+**7.6x fewer faults.** The fault counts are essentially deterministic, which also proves both arms did
+identical work — the timing gap cannot be some divergence between runs. Placement (`n0 34%`) and
+cgroup peak (244 GB) were identical across all four arms, so neither explains it either.
+
+**Why the earlier numbers were untrustworthy in BOTH directions.** The original -17.0% was a single
+back-to-back pair on an uncontrolled box; the retraction rested on (a) two later arms that happened to
+draw bad placement and (b) a page-fault count sampled during the BUILD phase, when the model loader
+faults tens of millions of pages by design. Neither the claim nor the retraction had the resolution to
+decide. **Effect size is meaningless without a measured noise floor** — that is the lesson, and it cost
+roughly a week.
+
+Cumulative CONFIRMED: **118.2 s/microbatch** with the fused path, vs 147.0 without. The 1F1B result is
+STILL unmeasured under controlled conditions (its A/B flag restored the old schedule on rank 0 only,
+hanging rank 1 in RECV until the NCCL watchdog fired; fixed to restore both ranks, arms queued last).
+
+
+### 13m. THE CONTROLLED SWEEP — every lever re-measured, and what the campaign actually taught (2026-08-29)
+
+12 arms, 2 reps per config, counterbalanced, all under `numactl --interleave=0,1,2` + `--no-final-save`,
+8 steps/arm, split 40 unless stated. Placement (`n0 34%`) and cgroup peak (244 GB) were IDENTICAL in
+every arm, so neither can explain any difference.
+
+| config | run 1 | run 2 | mean s/step | spread | vs base |
+|---|---|---|---|---|---|
+| spike (P1 ceiling, NOT a real impl) | 195.4 | 195.6 | **195.5** | 0.10% | **-17.3%** |
+| **base** (fused, non-blocking 1F1B) | 237.3 | 235.3 | **236.3** | 0.85% | — |
+| split 36 | 241.0 | 242.1 | 241.6 | 0.46% | +2.2% |
+| `--pipe-blocking-handoff` (pre-1F1B) | 267.0 | 268.3 | 267.7 | 0.49% | +13.3% |
+| `--no-fused-latent-grad` (pre-fused) | 290.9 | 297.0 | 294.0 | 2.10% | +24.4% |
+| `--latent-gpu-budget 8` | CUDA OOM | skipped | — | — | not viable |
+
+**CONFIRMED WINS, both of which I claimed early, then doubted, retracted or under-stated:**
+* **Fused offloaded-latent gradient: -19.6%** (originally claimed -17.0%, then RETRACTED in 13i).
+  Mechanism verified in the same arms: 2.26M vs 17.21M page faults/step -- **7.6x fewer** -- with the
+  nofused fault counts reproducing to **0.0003%**.
+* **1F1B non-blocking handoff: -11.7%** (originally claimed -9.1%, then downgraded to "probable").
+
+**Both were real all along. The measurement was the problem, not the optimisations.**
+
+**Metric quality note:** page-fault counts reproduce to 0.0003-0.5% and track known structural changes
+exactly (split 36 faults are 10% below split 40, matching the 36/40 layer ratio). On a noisy box a
+mechanism metric that precise is worth more than the stopwatch -- the fault counts, not the timings,
+were what first showed the fused path genuinely engages.
+
+**THE LESSON, which cost about a week.** Effect size is meaningless without a measured noise floor.
+This box ran at 7-51% run-to-run variance while I chased 9-20% effects through it, producing a claim,
+a retraction, and an un-retraction of the SAME result. Three separate "disproofs" were themselves
+artifacts: a page-fault count sampled during the BUILD phase (the model loader faults tens of millions
+of pages by design), an RSS-based watchdog that structurally could not see a cgroup limit, and a
+`--membind` control that made things worse than no control at all. Fixing the measurement -- NUMA
+determinism plus removing 52 GB of per-arm checkpoint churn -- took the noise floor under 1%, and
+every question then resolved in four arms.
+
+**Still open:** the ~175 s/step seen in uncontrolled runs (13j, arms 3_nonuma/4_numa) is 26% below this
+sweep's 236.3 base. Those runs had memory CONCENTRATED on one node with threads co-located; interleaving
+spreads pages across 3 nodes so every access may be remote. A placement sweep (co-located vs
+interleaved, 2 reps each) tests whether co-location now reproduces at ~175 -- the 175.0/212.0 variance
+that made me abandon it was measured BEFORE `--no-final-save`, so checkpoint-cache churn is the prime
+suspect for that variance rather than the policy itself.

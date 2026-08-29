@@ -2994,11 +2994,19 @@ def train(args):
                 def _mkbuf(_j):
                     return torch.empty(1, _ids_l[_j].shape[1], _Hs,
                                        dtype=torch.bfloat16, device=device)
+                # --pipe-blocking-handoff has to restore the ORIGINAL schedule on BOTH ranks. The 1F1B
+                # fix changed rank 0 (isend early) AND rank 1 (pre-post the irecv); restoring only
+                # rank 0 leaves a mismatched pair that never existed in production and hangs rank 1 in
+                # RECV until the NCCL watchdog fires an hour later.
+                _blk = bool(getattr(args, "pipe_blocking_handoff", False))
                 _hb = _mkbuf(0)
-                _rreq = dist.irecv(_hb, src=0)
+                _rreq = None if _blk else dist.irecv(_hb, src=0)
+                if _blk:
+                    dist.recv(_hb, src=0)
                 for _j, _bi in enumerate(_idxs):
                     _ta = _t.time()
-                    _rreq.wait()
+                    if _rreq is not None:
+                        _rreq.wait()
                     _tb = _pnow(); _pt["wait"] += _tb - _ta
                     if _PF_ON:
                         pf_reset()
@@ -3014,13 +3022,17 @@ def train(args):
                     _tc = _pnow(); _pt["fwd"] += _tc - _tb
                     if _j + 1 < len(_idxs):
                         _hb = _mkbuf(_j + 1)
-                        _rreq = dist.irecv(_hb, src=0)
+                        # blocking mode: do NOT pre-post; receive after our gradient goes back, which
+                        # is what made rank 1 idle through stage-0's backward in the first place.
+                        _rreq = None if _blk else dist.irecv(_hb, src=0)
                     else:
                         _rreq = None
                     _l.backward()
                     _kl_acc += global_kl(_l)
                     _td = _pnow(); _pt["bwd"] += _td - _tc
                     dist.send(_hd.grad.contiguous(), dst=0)
+                    if _blk and _j + 1 < len(_idxs):
+                        dist.recv(_hb, src=0)          # original order: receive only after sending grad
                     _pt["send"] += _t.time() - _td
                     del _hd, _hp, _l
             # Only rank 1 computes the loss, and log() prints only on rank 0 -- so without this the
