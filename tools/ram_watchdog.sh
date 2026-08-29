@@ -15,11 +15,12 @@
 #     --kill   GB  hard ceiling on trainer RSS; exceeding it SIGKILLs the trainer
 #     --floor  GB  also kill if system MemAvailable drops below this (protects the host)
 set -u
-EXPECT=0; KILL=0; POLL=5; FLOOR=40
+EXPECT=0; KILL=0; POLL=5; FLOOR=40; CGPCT=78
 while [ $# -gt 0 ]; do
   case "$1" in
     --expect) EXPECT=$2; shift 2;; --kill) KILL=$2; shift 2;;
     --poll) POLL=$2; shift 2;;     --floor) FLOOR=$2; shift 2;;
+    --cg-pct) CGPCT=$2; shift 2;;   # % of cgroup memory.max at which to SIGKILL the trainer
     *) echo "unknown arg $1"; exit 2;;
   esac
 done
@@ -50,7 +51,7 @@ CGMAXB=$(cg_max); CGMAX_GB=0
 # Kill at 78% of the cgroup limit. The container was OOM-killed at memory.max three times while an
 # RSS-based watchdog watched and stayed silent; the headroom has to absorb the save transient and
 # dirty page cache that reclaim has not caught up with.
-CGKILL_GB=$(( CGMAX_GB * 78 / 100 ))
+CGKILL_GB=$(( CGMAX_GB * CGPCT / 100 ))
 if [ "$CGMAX_GB" -gt 0 ]; then
   echo "[watchdog] armed: cgroup limit ${CGMAX_GB}GB, cgroup kill at ${CGKILL_GB}GB; RSS expect ${EXPECT}GB kill ${KILL}GB; poll ${POLL}s" | tee -a "$LOG"
 else

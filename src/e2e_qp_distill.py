@@ -1275,6 +1275,28 @@ def place_for_pipeline(model, device):
     print(f"   [pp rank {_PP['rank']}] owns {n_gpu} layers on {device}, {n_cpu} idle on host "
           f"(split at {_PP['split']})", flush=True)
 
+def host_mem_audit(tag):
+    """Log cgroup memory at a named phase. The container is killed by the CGROUP (page cache counts,
+    RSS does not), and a 330 GB allocation burst once took us from 290 GB to the 620 GB limit in under
+    a minute with NO trainer log line in the preceding 10 minutes -- so an external sampler could see
+    that memory moved but never which phase moved it. Cheap: three small file reads."""
+    try:
+        _cg = "/sys/fs/cgroup" + open("/proc/self/cgroup").read().strip().split(":")[-1]
+        _cur = int(open(_cg + "/memory.current").read()) / 2**30
+        _mx = open(_cg + "/memory.max").read().strip()
+        _lim = int(_mx) / 2**30 if _mx != "max" else 0
+        _an = _fi = 0.0
+        for _ln in open(_cg + "/memory.stat"):
+            if _ln.startswith("anon "):
+                _an = int(_ln.split()[1]) / 2**30
+            elif _ln.startswith("file "):
+                _fi = int(_ln.split()[1]) / 2**30
+        print(f"   [hostmem] {tag}: {_cur:.0f}G/{_lim:.0f}G anon={_an:.0f}G cache={_fi:.0f}G "
+              f"({100*_cur/max(_lim,1):.0f}%)", flush=True)
+    except Exception as _e:
+        print(f"   [hostmem] {tag}: unavailable ({type(_e).__name__})", flush=True)
+
+
 def vram_audit(tag, model=None, extra=None):
     """Report where GPU memory actually goes. Gated on VRAM_AUDIT=1.
 
@@ -2201,6 +2223,7 @@ def train(args):
                 else 3.0)
     # 6 GB reserve, not the 2 GB default. Measured: the checkpoint recompute in the backward peaks at
     # ~4.2 GB of activations at seq 2560, and a 4 GB reserve OOM'd there by 340 MB.
+    host_mem_audit("before promote_latents_to_gpu")
     promote_latents_to_gpu(model, int(float(getattr(args, "latent_gpu_budget", 0.0)) * 1e9),
                            reserve_bytes=6_000_000_000, state_mult=_st_mult)
     # PINNED GRADIENT STAGING -- independent of prefetching. This used to be assigned only inside the
@@ -2265,6 +2288,7 @@ def train(args):
             if getattr(_m, "latent", None) is not None:
                 _m._latent_bf16_compute = True
         log("   latent bf16-compute ON (fp32 master on CPU, bf16 GPU copy + bf16 grad)")
+    host_mem_audit("after latents created / before grad-release setup")
     _grad_release = bool(getattr(args, "latent_grad_release", False)) and bool(latents)
     if _grad_release:
         _lat_set = {id(p_) for p_ in latents}
@@ -2275,25 +2299,14 @@ def train(args):
             for p_ in g["params"]:
                 if id(p_) in _lat_set:
                     _lat_group_of[id(p_)] = g
-        _state_dir = None
-        if getattr(args, "latent_state_nvme", False):
-            import numpy as _np
-            _state_dir = Path(args.out).parent / "_adam_state"
-            shutil.rmtree(_state_dir, ignore_errors=True)
-            _state_dir.mkdir(parents=True, exist_ok=True)
-            log(f"   Adam state NVMe-backed at {_state_dir} "
-                f"(frees {sum(p_.numel() for p_ in latents)*8/1e9:.1f}GB of RAM; slower per step)")
-
         def _state_buf(param, tag, idx):
-            """Zeroed fp32 buffer shaped like `param`: in RAM, or NVMe-backed when --latent-state-nvme.
-            Adam touches exp_avg/exp_avg_sq exactly ONCE per step per tensor, so a memmap is a good trade:
-            the page cache absorbs the reads and only dirty pages are written back."""
-            if _state_dir is None:
-                return torch.zeros_like(param, memory_format=torch.preserve_format)
-            import numpy as _np
-            f = _state_dir / f"{tag}_{idx}.dat"
-            arr = _np.memmap(str(f), dtype=_np.float32, mode="w+", shape=(param.numel(),))
-            return torch.from_numpy(arr).view_as(param)
+            """Zeroed fp32 buffer shaped like `param`, in RAM.
+
+            THERE IS NO NVMe ON THIS MACHINE. A memmap-backed variant existed and was REMOVED: the
+            Adam state is read AND written once per tensor per step, so backing it with the overlay
+            filesystem would put ~106 GB of per-step traffic on the slowest device in the box. Slow
+            storage is also why startup already takes ~25 min. Do not reintroduce it."""
+            return torch.zeros_like(param, memory_format=torch.preserve_format)
 
         @torch.no_grad()
         def _adam_step_one(group, param):
@@ -2488,6 +2501,7 @@ def train(args):
     # tensor over the WHOLE latent (int64: 712MB for an 89M-element latent, and torch asked for
     # 1.35GB), which is fine in host RAM but OOMs a 24GB card the moment a latent is GPU-RESIDENT
     # (--latent-gpu-budget). Sampling indices is device-independent, so do it where memory is cheap.
+    host_mem_audit("before _tr_idx randperm block")
     _tr_idx = [torch.randperm(m.latent.numel(), device="cpu")[:32768].to(m.latent.device)
                for m in _lat_mods]
     def _hard_trits_per_mod():
@@ -2510,6 +2524,7 @@ def train(args):
             return []
         return [100.0 * float((c != r).float().mean().item())
                 for c, r in zip(_hard_trits_per_mod(), _lat_ref_per)]
+    host_mem_audit("after _tr_idx randperm block")
     _lat_ref_per = _hard_trits_per_mod() if _lat_mods else None   # per-layer init refs
     # .cpu() before cat: with --latent-gpu-budget the resident latents follow their LAYER, so under
     # model parallelism these per-module samples span cuda:0 AND cuda:1 and torch.cat refuses to mix
@@ -2576,29 +2591,12 @@ def train(args):
     # stage which never beats its step-0 entry baseline restores that entry, so weight-training always
     # keeps one. But it is another 4 B/latent — 102.5 GB at arm B on the 27B — and that third full copy
     # of every latent (latents + Adam moment + snapshot) is what pushed the arm B run past 629 GB.
-    # --snap-nvme backs it with a memmap instead: it is written once per improvement and read at most
-    # once at the end, so the page cache absorbs it and only dirty pages ever hit disk.
-    _snap_nvme = bool(getattr(args, "snap_nvme", False))
-    _snap_dir = None
-    if _snap_nvme:
-        _snap_dir = Path(args.out).parent / "_snap_state"
-        shutil.rmtree(_snap_dir, ignore_errors=True)
-        _snap_dir.mkdir(parents=True, exist_ok=True)
-        log(f"   held-out snapshot NVMe-backed at {_snap_dir} "
-            f"(frees {sum(x.numel()*x.element_size() for x in scales)/1e9:.1f}GB of host RAM)")
+    # A --snap-nvme memmap variant existed and was REMOVED: THERE IS NO NVMe ON THIS MACHINE, and
+    # backing host state with the overlay filesystem trades RAM for the slowest device in the box.
 
     def _snap_alloc(t, tag, i):
-        """Buffer shaped like `t`: an ordinary clone, or a memmap under --snap-nvme. Allocated as raw
-        bytes and reinterpreted, so it works for any dtype (bf16 has no numpy equivalent)."""
-        if not _snap_nvme:
-            return t.detach().clone()
-        import numpy as _np
-        f = _snap_dir / f"{tag}_{i}.dat"
-        arr = _np.memmap(str(f), dtype=_np.uint8, mode="w+", shape=(t.numel() * t.element_size(),))
-        buf = torch.from_numpy(arr).view(t.dtype).view_as(t)
-        with torch.no_grad():
-            buf.copy_(t.detach())
-        return buf
+        """Buffer shaped like `t`."""
+        return t.detach().clone()
 
     def _snap():
         if _snap_bufs["s"] is None:
@@ -2750,6 +2748,7 @@ def train(args):
         dist.all_reduce(t, op=dist.ReduceOp.SUM)           # average across ranks for a stable metric
         return (t / world).item()
 
+    host_mem_audit("before step-0 held-out eval")
     opt_step, micro, win_kl = 0, 0, 0.0                     # win_kl: per-micro KL summed over a window
     opt.zero_grad(set_to_none=True)
 
@@ -2814,6 +2813,7 @@ def train(args):
         raise SystemExit(f"no TRAIN sequences on this rank: --max-samples {args.max_samples} leaves "
                          f"nothing after --heldout-n {args.heldout_n} (+probe/gate). Raise --max-samples.")
 
+    host_mem_audit("entering training loop")
     while opt_step < args.steps:
         # ── PIPELINED PATH (cut-graph 1F1B) ──────────────────────────────────────────────────
         # v1 interleaved only the FORWARD and then ran one monolithic backward: measured 278 s vs
@@ -3056,6 +3056,8 @@ def train(args):
             opt.zero_grad(set_to_none=True)
             opt_step += 1
             log(f"   step {opt_step}/{args.steps}  pp rank {_PP['rank']} mb={_M} kl={_kl_acc:.4f}")
+            if opt_step <= 4 and _PP["rank"] == 0:
+                host_mem_audit(f"after step {opt_step}")
             if opt_step <= 6:
                 vram_audit(f"after pp step {opt_step}", model)
             if held_idx and opt_step % eval_every == 0:
@@ -3547,12 +3549,7 @@ def main():
                          "casts dequant() to x.dtype, so the fp32 GPU copy bought nothing but doubled the "
                          "transient and made the grad fp32 (~6B/latent = 13.6GB at mlp@32L). Standard "
                          "mixed-precision: master fp32, compute bf16.")
-    ap.add_argument("--latent-state-nvme", action="store_true",
-                    help="Keep Adam's exp_avg/exp_avg_sq for the latents in NVMe-backed memmaps instead of RAM "
-                         "(8 of the measured 18.1 bytes/latent). mlp@32L = 2.26B latents needs ~48GB resident "
-                         "(over the 47G cap); this brings it to ~30GB. Slower per step (state is read+written "
-                         "once per tensor per step) but the page cache absorbs much of it. Needs "
-                         "--latent-grad-release.")
+
     ap.add_argument("--latent-grad-release", action="store_true",
                     help="Step each offloaded latent the moment its gradient is ready, then free the grad "
                          "(post-accumulate-grad hook). Removes the fp32 grad buffer (4B/latent) from the peak: "
@@ -3609,12 +3606,7 @@ def main():
                          "DOUBLES per-latent cost (dequant + CPU->GPU latent stream + grad-release hook "
                          "run again on recompute). At arm B that is 205 GB/step of PCIe traffic; this "
                          "halves it, if activations still fit.")
-    ap.add_argument("--snap-nvme", action="store_true",
-                    help="Back the best-held-out snapshot with a memmap instead of host RAM. Saves "
-                         "4 B/latent, but ONLY worth it on FAST LOCAL STORAGE — this host has no NVMe, "
-                         "so leave it OFF here (slow disk is also why startup takes ~25 min). "
-                         "4 B/latent (102.5 GB at 27B arm B). The snapshot is write-mostly (one copy per "
-                         "held-out improvement) and read at most once, so the page cache absorbs it.")
+
     ap.add_argument("--pipeline-mb", type=int, default=0,
                     help="IN-PROCESS PIPELINING DOES NOT WORK HERE - measured slower in every form. "
                          "v1 (interleave forward only, one monolithic backward): 278 vs 141 "
