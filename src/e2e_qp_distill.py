@@ -2502,7 +2502,14 @@ def train(args):
     # 1.35GB), which is fine in host RAM but OOMs a 24GB card the moment a latent is GPU-RESIDENT
     # (--latent-gpu-budget). Sampling indices is device-independent, so do it where memory is cheap.
     host_mem_audit("before _tr_idx randperm block")
-    _tr_idx = [torch.randperm(m.latent.numel(), device="cpu")[:32768].to(m.latent.device)
+    # .clone() IS LOAD-BEARING: randperm(n)[:32768] is a VIEW over the full n-element int64
+    # permutation, so without it each entry keeps its whole n*8 byte storage alive. `.to(device)` does
+    # not force a copy either -- under --latent-offload the latents are already on CPU, so it is a
+    # no-op. Measured at stride 1 (311 modules, 16.5B latents): anon jumped 125 GB -> 271 GB across
+    # this one line, +146 GB RETAINED, to hold 10M indices that need 80 MB. That is what OOM-killed
+    # the container at 620 GB. The clone keeps only the 32768 sampled indices; the full permutation
+    # becomes a bounded transient (~712 MB for the largest latent) that is freed immediately.
+    _tr_idx = [torch.randperm(m.latent.numel(), device="cpu")[:32768].clone().to(m.latent.device)
                for m in _lat_mods]
     def _hard_trits_per_mod():
         """Sampled hard trits, PER MODULE (so per-layer flip rates are visible)."""
