@@ -1155,7 +1155,7 @@ prompts, emits `</think>` on 2%. Teacher-forced metrics are blind to this by con
 
 Raw table: `logs/gateB_compare.txt`.
 
-## 13. Throughput campaign for arm B on the 2x3090 box (2026-08-20→29) — fused grad -19.6% and 1F1B -11.7% CONFIRMED; four correctness bugs; the real lesson is measurement
+## 13. Throughput campaign for arm B on the 2x3090 box (2026-08-20→29) — 294.0 -> 149.3 s/step CONFIRMED (-49%); four correctness bugs; the real lesson is measurement
 
 Goal: cut s/step for full-latent assignment training (arm B) so a 160M-token run is not absurdly long.
 All timings: 27B student, seq 2560, `--train-weights all --tw-layer-stride 2`, `--lr 0 --latent-lr 0`
@@ -1557,9 +1557,59 @@ of pages by design), an RSS-based watchdog that structurally could not see a cgr
 determinism plus removing 52 GB of per-arm checkpoint churn -- took the noise floor under 1%, and
 every question then resolved in four arms.
 
-**Still open:** the ~175 s/step seen in uncontrolled runs (13j, arms 3_nonuma/4_numa) is 26% below this
-sweep's 236.3 base. Those runs had memory CONCENTRATED on one node with threads co-located; interleaving
+**RESOLVED in 13n below — co-located placement is worth -37.0%, far more than the ~175 target.**
+The ~175 s/step seen in uncontrolled runs (13j, arms 3_nonuma/4_numa) is 26% below this sweep's 236.3
+base. Those runs had memory CONCENTRATED on one node with threads co-located; interleaving
 spreads pages across 3 nodes so every access may be remote. A placement sweep (co-located vs
 interleaved, 2 reps each) tests whether co-location now reproduces at ~175 -- the 175.0/212.0 variance
 that made me abandon it was measured BEFORE `--no-final-save`, so checkpoint-cache churn is the prime
 suspect for that variance rather than the policy itself.
+
+
+### 13n. NUMA CO-LOCATION — the single largest win of the campaign, -37.0% (2026-08-29)
+
+Counterbalanced A,B,B,A; only the placement wrapper differs. Fused path, `--no-final-save`, split 40,
+8 steps/arm throughout.
+
+| policy | runs | mean s/step | spread | rank-0 memory |
+|---|---|---|---|---|
+| **co-located** `--cpunodebind=N --membind=N` | 149.9, 148.6 | **149.3** | 0.87% | node 1, **99%** |
+| interleaved `--interleave=0,1,2` | 237.3, 235.3, 237.3, 238.3 | 237.1 | 1.27% | n0 34% (spread over 3) |
+
+**-37.0%.** Page faults identical across all six arms (2.25-2.26M, +-0.5%), so the ONLY variable is
+where rank 0's 52 GB lives relative to the GPU that reads it. Both GPUs sit on node 1; co-location
+pins rank 0's threads AND memory there (rank 1 -> node 0), while interleaving scatters pages across
+three nodes so most accesses are remote on a workload moving 184 GB/step across PCIe.
+
+**I had this configuration and threw it away.** 13j measured co-location at 175.0 and 212.0 and I read
+that 21% spread as "unreproducible", switching to interleaving for determinism -- surrendering ~37% of
+throughput. That variance was measured BEFORE `--no-final-save`, when every arm wrote a 52 GB
+checkpoint; page-cache churn is what perturbs NUMA locality. With the churn gone, co-location
+reproduces to 0.87%. **Same error as the fused-grad retraction: judging a LEVER through a broken
+INSTRUMENT.**
+
+### 13o. RECOMMENDED PRODUCTION CONFIG and the measured total
+
+```
+numactl --cpunodebind=$NODE --membind=$NODE   # rank0 -> node 1 (GPU-local), rank1 -> node 0
+--pipe-parallel --pipe-parallel-mb 2  MP_SPLIT=40
+(fused latent grad is the default; do NOT pass --no-fused-latent-grad)
+--no-final-save for measurement runs only
+NOT recommended: --latent-gpu-budget (OOMs), --latent-pin-grad (measured slower), split 36 (+2.2%)
+```
+
+Measured endpoints, both under controlled placement:
+
+| config | s/step | s/microbatch |
+|---|---|---|
+| `--no-fused-latent-grad` + interleaved | 294.0 | 147.0 |
+| **fused + co-located** | **149.3** | **74.6** |
+
+**-49.2% between measured endpoints**, from two changes that were each independently confirmed
+(fused -19.6%, co-location -37.0%). The 1F1B handoff (-11.7%) is inside both numbers, having shipped
+before this sweep.
+
+**All of the above is at `--lr 0`** (throughput only, nothing trains). Before committing to a long arm
+B run, one validation at a real learning rate is required: the fused path changes WHERE the optimizer
+step happens (inside the transfer's backward rather than an autograd hook), and while its gradients are
+bit-identical by unit test, that has never been exercised with a nonzero `--latent-lr` at scale.
