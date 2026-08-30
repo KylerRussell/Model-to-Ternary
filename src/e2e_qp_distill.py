@@ -2461,6 +2461,34 @@ def train(args):
 
     # ── TALR state (transition-rate control of the latent lr) ──
     _tr_target = float(getattr(args, "target_tr", 0.0))
+    def _opt_step_scales_only():
+        """opt.step() that never visits the latent param groups.
+
+        Adam ALLOCATES exp_avg/exp_avg_sq for EVERY param it visits -- setting the group's lr to 0 is
+        not enough, and neither is grad=None in every torch version. With --latent-grad-release the
+        latents have ALREADY been stepped (and their grads freed) inside backward by _lat_step_one, so
+        letting opt.step() see them gives every latent a SECOND, FULL set of Adam state.
+
+        Cost at --train-weights all --tw-layer-stride 1: rank0 16.5B latents x 8 B = 132 GB, rank1
+        9.9B x 8 B = 79 GB, so ~211 GB allocated in one tight loop at the END of step 1 -- on top of
+        the ~106 GB grad-release had already allocated. That is what OOM-killed the container (exit
+        137) at stride 1, and why no run ever logged a completed step: it died between the backward
+        and the step line. At stride 2 the same duplicate was ~106 GB and fit, which is why it only
+        surfaced now.
+
+        The guarded form already existed for the non-pipeline path; the pipeline paths called a bare
+        opt.step(). Factored here so the two cannot drift apart again.
+        """
+        if _grad_release:
+            _saved = [g for g in opt.param_groups if g.get("is_latent")]
+            opt.param_groups = [g for g in opt.param_groups if not g.get("is_latent")]
+            try:
+                opt.step()
+            finally:
+                opt.param_groups.extend(_saved)
+        else:
+            opt.step()
+
     _lat_groups = [g for g in opt.param_groups if g.get("is_latent")]
     _lat_base_lr = (_lat_groups[0]["base_lr"] if _lat_groups else args.lr)
     _tr_gains = [1.0] * max(1, len(_lat_mods))       # PER-LAYER gains (one servo per layer)
@@ -2873,7 +2901,7 @@ def train(args):
                 _cur = _nxt
             win_kl += _kl_sum
             torch.nn.utils.clip_grad_norm_(scales, 1.0)
-            opt.step()
+            _opt_step_scales_only()
             opt.zero_grad(set_to_none=True)
             opt_step += 1
             log(f"   step {opt_step}/{args.steps}  pipelined mb={_pipe_mb}  kl={_kl_sum:.4f}")
@@ -3059,7 +3087,7 @@ def train(args):
                         f"fwd={float(_p1[1]):6.1f} bwd={float(_p1[2]):6.1f} send={float(_p1[3]):5.1f}")
             win_kl += _kl_acc
             torch.nn.utils.clip_grad_norm_(scales, 1.0)
-            opt.step()
+            _opt_step_scales_only()
             opt.zero_grad(set_to_none=True)
             opt_step += 1
             log(f"   step {opt_step}/{args.steps}  pp rank {_PP['rank']} mb={_M} kl={_kl_acc:.4f}")
@@ -3172,18 +3200,7 @@ def train(args):
                 # linearly rather than switching the full lr on at once.
                 if g.get("is_latent"):
                     g["lr"] *= _lat_frac(opt_step)
-            if _grad_release:
-                # Latents already stepped (and freed their grads) inside backward. Zeroing their lr here was
-                # NOT enough: opt.step() still ALLOCATES exp_avg/exp_avg_sq for every param it visits, so the
-                # latents ended up with TWO sets of Adam state (measured: anon RSS grew 23.9 -> 42.8GB over
-                # 100 steps and wedged the run in D state). Temporarily REMOVE the latent groups from the
-                # optimizer instead, so it only ever touches the scale group.
-                _lat_groups_saved = [g for g in opt.param_groups if g.get("is_latent")]
-                opt.param_groups = [g for g in opt.param_groups if not g.get("is_latent")]
-                opt.step()
-                opt.param_groups.extend(_lat_groups_saved)
-            else:
-                opt.step()
+            _opt_step_scales_only()
             opt.zero_grad(set_to_none=True)
             opt_step += 1
             if opt_step <= 8:
