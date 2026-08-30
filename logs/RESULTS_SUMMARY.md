@@ -1613,3 +1613,50 @@ before this sweep.
 B run, one validation at a real learning rate is required: the fused path changes WHERE the optimizer
 step happens (inside the transfer's backward rather than an autograd hook), and while its gradients are
 bit-identical by unit test, that has never been exercised with a nonzero `--latent-lr` at scale.
+
+
+### 13p. ARM B AT FULL SCOPE RUNS — three memory bugs, and the first real step time (2026-08-30)
+
+`--train-weights all --tw-layer-stride 1` (311 latents / 16.49B on rank 0, ~26B total), `--latent-lr
+5e-7` (REAL optimizer updates, not `--lr 0`), co-located NUMA, split 40, mb 2, seq 2560.
+
+| | |
+|---|---|
+| **step time** | **501.9 s/step = 250.9 s/microbatch** (7 steady deltas; 496,495,496,496,495,541,495,496 -> median 496) |
+| **peak memory** | **274 GB of 620 GB (44%)**, anon 218 GB, flat from step 1 to step 10 |
+| result | rc=0, 10/10 steps, KL 9.43 -> 9.65 across the run |
+
+Before tonight this configuration could not complete a SINGLE step: it OOM-killed the container
+(exit 137) every time, always between the backward and the step line.
+
+**THREE MEMORY BUGS, ~463 GB, all invisible at stride 2 and fatal at stride 1:**
+
+| bug | cost at stride 1 | mechanism |
+|---|---|---|
+| `randperm(n)[:32768]` retained the whole permutation | **146 GB** | the slice is a VIEW over the full n-element int64 tensor, and `.to(device)` is a no-op when the latent is already on CPU, so nothing forced a copy. `.clone()` fixes it. |
+| duplicate Adam state | **211 GB** | `torch.optim.Adam.step()` ALLOCATES exp_avg/exp_avg_sq for every param it visits. The non-pipeline path already removed the latent groups first; both pipeline paths called a bare `opt.step()`, giving every latent a SECOND full set on top of grad-release's. |
+| held-out snapshot cloned every latent | **106 GB** | `scales = scale_only + latents`, and `_snap()` does `t.detach().clone()` over `scales` -- a THIRD full fp32 copy. Now `--no-latent-snapshot`. |
+
+**How they were found, after four blind OOM kills.** Polling could never catch these: with swap
+disabled the kernel's reclaim starves userspace samplers exactly when memory spikes, so a 0.5 s
+catcher logged nothing for the final minutes before a kill. Two instruments cracked it:
+* `host_mem_audit()` -- cgroup memory at named phases, which localised the randperm retention to one
+  list comprehension (anon 125 -> 271 GB across a single line).
+* `host_tensor_inventory()` -- every live CPU tensor grouped by dtype+shape, DEDUPED BY STORAGE so
+  views are charged once and genuine duplicates show as xN. Run at `--tw-layer-stride 64` (one layer,
+  ~17 GB, cannot OOM) it showed every latent shape at **x2 before step 1 and x3 after**, where 1 and 2
+  were correct. Scaling down until the bug fits in a safe run is what made it visible.
+
+**Two of the three were documented behaviour the code did not have**: the randperm comment said "move
+only the 32k survivors" (the clone is what makes that true), and the memory model in 9e already named
+"that third full copy of every latent (latents + Adam moment + snapshot)".
+
+**CAVEAT THAT INVALIDATES THE CAMPAIGN'S ABSOLUTE NUMBERS.** Every throughput arm in 13a-13n ran at
+`--lr 0`, where `_lat_step_one` is SKIPPED (`if param.grad is not None and g["lr"] != 0.0`). The
+optimizer never ran and Adam state was never allocated. Those runs compare CONFIGURATIONS validly
+against each other, but they understate real training: stride 2 measured 149.3 s/step at lr 0, while
+stride 1 with real updates is 501.9 s/step against a 2.15x latent count. Plan arm B from 13p, not 13n.
+
+**Projection at this rate**: 5120 tokens/step (mb 2 x seq 2560) -> 16M tokens = 3125 steps = **18.2
+days**. Still open as levers: the fp32 lm_head copy on rank 0 (~5 GB), Wlm held twice (~4.7 GB), the
+teacher cache materialising 6244 sequences for a 12-sample run, and P1 (13m, ceiling -17.3%).
