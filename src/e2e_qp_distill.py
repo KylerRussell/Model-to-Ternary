@@ -195,7 +195,10 @@ class TernaryScaleLinear(nn.Module):
                     latent_gpu = (_UseTransferred.apply(self.latent, _buf) if _buf is not None
                                   else self.latent.to(self.scale.device, dtype=_dt, non_blocking=True))
                 else:
+                    _th0 = _clock()
                     _gcp = self.latent.to(self.scale.device, dtype=_dt, non_blocking=True)
+                    _PROF_ACC["h2d"] += _clock() - _th0
+                    _PROF_ACC["n_h2d"] += 1
                     # Without prefetch there is no _UseTransferred in the graph, so the gradient's
                     # return trip is a plain `.to()` into PAGEABLE memory -- 274 ms per 191 MB latent
                     # versus 49.7 ms for the pinned forward copy, and blocking on both thread and
@@ -890,6 +893,15 @@ _GRAD_PIN_ON = False
 # both ranks that is ~150 GB of avoidable resident memory. The gradient is consumed SYNCHRONOUSLY here
 # (stage -> step -> release) so only one buffer is ever live: size it to the largest latent and slice.
 # Reusing one buffer also keeps its pages warm, which is the entire point of the fused path.
+# Per-step cost decomposition of the latent path. PP_PROF already shows rank 0's BACKWARD owns nearly
+# the whole step, but not what inside it. These buckets separate the candidates: streaming latents in
+# (h2d), shipping gradients home (d2h), the CPU optimizer (adam), and the remainder (GPU compute +
+# autograd graph). ~2k timing calls per step at ~50 ns each, so it is always-on and free.
+_PROF_ACC = {"h2d": 0.0, "d2h": 0.0, "adam": 0.0, "n_h2d": 0, "n_step": 0}
+# NOT _t.time(): dequant() and others bind a LOCAL `_t`, which shadows the module-level
+# `import time as _t` for the whole function and raises UnboundLocalError. This file has been bitten
+# by that shadowing before (a local _t broke the nested log() closure). Bind the function once here.
+_clock = _t.time
 _LAT_GRAD_ARENA = {}    # dtype -> flat host buffer, grown on demand, never freed
 _LAT_GRAD_BUF = {}      # (unused; kept so --latent-pin-grad's staging path below still resolves)
 _LAT_RELEASE = {}       # id(param) -> (param, release_hook); set when grad-release is armed
@@ -924,9 +936,14 @@ def _stage_and_step(param, g):
         _a = torch.empty(_n, dtype=g.dtype)
         _LAT_GRAD_ARENA[g.dtype] = _a
     _buf = _a[:_n].view(param.shape)
-    _buf.copy_(g.reshape(param.shape))
+    _t0 = _clock()
+    _buf.copy_(g.reshape(param.shape))          # the D2H itself
+    _t1 = _clock()
     _p.grad = _buf
-    _rel(_p)
+    _rel(_p)                                    # candidate mask + block-256 Adam on CPU
+    _PROF_ACC["d2h"] += _t1 - _t0
+    _PROF_ACC["adam"] += _clock() - _t1
+    _PROF_ACC["n_step"] += 1
     return True
 
 
@@ -3129,6 +3146,12 @@ def train(args):
             dist.broadcast(_klt, src=1)
             _kl_acc = float(_klt[0])
             if _prof:
+                _ba = _PROF_ACC
+                log(f"   [lat-prof] r{_PP['rank']} h2d={_ba['h2d']:6.1f}s(n={_ba['n_h2d']}) "
+                    f"d2h={_ba['d2h']:6.1f}s adam={_ba['adam']:6.1f}s(n={_ba['n_step']})")
+                for _k in ("h2d", "d2h", "adam"):
+                    _PROF_ACC[_k] = 0.0
+                _PROF_ACC["n_h2d"] = _PROF_ACC["n_step"] = 0
                 _p1 = torch.zeros(4, dtype=torch.float64, device=device)
                 if _PP["rank"] == 1:
                     _p1[0] = _pt["wait"]; _p1[1] = _pt["fwd"]; _p1[2] = _pt["bwd"]; _p1[3] = _pt["send"]
