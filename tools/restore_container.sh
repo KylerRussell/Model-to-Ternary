@@ -8,7 +8,11 @@
 # check). This script makes recovery one command instead of an archaeology session.
 #
 # WHAT SURVIVES (do not reinstall):  ~/Documents/Model-to-Ternary (repo, .venv, py-spy, data/, output*/),
-#   ~/.cache/huggingface, ~/_scratch_naive27b, ~/.ssh, /tmp scratchpads.
+#   ~/.cache/huggingface, ~/_scratch_naive27b, ~/.ssh.
+# WHAT DOES NOT: /tmp. An earlier version of this comment claimed /tmp scratchpads survive -- they do
+#   NOT. Two long measurement runs were lost to that assumption (a 12-arm, 11.5 h sweep with zero arms
+#   completed). Put anything a long run needs to survive under ~/Documents/Model-to-Ternary/output_*
+#   (gitignored and durable), never /tmp.
 # WHAT RESETS: /usr/lib CUDA userspace libs, apt packages (time, rsync, numactl), tailscale + its state.
 #
 #   bash tools/restore_container.sh          # restore everything
@@ -51,10 +55,18 @@ fi
 # gh: the git credential helper is configured to use it, so without it even `git ls-remote` fails
 # with "could not read Username". The TOKEN survives in ~/.config/gh (that is under /home); only
 # the binary is wiped, so reinstalling is the entire fix — no re-login needed.
+# --reinstall AND post-verify, both essential. The container reset wipes /usr/bin but leaves dpkg's
+# database intact, so a plain `apt-get install` says "already newest version" and exits 0 while the
+# binary is still missing. This script reported "numactl restored" for a numactl that did not exist;
+# the NUMA-bound sweep then died instantly with exitcode 127 and looked like a torchrun problem.
+# Trust the probe, never apt's exit code.
 for pkg in time rsync numactl gh; do
-  case $pkg in time) probe=/usr/bin/time;; *) probe=$(command -v $pkg 2>/dev/null || echo /nonexistent);; esac
-  if [ -x "$probe" ]; then say "$pkg" "ok"; ok=$((ok+1))
-  elif need "$pkg"; then sudo apt-get install -y -q "$pkg" >/dev/null 2>&1 && { say "$pkg" "restored"; fixed=$((fixed+1)); } || say "$pkg" "FAILED"; fi
+  case $pkg in time) probe=/usr/bin/time;; *) probe=/usr/bin/$pkg;; esac
+  if [ -x "$probe" ]; then say "$pkg" "ok"; ok=$((ok+1)); continue; fi
+  if [ "$CHECK" -eq 1 ]; then say "$pkg" "MISSING (--check: not fixing)"; manual=$((manual+1)); continue; fi
+  sudo apt-get install -y -q --reinstall "$pkg" >/dev/null 2>&1
+  if [ -x "$probe" ] || command -v "$pkg" >/dev/null 2>&1; then say "$pkg" "restored"; fixed=$((fixed+1))
+  else say "$pkg" "FAILED — apt exited 0 but $probe is still missing"; manual=$((manual+1)); fi
 done
 
 # ── 3. tailscale (needed to reach the old Arch box). No systemd here, so tailscaled must be started

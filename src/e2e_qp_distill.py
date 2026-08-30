@@ -33,10 +33,12 @@ Typical flow:
       --out ./output_e2eqp/modified_model --seq 1024 --steps 500 --lr 2e-4
 """
 import argparse
+import contextlib
 import gc
 import json
 import math
 import time as _t
+from collections import OrderedDict
 import os
 import random
 import shutil
@@ -137,6 +139,20 @@ class TernaryScaleLinear(nn.Module):
                     return g
                 deq.register_hook(_acc)
             return deq.reshape(self.out_features, self.in_features)
+        if (_SPIKE_NO_H2D and getattr(self, "latent", None) is not None
+                and self.latent.device != self.scale.device):
+            # See _SPIKE_NO_H2D: no H2D at all. Same GEMM, same D2H + step in the backward, so the
+            # only thing removed vs the real path is the latent transfer itself.
+            _t = unpack_2bit(self.packed, self.out_features * self.in_features).to(self.scale.device)
+            _t = _t.reshape(self.n_blocks, self.block_size).to(self.scale.dtype)
+            _dq = _t * self.scale.unsqueeze(1).clamp_min(1e-8)
+            if self.training and torch.is_grad_enabled() and _dq.requires_grad:
+                _lat = self.latent
+                def _spike_hook(g, _p=_lat):
+                    _stage_and_step(_p, g)
+                    return g
+                _dq.register_hook(_spike_hook)
+            return _dq.reshape(self.out_features, self.in_features)
         if getattr(self, "latent", None) is not None:
             # --latent-offload: the latent lives in CPU RAM (fp32 params AND their grads, 6.04GB for all 32
             # down_proj) and is streamed to the GPU for this layer's forward. Because the module's forward runs
@@ -163,15 +179,32 @@ class TernaryScaleLinear(nn.Module):
                 # above always intended.
                 if _PF_ON:
                     _buf = _pf_take(self)
-                    # hand off to the NEXT latent module before we compute, so its copy overlaps this
-                    # layer's dequant + matmul instead of stalling when we reach it
+                    # Chain to the module that runs NEXT -- and which that is depends on the pass.
+                    # Gradient checkpointing recomputes layers in REVERSE during backward, so a
+                    # forward-only chain prefetched layers that had already run: nothing consumed
+                    # those buffers, they leaked, and because _pf_start early-returns on ids already
+                    # present they also blocked all later prefetching. Second visit == recompute.
                     _i = getattr(self, "_lat_idx", -1)
-                    if 0 <= _i < len(_LAT_ORDER) - 1:
-                        _pf_start(_LAT_ORDER[_i + 1], _dt)
+                    if id(self) in _PF_SEEN:
+                        _nx = _LAT_ORDER[_i - 1] if _i - 1 >= 0 else None
+                    else:
+                        _PF_SEEN.add(id(self))
+                        _nx = _LAT_ORDER[_i + 1] if 0 <= _i < len(_LAT_ORDER) - 1 else None
+                    if _nx is not None:
+                        _pf_start(_nx, _dt)
                     latent_gpu = (_UseTransferred.apply(self.latent, _buf) if _buf is not None
                                   else self.latent.to(self.scale.device, dtype=_dt, non_blocking=True))
                 else:
-                    latent_gpu = self.latent.to(self.scale.device, dtype=_dt, non_blocking=True)
+                    _th0 = _clock()
+                    _gcp = self.latent.to(self.scale.device, dtype=_dt, non_blocking=True)
+                    _PROF_ACC["h2d"] += _clock() - _th0
+                    _PROF_ACC["n_h2d"] += 1
+                    # Without prefetch there is no _UseTransferred in the graph, so the gradient's
+                    # return trip is a plain `.to()` into PAGEABLE memory -- 274 ms per 191 MB latent
+                    # versus 49.7 ms for the pinned forward copy, and blocking on both thread and
+                    # stream. Wrap it so the pinned-staging backward applies here too.
+                    latent_gpu = (_UseTransferred.apply(self.latent, _gcp)
+                                  if (_GRAD_PIN_ON or _OFFLOAD_STEP_ON) else _gcp)
             else:
                 latent_gpu = self.latent
             # A4: ASSIGNMENT MOVES. A trainable FP latent (init = the GPTQ ternary*scale) is re-ternarized
@@ -806,9 +839,27 @@ def _place_latent(L, lat_off, dev):
 # zero gradients, which the frozen (lr=0) speed tests would NOT catch. _UseTransferred keeps the graph
 # intact: forward hands back the already-transferred buffer, backward ships the gradient back to CPU.
 _PF_ON = False
-_PF_BUF = {}                 # id(module) -> (gpu_tensor, cuda_event)
+_PF_BUF = OrderedDict()      # id(module) -> (gpu_tensor, cuda_event); BOUNDED, oldest evicted
 _PF_SIDE = {}                # device -> side stream
 _LAT_ORDER = []              # latent modules in execution order
+_PF_SEEN = set()             # module ids already visited THIS microbatch (2nd visit == recompute)
+_PF_DEPTH = 2                # max buffers in flight; unbounded growth was a 5.24 GB leak.
+# This is really a VRAM-for-speed dial. Measured at stride 2: depth 2 -> 127.9 s/step at 19.10 GB
+# reserved; the OLD leak effectively held ~255 buffers -> ~110 s/step at 24.39 GB. Those stranded
+# buffers were accidental GPU-RESIDENT latents, which is where that speed came from -- prefetching had
+# stopped working after step 1. Deeper = fewer host->device copies = faster, until VRAM runs out.
+
+
+def pf_reset():
+    """Drop every in-flight buffer and the visit marks. Called once per microbatch forward.
+
+    Without this, buffers survive across steps and a module can be handed one filled during the
+    PREVIOUS step -- harmless at --latent-lr 0 (latents never move, so every speed benchmark was blind
+    to it) but STALE LATENT VALUES once training. It also clears the stranded entries that used to
+    make _pf_start early-return forever, silently disabling prefetch after step 1.
+    """
+    _PF_BUF.clear()
+    _PF_SEEN.clear()
 
 
 # Pinned staging buffers for the gradient's trip back to the host, one per latent.
@@ -821,6 +872,41 @@ _LAT_ORDER = []              # latent modules in execution order
 _GRAD_PIN = {}          # id(param) -> pinned host buffer
 _GRAD_PIN_ON = False
 
+# ── FUSED OFFLOADED-LATENT GRADIENT (the single largest win measured on this path) ───────────────
+# For a CPU leaf, autograd's AccumulateGrad allocates a FRESH full-size host grad tensor every
+# backward. At 191 MB that is an mmap the kernel must fault in and zero: measured 46,721 minor page
+# faults per latent per backward, and it is the bulk of the step. Measured on one 47.8M-latent tensor
+# (H2D + backward, the real shape of the path):
+#
+#   plain .to()            -> AccumulateGrad allocates      400.7 ms   46,721 faults
+#   return persistent buf  -> AccumulateGrad still clones    168.9 ms   46,721 faults   (--latent-pin-grad)
+#   consume in backward, return None                          80.5 ms        0 faults   <- this path
+#
+# 320.2 ms/latent, which independently matches the 320.3 ms that a stage-by-stage breakdown could not
+# account for. At 320 backward-latents/step that is ~102 s of a 225 s step.
+#
+# The buffers are PAGEABLE on purpose: pinning is worth only 1.6 ms/latent here (pageable D2H is 3.67
+# vs 5.09 GB/s), while pinning 30.6 GB of grad buffers on top of 30.7 GB of pinned latents measured
+# 6.2% WORSE end-to-end.
+# ONE shared arena, not one buffer per param. Per-param buffers would be 30.7 GB on rank 0 -- exactly
+# the allocation --latent-grad-release exists to avoid ("saves 30.7GB of fp32 grad buffers"), and with
+# both ranks that is ~150 GB of avoidable resident memory. The gradient is consumed SYNCHRONOUSLY here
+# (stage -> step -> release) so only one buffer is ever live: size it to the largest latent and slice.
+# Reusing one buffer also keeps its pages warm, which is the entire point of the fused path.
+# Per-step cost decomposition of the latent path. PP_PROF already shows rank 0's BACKWARD owns nearly
+# the whole step, but not what inside it. These buckets separate the candidates: streaming latents in
+# (h2d), shipping gradients home (d2h), the CPU optimizer (adam), and the remainder (GPU compute +
+# autograd graph). ~2k timing calls per step at ~50 ns each, so it is always-on and free.
+_PROF_ACC = {"h2d": 0.0, "d2h": 0.0, "adam": 0.0, "n_h2d": 0, "n_step": 0}
+# NOT _t.time(): dequant() and others bind a LOCAL `_t`, which shadows the module-level
+# `import time as _t` for the whole function and raises UnboundLocalError. This file has been bitten
+# by that shadowing before (a local _t broke the nested log() closure). Bind the function once here.
+_clock = _t.time
+_LAT_GRAD_ARENA = {}    # dtype -> flat host buffer, grown on demand, never freed
+_LAT_GRAD_BUF = {}      # (unused; kept so --latent-pin-grad's staging path below still resolves)
+_LAT_RELEASE = {}       # id(param) -> (param, release_hook); set when grad-release is armed
+_OFFLOAD_STEP_ON = False
+
 
 def _grad_pin_buf(like, key):
     b = _GRAD_PIN.get(key)
@@ -828,6 +914,46 @@ def _grad_pin_buf(like, key):
         b = torch.empty(like.shape, dtype=like.dtype, pin_memory=True)
         _GRAD_PIN[key] = b
     return b
+
+
+def _stage_and_step(param, g):
+    """Stage a latent gradient into the shared host arena and run its optimizer step.
+
+    Factored out of _UseTransferred.backward so alternative dequant paths can reuse the exact same
+    D2H + release-hook sequence, keeping their cost comparable.  Returns True if it handled it."""
+    _ent = _LAT_RELEASE.get(id(param))
+    if _ent is None:
+        return False
+    _p, _rel = _ent
+    if g.dtype != param.dtype:
+        g = g.to(param.dtype)
+    # Normalise to the PARAM's shape, not to flat: latents are 2-D ([5120, 17408]) so `param.grad =`
+    # rejects a flattened buffer, while the spike path delivers grad shaped [n_blocks, block_size].
+    # Same numel either way.
+    _n = g.numel()
+    _a = _LAT_GRAD_ARENA.get(g.dtype)
+    if _a is None or _a.numel() < _n:
+        _a = torch.empty(_n, dtype=g.dtype)
+        _LAT_GRAD_ARENA[g.dtype] = _a
+    _buf = _a[:_n].view(param.shape)
+    _t0 = _clock()
+    _buf.copy_(g.reshape(param.shape))          # the D2H itself
+    _t1 = _clock()
+    _p.grad = _buf
+    _rel(_p)                                    # candidate mask + block-256 Adam on CPU
+    _PROF_ACC["d2h"] += _t1 - _t0
+    _PROF_ACC["adam"] += _clock() - _t1
+    _PROF_ACC["n_step"] += 1
+    return True
+
+
+# SPIKE (timing only — NOT numerically correct): skip the latent H2D entirely and build the weight
+# from the already-GPU-resident packed trits, with an all-ones STE mask. This measures the UPPER
+# BOUND on what P1 ("GPU holds the discrete state, CPU holds the continuous state") could buy, before
+# paying for bit-packed masks and delta sync. Valid as a TIMING probe only at --latent-lr 0, where no
+# assignment moves so the resident trits are still current; the mask is wrong, which does not matter
+# when nothing is updated. NEVER use for a real run.
+_SPIKE_NO_H2D = os.environ.get("SPIKE_NO_H2D") == "1"
 
 
 class _UseTransferred(torch.autograd.Function):
@@ -840,6 +966,15 @@ class _UseTransferred(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, g):
+        # FUSED PATH: stage the gradient into a persistent host buffer, run the latent's optimizer
+        # step directly, and return None for the CPU leaf so AccumulateGrad never runs -- which is
+        # what removes the per-backward 191 MB mmap + page-fault + zero (see _LAT_GRAD_BUF above).
+        # Semantics are unchanged: the same release hook does the same candidate mask and the same
+        # Adam step it did when autograd called it, just without the allocation in between.
+        if _OFFLOAD_STEP_ON and ctx.src_device.type == "cpu":
+            _ent = _LAT_RELEASE.get(ctx.key)
+            if _ent is not None and _stage_and_step(_ent[0], g):
+                return None, None
         # mirror of `.to(device, dtype)`: send the gradient back to the CPU leaf
         if _GRAD_PIN_ON and ctx.src_device.type == "cpu":
             if g.dtype != ctx.src_dtype:
@@ -876,6 +1011,8 @@ def _pf_start(mod, dtype):
         ev = torch.cuda.Event()
         ev.record(st)
     _PF_BUF[id(mod)] = (buf, ev)
+    while len(_PF_BUF) > _PF_DEPTH:      # bound it: an unevicted buffer is a full latent of VRAM
+        _PF_BUF.popitem(last=False)
 
 
 def _pf_take(mod):
@@ -889,20 +1026,391 @@ def _pf_take(mod):
     buf.record_stream(cur)          # keep the allocator from reusing it while this stream reads it
     return buf
 
-def promote_latents_to_gpu(model, budget_bytes, reserve_bytes=2_000_000_000):
+
+
+# ── PIPELINE STAGE SPLIT (for 1F1B microbatch overlap) ───────────────────────────────────────────
+# Naive layer-split model parallelism runs one stage at a time: GPU0 works while GPU1 idles and vice
+# versa, so ~half the machine is wasted (measured: GPU0 98%, GPU1 0%). Overlap requires >=2
+# microbatches in flight, which requires calling the two halves SEPARATELY -- HF's forward runs all 64
+# layers internally, so there is no seam to interleave on.
+#
+# These reproduce Qwen3_5TextModel.forward exactly, split at `split`. Everything the layer loop needs
+# (both mask types, rotary embeddings, text position ids) is computed once in stage 0 and handed to
+# stage 1. Verified against the monolithic forward before use -- an approximation here would corrupt
+# training in a way no throughput benchmark could see.
+def _pipe_base(core):
+    """The text model that actually owns .layers/.norm/.embed_tokens."""
+    m = core.model
+    return m.language_model if hasattr(m, "language_model") else m
+
+
+def pipe_make_ctx(core, inputs_embeds):
+    """Masks + rotary + text position ids for a given embedded batch.
+
+    Split out so RANK 1 can rebuild the context locally instead of receiving it. Both ranks read the
+    same calib file and iterate the same microbatch indices, so rank 1 knows the ids; shipping the
+    masks would be far more traffic than the 26 MB activation for no benefit.
+    """
+    from transformers.masking_utils import create_causal_mask
+    try:
+        from transformers.masking_utils import create_recurrent_attention_mask
+    except Exception:
+        create_recurrent_attention_mask = create_causal_mask
+    base = _pipe_base(core)
+    position_ids = torch.arange(inputs_embeds.shape[1], device=inputs_embeds.device)
+    position_ids = position_ids.view(1, 1, -1).expand(4, inputs_embeds.shape[0], -1)
+    text_position_ids = position_ids[0]
+    position_ids = position_ids[1:]
+    mask_kwargs = {"config": base.config, "inputs_embeds": inputs_embeds, "attention_mask": None,
+                   "past_key_values": None, "position_ids": text_position_ids}
+    masks = {"full_attention": create_causal_mask(**mask_kwargs),
+             "linear_attention": create_recurrent_attention_mask(**mask_kwargs)}
+    pos_emb = base.rotary_emb(inputs_embeds, position_ids)
+    return pos_emb, masks, text_position_ids
+
+
+def pipe_stage0(core, ids, split):
+    """embeddings -> masks -> rotary -> layers[:split]. Returns (h, ctx) for stage 1."""
+    base = _pipe_base(core)
+    inputs_embeds = base.embed_tokens(ids)
+    pos_emb, masks, text_position_ids = pipe_make_ctx(core, inputs_embeds)
+    h = inputs_embeds
+    for i, layer in enumerate(base.layers[:split]):
+        h = layer(h, position_embeddings=pos_emb,
+                  attention_mask=masks[base.config.layer_types[i]],
+                  position_ids=text_position_ids, past_key_values=None, use_cache=False)
+    return h, (pos_emb, masks, text_position_ids)
+
+
+def pipe_stage1(core, h, ctx, split):
+    """layers[split:] -> final norm. Returns the post-norm hidden state."""
+    pos_emb, masks, text_position_ids = ctx
+    base = _pipe_base(core)
+    n = base.config.num_hidden_layers
+    for i in range(split, n):
+        h = base.layers[i](h, position_embeddings=pos_emb,
+                           attention_mask=masks[base.config.layer_types[i]],
+                           position_ids=text_position_ids, past_key_values=None, use_cache=False)
+    return base.norm(h)
+
+
+def pipe_mem_eff_loss(h, ids, Wlm, t_idx, t_val, args, ce_lt):
+    """Loss from a POST-NORM hidden state — the same math as the _mem_eff branch of the training step.
+
+    Factored out so the pipelined schedule computes an identical loss instead of a re-derived one.
+    (In the pipelined path pipe_stage1 RETURNS the post-norm hidden, so the norm hook is not used —
+    which also sidesteps the hook's single capture slot being clobbered with several microbatches in
+    flight.)"""
+    loss = chunked_hidden_state_loss(h, Wlm, t_idx, t_val, temperature=args.temperature,
+                                     loss_type=ce_lt, chunk_size=4096)
+    ce_w = float(getattr(args, "ce_weight", 0.0))
+    if ce_w > 0:
+        Hf = h[0, :-1, :]
+        tgt = ids[0, 1:]
+        n_ce = int(getattr(args, "ce_positions", 512) or 0)
+        if 0 < n_ce < Hf.shape[0]:
+            sel = torch.randint(0, Hf.shape[0], (n_ce,), device=Hf.device)
+            Hf, tgt = Hf[sel], tgt[sel]
+        loss = loss + ce_w * chunked_ce(Hf, Wlm, tgt)
+    return loss
+
+
+# ── MULTI-PROCESS PIPELINE PARALLELISM ───────────────────────────────────────────────────────────
+# In-process pipelining failed for a structural reason: ONE python thread cannot feed both GPUs,
+# because every layer's dequant() blocks on a host->device latent transfer (v1 278, v2 144.9 vs 131.8
+# s/microbatch, GPU1 pinned at 0%). Separate interpreters fix that -- measured POC: two ranks each
+# doing a full stage take the same wall time as one rank alone (79.6 vs 79.2 ms, 0.99x parallel
+# efficiency), and a pipelined round gives 1.58x over serial.
+#
+# Each rank owns a DISJOINT set of layers, so:
+#   * per-rank CPU latent memory HALVES (each rank only creates latents for its own layers)
+#   * there is NO gradient all-reduce at all -- unlike DDP, the ranks share no parameters
+# Only the boundary activation (26.2 MB at seq 2560) and its gradient cross between ranks, measured
+# at 12 ms, which is nothing against a ~130 s step.
+_PP = {"on": False, "rank": 0, "world": 1, "split": 0, "mb": 2}
+
+
+def pipe_heldout_kl_flips(core, cache, held_idx, batches, device, Wlm, temperature, loss_type, split):
+    """Stage-aware held-out eval — the --pipe-parallel counterpart of heldout_kl_flips.
+
+    heldout_kl_flips runs a WHOLE-MODEL forward, which no single rank can do: each owns a disjoint
+    slice of the layers and the rest sits on the host. This walks the reserved sequences through the
+    SAME two stages the training step uses, so the number stays comparable to the monolithic one.
+
+    Rank 1 alone can compute the metric (only it holds Wlm), but BOTH ranks need the answer: they
+    branch on it for selection and abort, and a branch taken on one rank only desyncs the next
+    collective into a watchdog timeout. So the result is broadcast rather than returned locally.
+    """
+    import torch.distributed as dist
+    was_training = core.training
+    core.eval()
+    rank = _PP["rank"]
+    tot_kl = 0.0; flips = 0; ntok = 0
+    try:
+        # no_grad for the same reason as the monolithic path: the chunked hidden-state route holds the
+        # graph via `h`, and a retained training-size graph OOMs the card right after a training step.
+        with torch.no_grad():
+            for bi in held_idx:
+                ids = batches[bi].to(device)
+                if rank == 0:
+                    h, _ = pipe_stage0(core, ids, split)
+                    dist.send(h.contiguous(), dst=1)
+                    del h
+                else:
+                    hb = torch.empty(1, ids.shape[1], _pipe_base(core).config.hidden_size,
+                                     dtype=torch.bfloat16, device=device)
+                    dist.recv(hb, src=0)
+                    hp = pipe_stage1(core, hb, pipe_make_ctx(core, hb), split)
+                    t_idx = cache["idx"][bi].unsqueeze(0).to(device)
+                    t_val = cache["val"][bi].unsqueeze(0).to(device)
+                    tot_kl += float(chunked_hidden_state_loss(hp, Wlm, t_idx, t_val,
+                                                              temperature=temperature,
+                                                              loss_type=loss_type, chunk_size=4096))
+                    am = _chunked_argmax(hp[0, :-1, :], Wlm, chunk=4096)
+                    flips += int((am != t_idx[0, :-1, 0]).sum()); ntok += hp.shape[1] - 1
+                    del hb, hp
+    finally:
+        if was_training:
+            core.train()
+    out = torch.zeros(2, dtype=torch.float64, device=device)
+    if rank == 1:
+        out[0] = tot_kl / max(1, len(held_idx))
+        out[1] = 100.0 * flips / max(1, ntok)
+    dist.broadcast(out, src=1)
+    return float(out[0]), float(out[1])
+
+
+def _layer_idx_of(name):
+    """Decoder layer index from a module path like '...layers.12.mlp.down_proj', else None."""
+    parts = name.split(".")
+    for i, tok in enumerate(parts):
+        if tok == "layers" and i + 1 < len(parts) and parts[i + 1].isdigit():
+            return int(parts[i + 1])
+    return None
+
+
+def pp_owns(idx):
+    """Does THIS rank own that decoder layer? Stage 0 = [0, split), stage 1 = [split, n)."""
+    if not _PP["on"] or idx is None:
+        return True
+    return (idx < _PP["split"]) if _PP["rank"] == 0 else (idx >= _PP["split"])
+
+
+
+def _pp_dev_for(name, device):
+    """Device a module should be BUILT on. Under pipeline parallelism, layers this rank does not own
+    are built straight onto the host: building them on the GPU first and relocating afterwards means
+    each rank transiently holds the WHOLE model on one card, which OOMs once the lm_head extraction
+    spike (~19 GB) lands on top of it."""
+    if not _PP["on"]:
+        return device
+    if _layer_idx_of(name) is None:
+        # non-layer modules: embeddings belong to stage 0, norm and lm_head to stage 1 (which owns the
+        # loss). lm_head in particular is 1.271B params -- keep it off the rank that never reads it.
+        if "lm_head" in name or name.startswith("model.norm") or ".norm." in name:
+            return device if _PP["rank"] == 1 else "cpu"
+        if "embed_tokens" in name:
+            return device if _PP["rank"] == 0 else "cpu"
+        return device
+    return device if pp_owns(_layer_idx_of(name)) else "cpu"
+
+def pp_sync_for_save(core, device):
+    """Ship rank 1's trained state to rank 0 so a saved model contains BOTH stages.
+
+    Each rank creates latents ONLY for the layers it owns (the pp_owns gate in the latent build), so
+    rank 0's copy of the stage-1 layers still holds ENTRY weights. save_export writes from rank 0
+    alone -- without this it silently ships a model whose second half was never trained, which looks
+    like a completed run and passes every check except the eval number.
+
+    Rank 1 folds its latents to hard trits -- the same round(L/s).clamp(-1,1) the STE uses, and the
+    on-disk format -- then sends packed+scale per module. Only decoder layers move: lm_head and the
+    embeddings are frozen on this path, so rank 0's copies are already correct. Both ranks walk the
+    same name-sorted list, so the sends and receives pair up without tags.
+    """
+    import torch.distributed as dist
+    if not _PP["on"]:
+        return 0
+    rank, split = _PP["rank"], _PP["split"]
+    moved = 0
+    with torch.no_grad():
+        for n, m in sorted(core.named_modules(), key=lambda kv: kv[0]):
+            if not isinstance(m, TernaryScaleLinear):
+                continue
+            li = _layer_idx_of(n)
+            if li is None or li < split:
+                continue                       # stage 0 -- rank 0 already holds the trained copy
+            if rank == 1:
+                if getattr(m, "latent", None) is not None:
+                    _s = m.scale.detach().to(m.latent.device).unsqueeze(1).clamp_min(1e-8)
+                    _t = torch.round(m.latent.reshape(m.n_blocks, m.block_size) / _s).clamp(-1, 1)
+                    m.packed.data = pack_2bit(_t.to(torch.int8)).to(m.packed.device)
+                dist.send(m.packed.data.to(device).contiguous(), dst=0)
+                dist.send(m.scale.data.to(device).float().contiguous(), dst=0)
+            else:
+                _pb = torch.empty(m.packed.shape, dtype=torch.uint8, device=device)
+                dist.recv(_pb, src=1)
+                _sc = torch.empty(m.scale.shape, dtype=torch.float32, device=device)
+                dist.recv(_sc, src=1)
+                m.packed.data = _pb.to(m.packed.device)
+                m.scale.data = _sc.to(m.scale.device, dtype=m.scale.dtype)
+                del _pb, _sc
+            moved += 1
+    return moved
+
+
+def place_for_pipeline(model, device):
+    """Owned layers to this rank's GPU; everything else stays on CPU, unused.
+
+    Rank 1 also needs the final norm (it computes the loss); rank 0 needs the embeddings. Both are
+    small. Non-owned layers are left on the host rather than deleted so the module tree, and hence
+    every name-based lookup, stays intact.
+    """
+    base = _pipe_base(model)
+    n = base.config.num_hidden_layers
+    n_gpu = n_cpu = 0
+    for i, layer in enumerate(base.layers):
+        # layer.to(device) would drag the CPU-OFFLOADED latents onto the GPU with the weights --
+        # measured 18.39 GB of latents resident on one rank, which is the whole card. Stash and
+        # restore them exactly as shard_model_across_gpus does.
+        stash = []
+        for m in layer.modules():
+            if getattr(m, "latent", None) is not None:
+                stash.append((m, m.latent.data, getattr(m, "_cand_mask", None),
+                              m.latent.data.device.type == "cpu"))
+        if pp_owns(i):
+            layer.to(device); n_gpu += 1
+        else:
+            layer.to("cpu"); n_cpu += 1
+        for m, ldata, cmask, was_cpu in stash:
+            m.latent.data = ldata if was_cpu else ldata.to(device)
+            if cmask is not None:
+                m._cand_mask = cmask if was_cpu else cmask.to(device)
+    if _PP["rank"] == 0:
+        base.embed_tokens.to(device)
+    else:
+        base.norm.to(device)
+    print(f"   [pp rank {_PP['rank']}] owns {n_gpu} layers on {device}, {n_cpu} idle on host "
+          f"(split at {_PP['split']})", flush=True)
+
+def host_tensor_inventory(tag, top=14):
+    """Inventory every live CPU tensor, grouped by dtype+shape, deduped BY STORAGE.
+
+    Phase probes say WHICH PHASE grows; this says WHAT IS HELD. Deduping on storage id is the point:
+    a view (e.g. randperm(n)[:32768]) is charged to its full backing storage exactly once, and a
+    genuine duplicate (two storages of the same shape) shows up as x2 instead of x1. That is the
+    signature we are hunting -- ~317 GB appearing between two 2 s samples is a duplication, not a
+    fill, since writing that much would take 10-30 s at memory bandwidth.
+    """
+    import gc, collections
+    seen = {}
+    for o in gc.get_objects():
+        try:
+            if torch.is_tensor(o) and o.device.type == "cpu":
+                st = o.untyped_storage() if hasattr(o, "untyped_storage") else o.storage()
+                sid = id(st)
+                if sid not in seen:
+                    seen[sid] = (str(o.dtype), tuple(o.shape), st.nbytes())
+        except Exception:
+            continue
+    agg, cnt = collections.Counter(), collections.Counter()
+    for dt, shape, nb in seen.values():
+        k = f"{dt} {shape}"
+        agg[k] += nb; cnt[k] += 1
+    tot = sum(agg.values())
+    print(f"   [tensors] {tag}: {tot/2**30:.1f} GiB live CPU tensors, {len(seen)} storages", flush=True)
+    for k, nb in agg.most_common(top):
+        print(f"      {nb/2**30:8.2f} GiB  x{cnt[k]:<5d} {k}", flush=True)
+
+
+def host_mem_audit(tag):
+    """Log cgroup memory at a named phase. The container is killed by the CGROUP (page cache counts,
+    RSS does not), and a 330 GB allocation burst once took us from 290 GB to the 620 GB limit in under
+    a minute with NO trainer log line in the preceding 10 minutes -- so an external sampler could see
+    that memory moved but never which phase moved it. Cheap: three small file reads."""
+    try:
+        _cg = "/sys/fs/cgroup" + open("/proc/self/cgroup").read().strip().split(":")[-1]
+        _cur = int(open(_cg + "/memory.current").read()) / 2**30
+        _mx = open(_cg + "/memory.max").read().strip()
+        _lim = int(_mx) / 2**30 if _mx != "max" else 0
+        _an = _fi = 0.0
+        for _ln in open(_cg + "/memory.stat"):
+            if _ln.startswith("anon "):
+                _an = int(_ln.split()[1]) / 2**30
+            elif _ln.startswith("file "):
+                _fi = int(_ln.split()[1]) / 2**30
+        print(f"   [hostmem] {tag}: {_cur:.0f}G/{_lim:.0f}G anon={_an:.0f}G cache={_fi:.0f}G "
+              f"({100*_cur/max(_lim,1):.0f}%)", flush=True)
+    except Exception as _e:
+        print(f"   [hostmem] {tag}: unavailable ({type(_e).__name__})", flush=True)
+
+
+def vram_audit(tag, model=None, extra=None):
+    """Report where GPU memory actually goes. Gated on VRAM_AUDIT=1.
+
+    Pipelining needs >=2 microbatches in flight, i.e. ~2x the activation footprint, and the active
+    card currently sits at 23.77 of 24 GB with ~200 MB free. Before building a 1F1B schedule that
+    would immediately OOM, find out what is resident and whether any of it is recoverable.
+    Categories are measured, not estimated: packed ternary weights and other buffers/params are walked
+    directly; the remainder (allocated minus what we can name) is activations + transients.
+    """
+    if os.environ.get("VRAM_AUDIT", "0") != "1":
+        return
+    torch.cuda.synchronize()
+    lines = [f"[vram] === {tag} ==="]
+    per_dev_named = {}
+    if model is not None:
+        cat = {}
+        for _n, m in model.named_modules():
+            for attr in ("packed", "scale", "bias", "latent"):
+                t = getattr(m, attr, None)
+                if torch.is_tensor(t) and t.device.type == "cuda":
+                    k = (t.device, attr)
+                    cat[k] = cat.get(k, 0) + t.numel() * t.element_size()
+        for _n, prm in model.named_parameters():
+            if prm.device.type == "cuda" and not any(prm is getattr(m, a, None)
+                                                     for _, m in model.named_modules() for a in ("scale", "latent")):
+                k = (prm.device, "other params")
+                cat[k] = cat.get(k, 0) + prm.numel() * prm.element_size()
+        for _n, b in model.named_buffers():
+            if b.device.type == "cuda":
+                k = (b.device, "buffers")
+                cat[k] = cat.get(k, 0) + b.numel() * b.element_size()
+        for (dev, what), nb in sorted(cat.items(), key=lambda kv: -kv[1]):
+            lines.append(f"[vram]   {str(dev):9s} {what:14s} {nb/1e9:8.2f} GB")
+            per_dev_named[dev] = per_dev_named.get(dev, 0) + nb
+    for i in range(torch.cuda.device_count()):
+        d = torch.device(f"cuda:{i}")
+        alloc = torch.cuda.memory_allocated(d) / 1e9
+        reserv = torch.cuda.memory_reserved(d) / 1e9
+        peak = torch.cuda.max_memory_allocated(d) / 1e9
+        free, tot = torch.cuda.mem_get_info(d)
+        named = per_dev_named.get(d, 0) / 1e9
+        lines.append(f"[vram]   cuda:{i} allocated {alloc:6.2f} reserved {reserv:6.2f} peak {peak:6.2f} "
+                     f"| named {named:6.2f} unnamed {alloc-named:6.2f} | free {free/1e9:5.2f}/{tot/1e9:5.2f} GB")
+    if extra:
+        lines.append(f"[vram]   {extra}")
+    print("\n".join(lines), flush=True)
+
+def promote_latents_to_gpu(model, budget_bytes, reserve_bytes=2_000_000_000, state_mult=1.0):
     """Move as many latents as fit onto their own layer's GPU, newest-free-VRAM aware.
 
     Called AFTER the lm_head weight extraction so it budgets against VRAM that is actually free.
     A resident latent costs 4 B/latent of VRAM but removes that layer's host->device copy entirely
-    from every forward (and every checkpoint recompute), which is the cost the pinning result showed
-    dominates. `reserve_bytes` keeps headroom for activations so we do not trade a transfer win for
-    an OOM.
+    from every forward (and every checkpoint recompute). Measured on one 47.8M-latent linear: 283.4 ms
+    offloaded (pinned) vs 13.7 ms resident -- 20.7x, and the gap is worst in the BACKWARD (232.0 vs
+    5.2 ms), where the full-size fp32 grad must cross D2H and then accumulate into the CPU leaf.
+
+    `state_mult` scales each latent's cost by the optimizer state that will be allocated on the SAME
+    device (_state_buf uses zeros_like(param), so promoting the latent promotes its state too):
+    2.0 for adam-blockv (latent + exp_avg + a negligible per-block v), 3.0 for full Adam. Without it
+    a "10 GB" budget quietly commits 20-30 GB and OOMs. `reserve_bytes` keeps headroom for activations.
     """
     if budget_bytes <= 0:
         return
     mods = [m for m in model.modules() if getattr(m, "latent", None) is not None]
     used = 0
     n = 0
+    pending_state = 0          # optimizer state that will be allocated LATER, on this same card
     for m in mods:
         L = m.latent.data
         if L.device.type != "cpu":
@@ -910,10 +1418,16 @@ def promote_latents_to_gpu(model, budget_bytes, reserve_bytes=2_000_000_000):
         dev = m.scale.device                      # follow the layer this latent belongs to
         if dev.type != "cuda":
             continue
-        nbytes = L.numel() * L.element_size()
+        lat_bytes = L.numel() * L.element_size()
+        nbytes = int(lat_bytes * state_mult)      # latent + its optimizer state
         free, _tot = torch.cuda.mem_get_info(dev)
-        if used + nbytes > budget_bytes or nbytes + reserve_bytes > free:
+        # `free` shrinks as latents move, but the Adam state is allocated LAZILY at the first step, so
+        # a check against `free` alone sees room that is already spoken for. Measured: promoting to a
+        # 12 GB budget left 16.33 GB free looking healthy, then the state landed at step 1 and OOM'd
+        # the backward's checkpoint recompute. Carry the not-yet-allocated state explicitly.
+        if used + nbytes > budget_bytes or lat_bytes + pending_state + (nbytes - lat_bytes) + reserve_bytes > free:
             continue
+        pending_state += nbytes - lat_bytes
         m.latent.data = L.to(dev)
         if getattr(m, "_cand_mask", None) is not None:
             m._cand_mask = m._cand_mask.to(dev)
@@ -952,7 +1466,16 @@ def shard_model_across_gpus(model, n_dev, keep_latent_cpu=True):
         raise SystemExit(f"model-parallel: could not find a decoder layer list to split ({best[0] if best else None})")
     lname, layers = best
     n = len(layers)
-    owner = [devs[min(i * n_dev // n, n_dev - 1)] for i in range(n)]
+    # Split point. An EVEN layer split is NOT a balanced one: device 0 also carries embed_tokens, the
+    # final norm and the whole loss path (chunked KL + CE streaming Wlm), which is why it measured 98%
+    # utilisation while device 1 sat at 0%. Shifting layers off device 0 equalises the stages, and a
+    # balanced split is a precondition for pipelining to be worth anything -- overlapping a long stage
+    # with a short one is still gated by the long one.
+    _sp = int(os.environ.get("MP_SPLIT", "0") or 0)
+    if n_dev == 2 and 0 < _sp < n:
+        owner = [devs[0] if i < _sp else devs[1] for i in range(n)]
+    else:
+        owner = [devs[min(i * n_dev // n, n_dev - 1)] for i in range(n)]
 
     def _move(x, dev):
         if torch.is_tensor(x):
@@ -1030,7 +1553,7 @@ def build_student(student_path, orig_config_path, block_size, device):
             continue
         bname = f"{name}.bias"                            # preserve a folded bias (e.g. Tequila deadzone->bias)
         b = _get_tensor(student_path, wmap, bname) if bname in wmap else None
-        tsl = TernaryScaleLinear.from_dense(w, block_size, bias=b, device=device)
+        tsl = TernaryScaleLinear.from_dense(w, block_size, bias=b, device=_pp_dev_for(name, device))
         parent = model
         *parents, leaf = name.split(".")
         for p in parents:
@@ -1046,7 +1569,7 @@ def build_student(student_path, orig_config_path, block_size, device):
                 t = _get_tensor(student_path, wmap, pname)
             except Exception:
                 continue
-            _assign_param(model, pname, t.to(device, torch.bfloat16))
+            _assign_param(model, pname, t.to(_pp_dev_for(pname, device), torch.bfloat16))
     for bname, b in list(model.named_buffers()):
         if b.device.type == "meta":
             try:
@@ -1172,7 +1695,8 @@ def build_student(student_path, orig_config_path, block_size, device):
         n_tw = 0
         for name, m in model.named_modules():
             if isinstance(m, TernaryScaleLinear) and getattr(m, "latent", None) is None \
-               and not getattr(m, "_arm_b", False) and _tw_match(name):
+               and not getattr(m, "_arm_b", False) and _tw_match(name) \
+               and pp_owns(_layer_idx_of(name)):        # pipeline: only this rank's layers
                 if arm_b:
                     m.enable_arm_b()                              # Arm B: mutable ternary + flip accumulator (no latent)
                 else:
@@ -1422,7 +1946,11 @@ def train(args):
     # DDP when launched via torchrun (LOCAL_RANK set); plain single-GPU otherwise.
     local_rank = int(os.environ.get("LOCAL_RANK", -1))
     world = int(os.environ.get("WORLD_SIZE", 1))
-    ddp = local_rank >= 0 and world > 1
+    # PIPELINE parallelism is NOT data parallelism: the ranks own disjoint layers, so DDP must stay off
+    # (no parameter is shared, so there is nothing to all-reduce; wrapping in DDP would also try to
+    # sync params that only exist on one rank).
+    _pp_on = bool(getattr(args, "pipe_parallel", False)) and local_rank >= 0 and world > 1
+    ddp = (local_rank >= 0 and world > 1) and not _pp_on
     if ddp:
         import torch.distributed as dist
         from datetime import timedelta
@@ -1433,6 +1961,15 @@ def train(args):
         torch.cuda.set_device(local_rank)
         device = f"cuda:{local_rank}"
         rank = dist.get_rank()
+    elif _pp_on:
+        import torch.distributed as dist
+        from datetime import timedelta
+        dist.init_process_group(backend="nccl", timeout=timedelta(minutes=60))
+        torch.cuda.set_device(local_rank)
+        device = f"cuda:{local_rank}"
+        rank = dist.get_rank()
+        _PP.update(on=True, rank=rank, world=world,
+                   mb=max(1, int(getattr(args, "pipe_parallel_mb", 2) or 2)))
     else:
         device = "cuda:0" if torch.cuda.is_available() else "cpu"
         rank = 0
@@ -1463,7 +2000,18 @@ def train(args):
     build_student._fp_model = getattr(args, "fp_model", None)
     build_student._col_scale = getattr(args, "col_scale", False)   # perpendicular col-scales (A6/A7 probe)
     build_student._sq_bits = getattr(args, "scale_qat_bits", 0)    # scale-QAT: fake-quant scales to n bits (STE)
+    if _PP["on"]:
+        from transformers import AutoConfig          # local: the module-level import lives in build_student
+        _cfg_tmp = AutoConfig.from_pretrained(str(args.orig_config_path), trust_remote_code=True)
+        _tc = getattr(_cfg_tmp, "text_config", _cfg_tmp)
+        _nl_pp = int(getattr(_tc, "num_hidden_layers"))
+        _env_sp = int(os.environ.get("MP_SPLIT", "0") or 0)
+        _PP["split"] = _env_sp if 0 < _env_sp < _nl_pp else _nl_pp // 2
+        print(f"   [pp rank {rank}] pipeline split at layer {_PP['split']}/{_nl_pp}, "
+              f"{_PP['mb']} microbatches in flight", flush=True)
     model, config = build_student(args.student_path, args.orig_config_path, BLOCK_SIZE, device)
+    if _PP["on"]:
+        place_for_pipeline(model, device)
     if _LAT_PLACE["n_gpu"] or _LAT_PLACE["n_pin"]:
         _pin_note = f", {_LAT_PLACE['n_pin']} pinned" if _LAT_PLACE["pin"] else ""
         log(f"   latent placement: {_LAT_PLACE['n_gpu']} GPU-resident "
@@ -1509,6 +2057,7 @@ def train(args):
       try:
         model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
         log("   gradient checkpointing enabled (non-reentrant)")
+        vram_audit("after build_student (weights only, no activations yet)", model)
       except Exception:
         try:
             model.gradient_checkpointing_enable()
@@ -1635,7 +2184,16 @@ def train(args):
                 or getattr(args, "train_weights", "none") not in (None, "none")
                 or os.environ.get("FORCE_MEM_EFF") == "1")   # scale-only at fine grids: avoid full-vocab logits
     _hidcap = {}
-    if _mem_eff:
+    # Under pipeline parallelism ONLY RANK 1 computes the loss, so only rank 1 needs the lm_head
+    # weight. Extracting it on rank 0 as well costs a ~19 GB transient (unpack_2bit materialises the
+    # 1.271B-element lm_head in fp32) for something that rank never reads -- which is what OOM'd rank 0
+    # at 22.67 GB even after its layers were placed correctly.
+    _need_wlm = _mem_eff and (not _PP["on"] or _PP["rank"] == 1)
+    # Defined unconditionally: rank 0 never builds Wlm (it computes no loss), but it does CALL the
+    # pipelined held-out eval, which takes both as arguments and ignores them on stage 0.
+    _Wlm = None
+    _ce_lt = "cakld" if getattr(args, "loss_fn", "topk_kl") == "cakld" else "topk_kl"
+    if _need_wlm:
         _base = core.model.language_model if hasattr(core.model, "language_model") else core.model
         _base.norm.register_forward_hook(lambda mod, inp, out: _hidcap.__setitem__("h", out))
         _lm_head_mod = core.lm_head
@@ -1649,7 +2207,40 @@ def train(args):
         # 2.5GB fp32 [V,H] intermediate each iteration and OOM. lm_head assignments/scale are held frozen on
         # this stage (no grad reaches them ⇒ Wlm stays valid); --train-weights targets the body, not lm_head.
         with torch.no_grad():
-            _w = _lm_head_mod.dequant() if hasattr(_lm_head_mod, "dequant") else _lm_head_mod.weight
+            # CHUNKED lm_head extraction. dequant() unpacks all 1.271B elements to FP32 (~5 GB) and
+            # then multiplies by the scale for another full-size temporary -- a ~19 GB spike that is
+            # most of a 24 GB card. It broke the GPU-residency budget, the single-GPU fit test and both
+            # pipeline ranks. The result is a FROZEN bf16 weight, so build it a row-block at a time:
+            # rows are contiguous in the packed layout (in_features is a multiple of both 4 and the
+            # 256-element scale block), so slicing rows slices packed bytes and scales cleanly.
+            if hasattr(_lm_head_mod, "dequant"):
+                _V = _lm_head_mod.out_features; _H = _lm_head_mod.in_features
+                _bs = _lm_head_mod.block_size
+                _rpb = _H // _bs                       # scale blocks per row
+                _rbytes = _H // 4                      # packed bytes per row (2 bits/value)
+                _sq = getattr(_lm_head_mod, "_sq_bits", 0)
+                _w = torch.empty(_V, _H, dtype=torch.bfloat16, device="cpu")
+                _CH = 8192
+                with torch.inference_mode():
+                    for _i in range(0, _V, _CH):
+                        _j = min(_i + _CH, _V)
+                        _pk = _lm_head_mod.packed[_i * _rbytes:_j * _rbytes]
+                        _sc = _lm_head_mod.scale[_i * _rpb:_j * _rpb]
+                        if _sq > 0:                    # mirror dequant()'s scale-QAT grid exactly
+                            _a = _sc.abs().clamp_min(1e-12).log()
+                            _st = max(_lm_head_mod._sq_hi - _lm_head_mod._sq_lo, 1e-6) / (2 ** _sq - 1)
+                            _q = ((_a - _lm_head_mod._sq_lo) / _st).round().clamp(0, 2 ** _sq - 1) * _st \
+                                 + _lm_head_mod._sq_lo
+                            _sc = _q.exp() * torch.sign(_sc)
+                        # NB: not named _t -- that is the module-level `import time as _t` used by the
+                        # nested log() closure; a local of that name makes it a free variable of train()
+                        # and log() then raises NameError on any rank that skips this block.
+                        _tern = unpack_2bit(_pk, (_j - _i) * _H).to(_sc.device).reshape(-1, _bs)
+                        _w[_i:_j].copy_((_tern * _sc.unsqueeze(1)).reshape(_j - _i, _H).to(torch.bfloat16).cpu())
+                        del _tern
+                torch.cuda.empty_cache()
+            else:
+                _w = _lm_head_mod.weight
             # OFFLOAD Wlm to CPU RAM (pinned). Both the chunked KL and the chunked CE stream vocab chunks
             # CPU→GPU on demand, so the 1.27GB [V,H] weight never sits resident on the GPU — that headroom
             # is exactly what the assignment latents need. (torch_pin fails on some setups; fall back to plain.)
@@ -1662,6 +2253,7 @@ def train(args):
         torch.cuda.empty_cache()
         _ce_lt = "cakld" if getattr(args, "loss_fn", "topk_kl") == "cakld" else "topk_kl"
         _mem_ctx = {"Wlm": _Wlm, "norm": _base.norm, "loss_type": _ce_lt}
+        vram_audit("after lm_head/Wlm setup", model)
         log(f"   MEM-EFFICIENT hidden-state loss ON (chunked KL + chunked CE, Wlm OFFLOADED to CPU "
             f"{tuple(_Wlm.shape)}; commit-beta unavailable on this path)")
         torch.cuda.empty_cache()          # release the lm_head dequant transient before promoting latents
@@ -1670,18 +2262,48 @@ def train(args):
 
     # GPU residency LAST: after the lm_head transient is freed, so the budget sees real free VRAM.
     # Placing latents earlier (in build_student) starved that ~5GB transient and OOM'd.
-    promote_latents_to_gpu(model, int(float(getattr(args, "latent_gpu_budget", 0.0)) * 1e9))
+    # Adam state is allocated with zeros_like(param), so a promoted latent drags its state onto the
+    # same card. Charge the budget for it or the promotion OOMs at the first optimizer step.
+    _lopt_nm = str(getattr(args, "latent_opt", "adam")).lower()
+    _st_mult = (2.0 if _lopt_nm == "adam-blockv" else
+                (2.0 if float(getattr(args, "latent_momentum", 0.9)) > 0 else 1.0) if _lopt_nm == "sgd"
+                else 3.0)
+    # 6 GB reserve, not the 2 GB default. Measured: the checkpoint recompute in the backward peaks at
+    # ~4.2 GB of activations at seq 2560, and a 4 GB reserve OOM'd there by 340 MB.
+    host_mem_audit("before promote_latents_to_gpu")
+    promote_latents_to_gpu(model, int(float(getattr(args, "latent_gpu_budget", 0.0)) * 1e9),
+                           reserve_bytes=6_000_000_000, state_mult=_st_mult)
+    # PINNED GRADIENT STAGING -- independent of prefetching. This used to be assigned only inside the
+    # `--latent-prefetch` branch below, so --latent-pin-grad was a SILENT NO-OP for every run that did
+    # not also pass --latent-prefetch (and the warning meant to catch that sat in the same dead block).
+    # Cost of the bug, measured by an op-level trace of one real step at split 40:
+    #     Memcpy DtoH (Device -> Pageable)   87.75 s   320 calls   274 ms each   (0.70 GB/s)
+    #     Memcpy HtoD (Pinned  -> Device)    31.81 s   640 calls    49.7 ms each (3.84 GB/s)
+    # i.e. the gradient trip home ran 5.5x slower than the same-sized forward transfer purely because
+    # its destination was pageable -- and a pageable cudaMemcpyAsync is not async: it blocks the
+    # calling thread AND the stream, which is why cudaMemcpyAsync was 89% of rank 0's self CPU time.
+    global _GRAD_PIN_ON
+    _GRAD_PIN_ON = (bool(getattr(args, "latent_pin_grad", False))
+                    and bool(getattr(args, "latent_grad_release", False)))
+    if getattr(args, "latent_pin_grad", False) and not _GRAD_PIN_ON:
+        log("   [warn] --latent-pin-grad ignored (requires --latent-grad-release)")
+    if _GRAD_PIN_ON:
+        log("   pinned gradient staging ON (latent grads land in pinned host memory, not pageable)")
     if getattr(args, "latent_prefetch", False):
-        global _PF_ON, _GRAD_PIN_ON
+        global _PF_ON
         _PF_ON = True
+        globals()["_PF_DEPTH"] = max(1, int(getattr(args, "latent_prefetch_depth", 2) or 2))
         # pinned gradient staging: only safe when each backward's grad is consumed before the next
         # (grad-release clears param.grad every step). With --accum > 1 autograd would accumulate INTO
         # the reused buffer, so fall back to the plain pageable path there.
-        _GRAD_PIN_ON = (bool(getattr(args, "latent_pin_grad", False))
-                        and bool(getattr(args, "latent_grad_release", False))
-                        and int(getattr(args, "accum", 1) or 1) == 1)
-        if getattr(args, "latent_pin_grad", False) and not _GRAD_PIN_ON:
-            log("   [warn] --latent-pin-grad ignored (needs --latent-grad-release and --accum 1)")
+        # Reusing one pinned buffer per latent is safe iff param.grad is consumed and cleared before
+        # the next backward writes it. --latent-grad-release guarantees exactly that: its
+        # post-accumulate-grad hook steps and then sets param.grad = None on EVERY backward, including
+        # every microbatch under --accum > 1. So grad-release is the real precondition; the earlier
+        # extra `accum == 1` requirement was over-cautious and would have silently disabled pin-grad
+        # (and so confounded) any accumulation experiment.
+        # (Note grad-release + accum applies the latent update per MICROBATCH rather than accumulating
+        # across them — pre-existing behaviour of that flag, unchanged here.)
         _LAT_ORDER.clear()
         for _m in core.modules():                 # definition order ~= execution order for a transformer
             if getattr(_m, "latent", None) is not None:
@@ -1713,6 +2335,7 @@ def train(args):
             if getattr(_m, "latent", None) is not None:
                 _m._latent_bf16_compute = True
         log("   latent bf16-compute ON (fp32 master on CPU, bf16 GPU copy + bf16 grad)")
+    host_mem_audit("after latents created / before grad-release setup")
     _grad_release = bool(getattr(args, "latent_grad_release", False)) and bool(latents)
     if _grad_release:
         _lat_set = {id(p_) for p_ in latents}
@@ -1723,25 +2346,14 @@ def train(args):
             for p_ in g["params"]:
                 if id(p_) in _lat_set:
                     _lat_group_of[id(p_)] = g
-        _state_dir = None
-        if getattr(args, "latent_state_nvme", False):
-            import numpy as _np
-            _state_dir = Path(args.out).parent / "_adam_state"
-            shutil.rmtree(_state_dir, ignore_errors=True)
-            _state_dir.mkdir(parents=True, exist_ok=True)
-            log(f"   Adam state NVMe-backed at {_state_dir} "
-                f"(frees {sum(p_.numel() for p_ in latents)*8/1e9:.1f}GB of RAM; slower per step)")
-
         def _state_buf(param, tag, idx):
-            """Zeroed fp32 buffer shaped like `param`: in RAM, or NVMe-backed when --latent-state-nvme.
-            Adam touches exp_avg/exp_avg_sq exactly ONCE per step per tensor, so a memmap is a good trade:
-            the page cache absorbs the reads and only dirty pages are written back."""
-            if _state_dir is None:
-                return torch.zeros_like(param, memory_format=torch.preserve_format)
-            import numpy as _np
-            f = _state_dir / f"{tag}_{idx}.dat"
-            arr = _np.memmap(str(f), dtype=_np.float32, mode="w+", shape=(param.numel(),))
-            return torch.from_numpy(arr).view_as(param)
+            """Zeroed fp32 buffer shaped like `param`, in RAM.
+
+            THERE IS NO NVMe ON THIS MACHINE. A memmap-backed variant existed and was REMOVED: the
+            Adam state is read AND written once per tensor per step, so backing it with the overlay
+            filesystem would put ~106 GB of per-step traffic on the slowest device in the box. Slow
+            storage is also why startup already takes ~25 min. Do not reintroduce it."""
+            return torch.zeros_like(param, memory_format=torch.preserve_format)
 
         @torch.no_grad()
         def _adam_step_one(group, param):
@@ -1820,7 +2432,9 @@ def train(args):
                 i = _lat_index.get(id(param), 0)
                 st["step"] = torch.zeros((), dtype=torch.float32)
                 st["exp_avg"] = _state_buf(param, "m", i)
-                st["v_blk"] = torch.zeros(n // _BLKV, dtype=torch.float32)
+                # device=param.device: with --latent-gpu-budget the latent is GPU-resident, and a
+                # host v_blk would hit a device mismatch against the GPU gradient on the first step.
+                st["v_blk"] = torch.zeros(n // _BLKV, dtype=torch.float32, device=param.device)
             b1, b2 = group["betas"]
             st["step"] += 1
             t = float(st["step"])
@@ -1877,13 +2491,51 @@ def train(args):
                     _lat_step_one(g, param)
                 param.grad = None                          # free it either way (warmup holds lr at 0)
             return _hook
+        global _OFFLOAD_STEP_ON
+        _OFFLOAD_STEP_ON = (bool(getattr(args, "latent_offload", False))
+                            and not bool(getattr(args, "no_fused_latent_grad", False)))
         for p_ in latents:
-            p_.register_post_accumulate_grad_hook(_mk_release(p_))
+            _h = _mk_release(p_)
+            _LAT_RELEASE[id(p_)] = (p_, _h)
+            if not _OFFLOAD_STEP_ON:
+                p_.register_post_accumulate_grad_hook(_h)
         log(f"   grad-release ON: {len(latents)} latents step during backward and free their grads "
             f"(saves {sum(p_.numel() for p_ in latents)*4/1e9:.1f}GB of fp32 grad buffers)")
+        if _OFFLOAD_STEP_ON:
+            log(f"   FUSED offloaded-latent grad ON: the transfer's backward stages into a persistent "
+                f"host buffer and steps directly, bypassing AccumulateGrad's per-backward "
+                f"{sum(p_.numel() for p_ in latents)*4/1e9:.1f}GB of fresh allocations")
 
     # ── TALR state (transition-rate control of the latent lr) ──
     _tr_target = float(getattr(args, "target_tr", 0.0))
+    def _opt_step_scales_only():
+        """opt.step() that never visits the latent param groups.
+
+        Adam ALLOCATES exp_avg/exp_avg_sq for EVERY param it visits -- setting the group's lr to 0 is
+        not enough, and neither is grad=None in every torch version. With --latent-grad-release the
+        latents have ALREADY been stepped (and their grads freed) inside backward by _lat_step_one, so
+        letting opt.step() see them gives every latent a SECOND, FULL set of Adam state.
+
+        Cost at --train-weights all --tw-layer-stride 1: rank0 16.5B latents x 8 B = 132 GB, rank1
+        9.9B x 8 B = 79 GB, so ~211 GB allocated in one tight loop at the END of step 1 -- on top of
+        the ~106 GB grad-release had already allocated. That is what OOM-killed the container (exit
+        137) at stride 1, and why no run ever logged a completed step: it died between the backward
+        and the step line. At stride 2 the same duplicate was ~106 GB and fit, which is why it only
+        surfaced now.
+
+        The guarded form already existed for the non-pipeline path; the pipeline paths called a bare
+        opt.step(). Factored here so the two cannot drift apart again.
+        """
+        if _grad_release:
+            _saved = [g for g in opt.param_groups if g.get("is_latent")]
+            opt.param_groups = [g for g in opt.param_groups if not g.get("is_latent")]
+            try:
+                opt.step()
+            finally:
+                opt.param_groups.extend(_saved)
+        else:
+            opt.step()
+
     _lat_groups = [g for g in opt.param_groups if g.get("is_latent")]
     _lat_base_lr = (_lat_groups[0]["base_lr"] if _lat_groups else args.lr)
     _tr_gains = [1.0] * max(1, len(_lat_mods))       # PER-LAYER gains (one servo per layer)
@@ -1924,7 +2576,15 @@ def train(args):
     # tensor over the WHOLE latent (int64: 712MB for an 89M-element latent, and torch asked for
     # 1.35GB), which is fine in host RAM but OOMs a 24GB card the moment a latent is GPU-RESIDENT
     # (--latent-gpu-budget). Sampling indices is device-independent, so do it where memory is cheap.
-    _tr_idx = [torch.randperm(m.latent.numel(), device="cpu")[:32768].to(m.latent.device)
+    host_mem_audit("before _tr_idx randperm block")
+    # .clone() IS LOAD-BEARING: randperm(n)[:32768] is a VIEW over the full n-element int64
+    # permutation, so without it each entry keeps its whole n*8 byte storage alive. `.to(device)` does
+    # not force a copy either -- under --latent-offload the latents are already on CPU, so it is a
+    # no-op. Measured at stride 1 (311 modules, 16.5B latents): anon jumped 125 GB -> 271 GB across
+    # this one line, +146 GB RETAINED, to hold 10M indices that need 80 MB. That is what OOM-killed
+    # the container at 620 GB. The clone keeps only the 32768 sampled indices; the full permutation
+    # becomes a bounded transient (~712 MB for the largest latent) that is freed immediately.
+    _tr_idx = [torch.randperm(m.latent.numel(), device="cpu")[:32768].clone().to(m.latent.device)
                for m in _lat_mods]
     def _hard_trits_per_mod():
         """Sampled hard trits, PER MODULE (so per-layer flip rates are visible)."""
@@ -1946,6 +2606,7 @@ def train(args):
             return []
         return [100.0 * float((c != r).float().mean().item())
                 for c, r in zip(_hard_trits_per_mod(), _lat_ref_per)]
+    host_mem_audit("after _tr_idx randperm block")
     _lat_ref_per = _hard_trits_per_mod() if _lat_mods else None   # per-layer init refs
     # .cpu() before cat: with --latent-gpu-budget the resident latents follow their LAYER, so under
     # model parallelism these per-module samples span cuda:0 AND cuda:1 and torch.cat refuses to mix
@@ -2012,42 +2673,46 @@ def train(args):
     # stage which never beats its step-0 entry baseline restores that entry, so weight-training always
     # keeps one. But it is another 4 B/latent — 102.5 GB at arm B on the 27B — and that third full copy
     # of every latent (latents + Adam moment + snapshot) is what pushed the arm B run past 629 GB.
-    # --snap-nvme backs it with a memmap instead: it is written once per improvement and read at most
-    # once at the end, so the page cache absorbs it and only dirty pages ever hit disk.
-    _snap_nvme = bool(getattr(args, "snap_nvme", False))
-    _snap_dir = None
-    if _snap_nvme:
-        _snap_dir = Path(args.out).parent / "_snap_state"
-        shutil.rmtree(_snap_dir, ignore_errors=True)
-        _snap_dir.mkdir(parents=True, exist_ok=True)
-        log(f"   held-out snapshot NVMe-backed at {_snap_dir} "
-            f"(frees {sum(x.numel()*x.element_size() for x in scales)/1e9:.1f}GB of host RAM)")
+    # A --snap-nvme memmap variant existed and was REMOVED: THERE IS NO NVMe ON THIS MACHINE, and
+    # backing host state with the overlay filesystem trades RAM for the slowest device in the box.
 
     def _snap_alloc(t, tag, i):
-        """Buffer shaped like `t`: an ordinary clone, or a memmap under --snap-nvme. Allocated as raw
-        bytes and reinterpreted, so it works for any dtype (bf16 has no numpy equivalent)."""
-        if not _snap_nvme:
-            return t.detach().clone()
-        import numpy as _np
-        f = _snap_dir / f"{tag}_{i}.dat"
-        arr = _np.memmap(str(f), dtype=_np.uint8, mode="w+", shape=(t.numel() * t.element_size(),))
-        buf = torch.from_numpy(arr).view(t.dtype).view_as(t)
-        with torch.no_grad():
-            buf.copy_(t.detach())
-        return buf
+        """Buffer shaped like `t`."""
+        return t.detach().clone()
+
+    # `scales` is scale_only + latents (see its definition), so snapshotting it clones EVERY LATENT
+    # in full fp32 -- a THIRD full copy alongside the latent and Adam's exp_avg. Measured by live-tensor
+    # inventory at --tw-layer-stride 64: every latent shape appears x2 before step 1 (latent + snapshot)
+    # and x3 after (+ exp_avg), stable across steps. At stride 1 that third copy is ~106 GB across both
+    # ranks, which is what put the run at 220 GB anon before Adam had allocated anything and left no
+    # room for exp_avg under the 620 GB cgroup cap.
+    # The snapshot is LOAD-BEARING (RESULTS_SUMMARY 5: a stage that never beats its step-0 entry must
+    # restore that entry), so it is not simply removed. --no-latent-snapshot skips only the LATENT
+    # portion, keeping the scale snapshot intact; the trained assignments then are not restorable, so
+    # it is for throughput/memory runs and for --select final, not for a production stage that relies
+    # on best-checkpoint restore.
+    _snap_skip_latents = bool(getattr(args, "no_latent_snapshot", False))
+    _snap_list = scale_only if _snap_skip_latents else scales
+    if _snap_skip_latents and latents:
+        log(f"   --no-latent-snapshot: held-out snapshot covers {len(scale_only)} scale tensors only, "
+            f"skipping {len(latents)} latents "
+            f"({sum(p_.numel() for p_ in latents)*4/1e9:.1f}GB of fp32 clones NOT taken)")
 
     def _snap():
         if _snap_bufs["s"] is None:
-            _snap_bufs["s"] = [_snap_alloc(s, "s", i) for i, s in enumerate(scales)]
+            _snap_bufs["s"] = [_snap_alloc(s, "s", i) for i, s in enumerate(_snap_list)]
             _snap_bufs["t"] = [_snap_alloc(m.tern_b, "t", i) for i, m in enumerate(arm_b_mods)]
         else:
             with torch.no_grad():
-                for dst, src in zip(_snap_bufs["s"], scales):
+                for dst, src in zip(_snap_bufs["s"], _snap_list):
                     dst.copy_(src.detach())
                 for dst, m in zip(_snap_bufs["t"], arm_b_mods):
                     dst.copy_(m.tern_b.detach())
         return (_snap_bufs["s"], _snap_bufs["t"])
     def _restore(snap):
+        # zip() truncates to the shorter sequence, and `scales` is scale_only + latents, so under
+        # --no-latent-snapshot (snapshot = scale_only) the scale entries still align exactly and the
+        # latents are simply left as they are. No index skew.
         with torch.no_grad():
             for s, b in zip(scales, snap[0]): s.copy_(b)
             for m, t in zip(arm_b_mods, snap[1]): m.tern_b.copy_(t)
@@ -2115,6 +2780,14 @@ def train(args):
         return best_scales                                   # 'best' (or 'ema' before it starts)
 
     def save_export(tag, final=False):
+        # --no-final-save: throughput runs use --lr 0 and train NOTHING, so the 52 GB checkpoint they
+        # write is pure waste -- and it is what OOM-killed the container (cgroup memory.max is 576 GB;
+        # save_student accumulates the whole model then copies it, ~108 GB transient at 27B, on top of
+        # ~89 GB anon and the page cache from reading a 52 GB student every arm). Page cache counts
+        # toward the cgroup limit; process RSS does not, which is why an RSS-based watchdog never saw it.
+        if bool(getattr(args, "no_final_save", False)):
+            log(f"   [save] SKIPPED ({tag}) — --no-final-save; measurement run, nothing to persist")
+            return
         # save_student dequantises each linear (unpack_2bit → full float). The student has ONE shard, so its
         # per-shard dict accumulates the WHOLE fp16 model (~10.6GB at 4B) and save_file() copies it again —
         # a ~20GB transient on top of whatever training still holds. With offloaded latents + Adam state
@@ -2133,6 +2806,11 @@ def train(args):
         except Exception:
             pass
         gc.collect(); torch.cuda.empty_cache()
+        # PIPELINE: rank 0 writes the file but has only stage 0's trained weights. Pull stage 1's
+        # across BEFORE any branch below saves, otherwise half the model ships at its entry values.
+        if _PP["on"]:
+            _mv = pp_sync_for_save(core, device)
+            log(f"   [save] pulled {_mv} stage-1 modules from rank 1 before writing")
         # 'best' keeps the legacy greedy-restart (resets live scales -> best) so the default command
         # reproduces prior behaviour exactly; 'final'/'ema' save WITHOUT disturbing live training.
         if select == "best":
@@ -2173,6 +2851,7 @@ def train(args):
         dist.all_reduce(t, op=dist.ReduceOp.SUM)           # average across ranks for a stable metric
         return (t / world).item()
 
+    host_mem_audit("before step-0 held-out eval")
     opt_step, micro, win_kl = 0, 0, 0.0                     # win_kl: per-micro KL summed over a window
     opt.zero_grad(set_to_none=True)
 
@@ -2184,7 +2863,17 @@ def train(args):
     #     that entry -- a true no-op instead of shipping something worse (the failure that made j3_attn's
     #     output unusable: it entered at 0.4538, never beat it, and saved 0.4789).
     #   NOTE: the abort check is deliberately NOT re-anchored to this baseline -- see below.
-    if held_idx:
+    # heldout_kl_flips runs a WHOLE-MODEL forward, which no single rank can do under pipeline
+    # parallelism (each owns a disjoint slice, the rest sits idle on the host). pipe_heldout_kl_flips
+    # is the stage-aware equivalent: same sequences, same two stages, result broadcast so both ranks
+    # branch identically.
+    if held_idx and _PP["on"]:
+        _b_kl, _b_flips = pipe_heldout_kl_flips(core, cache, held_idx, batches, device, _Wlm,
+                                                args.temperature, _ce_lt, _PP["split"])
+        best_ho_kl = _b_kl
+        best_ho_snap = _snap()
+        log(f"   [held-out] ENTRY KL={_b_kl:.4f} flips={_b_flips:.2f}%  [pipelined]")
+    elif held_idx:
         if _mem_ctx is not None:
             torch.cuda.empty_cache()
         _b_kl, _b_flips = heldout_kl_flips(model, cache, held_idx, batches, device, loss_fn,
@@ -2198,6 +2887,26 @@ def train(args):
         best_ho_snap = _snap()
         log(f"   [held-out] step 0 KL={_b_kl:.4f} flips={_b_flips:.2f}% "
             f"assign-moved={_assign_flip_pct():.3f}% best={_b_kl:.4f} flips_used=0  <- ENTRY BASELINE")
+        vram_audit("after entry-baseline eval (a full forward has run)", model)
+
+    _pipe_mb = int(getattr(args, "pipeline_mb", 0) or 0)
+    _pipe_split = 0
+    _pipe_pos = [0]
+    if _pipe_mb > 1:
+        _pb = _pipe_base(core)
+        _nl = _pb.config.num_hidden_layers
+        # The stage cut MUST land on the DEVICE boundary. shard_model_across_gpus honours MP_SPLIT, so
+        # deriving the cut as n//n_dev silently disagrees with it: with MP_SPLIT=24 the cut fell at
+        # layer 32, so "stage 0" spanned both cards and "stage 1" sat entirely on GPU1 -- the two stages
+        # then CONTEND for one device instead of overlapping (measured 265.7 vs 125.3 s/microbatch).
+        _mp_env = int(os.environ.get("MP_SPLIT", "0") or 0)
+        _pipe_split = _mp_env if 0 < _mp_env < _nl else _nl // max(1, int(getattr(args, "model_parallel", 2) or 2))
+        if ddp or on_policy or not _mem_eff:
+            log("   [warn] --pipeline-mb ignored (needs the mem-efficient loss path, no DDP, no on-policy)")
+            _pipe_mb = 0
+        else:
+            log(f"   PIPELINE: {_pipe_mb} microbatches in flight, stage split at layer {_pipe_split}/{_nl} "
+                f"(stage0 runs microbatch k+1 while stage1 runs k)")
 
     # FAIL FAST on an empty train shard. `for bi in shard` over an empty list never advances opt_step,
     # so the while loop below spins at 100% CPU forever with no output and no GPU work — it looks
@@ -2207,10 +2916,287 @@ def train(args):
         raise SystemExit(f"no TRAIN sequences on this rank: --max-samples {args.max_samples} leaves "
                          f"nothing after --heldout-n {args.heldout_n} (+probe/gate). Raise --max-samples.")
 
+    host_mem_audit("entering training loop")
+    host_tensor_inventory("entering training loop")
     while opt_step < args.steps:
+        # ── PIPELINED PATH (cut-graph 1F1B) ──────────────────────────────────────────────────
+        # v1 interleaved only the FORWARD and then ran one monolithic backward: measured 278 s vs
+        # 141 s/microbatch, because backward+recompute is where the step lives and it stayed strictly
+        # serialized (main thread parked in _engine_run_backward, GPU1 at 0%).
+        #
+        # The fix is to CUT the autograd graph at the stage boundary: detach the stage-0 output and
+        # re-enter it as a leaf for stage 1. That gives two INDEPENDENTLY schedulable graphs, so
+        # stage-0's forward for microbatch k+1 is enqueued (GPU0) before stage-1's forward+backward
+        # for microbatch k (GPU1) and the two devices overlap. Gradients still flow across the cut:
+        # stage 1's backward fills hd.grad, which is handed to stage 0's backward explicitly.
+        # Utilisation measured 100%/0% strictly alternating, so this is where the ~2x lives.
+        if _pipe_mb > 1 and _mem_eff and not ddp and not on_policy:
+            _mb = []
+            for _ in range(_pipe_mb):
+                if _pipe_pos[0] >= len(shard):
+                    _pipe_pos[0] = 0
+                _mb.append(shard[_pipe_pos[0]]); _pipe_pos[0] += 1
+            if _grad_release:
+                _f = lr_frac(opt_step)
+                for g in opt.param_groups:
+                    if g.get("is_latent"):
+                        g["lr"] = g.get("base_lr", args.lr) * _f * _lat_frac(opt_step)
+
+            def _stage0(_bidx):
+                if _PF_ON:
+                    pf_reset()
+                    if _LAT_ORDER:
+                        _pf_start(_LAT_ORDER[0], _LAT_ORDER[0].latent.dtype)
+                _i = batches[_bidx].to(device)
+                _h, _c = pipe_stage0(core, _i, _pipe_split)
+                return _bidx, _i, _h, _c
+
+            _cur = _stage0(_mb[0])
+            _kl_sum = 0.0
+            for _k in range(len(_mb)):
+                # enqueue GPU0's next forward BEFORE GPU1 does anything -- this is the overlap
+                _nxt = _stage0(_mb[_k + 1]) if _k + 1 < len(_mb) else None
+                _bidx, _ids, _h0, _ctx = _cur
+                _hd = _h0.detach().requires_grad_(True)       # the cut
+                _hp = pipe_stage1(core, _hd, _ctx, _pipe_split)
+                _ti = cache["idx"][_bidx].unsqueeze(0).to(_hp.device)
+                _tv = cache["val"][_bidx].unsqueeze(0).to(_hp.device)
+                _l = pipe_mem_eff_loss(_hp, _ids, _Wlm, _ti, _tv, args, _ce_lt) / len(_mb)
+                _l.backward()                                  # stage-1 backward -> fills _hd.grad
+                _kl_sum += global_kl(_l)
+                if _hd.grad is not None:
+                    _h0.backward(_hd.grad)                     # carry the gradient across the cut
+                del _hd, _hp, _l, _cur
+                _cur = _nxt
+            win_kl += _kl_sum
+            torch.nn.utils.clip_grad_norm_(scales, 1.0)
+            _opt_step_scales_only()
+            opt.zero_grad(set_to_none=True)
+            opt_step += 1
+            log(f"   step {opt_step}/{args.steps}  pipelined mb={_pipe_mb}  kl={_kl_sum:.4f}")
+            if opt_step <= 8:
+                vram_audit(f"after pipelined step {opt_step} (mb={_pipe_mb})", model)
+            continue
+
+        # ── MULTI-PROCESS PIPELINE SCHEDULE ──────────────────────────────────────────────────
+        # Rank 0 runs stage 0 for every microbatch and ships each activation; rank 1 receives, runs
+        # stage 1 + loss + backward, and ships the boundary gradient back; rank 0 then finishes its
+        # half of the backward. Because these are separate interpreters, rank 0's forward for
+        # microbatch k+1 proceeds WHILE rank 1 works on k -- the overlap one python thread could never
+        # produce. Both ranks read the same calib/teacher files and walk the same indices, so rank 1
+        # rebuilds the mask/rotary context locally rather than receiving it.
+        if _PP["on"]:
+            import torch.distributed as dist
+            _M = _PP["mb"]
+            _idxs = []
+            for _ in range(_M):
+                if _pipe_pos[0] >= len(shard):
+                    _pipe_pos[0] = 0
+                _idxs.append(shard[_pipe_pos[0]]); _pipe_pos[0] += 1
+            if _grad_release:
+                _f = lr_frac(opt_step)
+                for g in opt.param_groups:
+                    if g.get("is_latent"):
+                        g["lr"] = g.get("base_lr", args.lr) * _f * _lat_frac(opt_step)
+            _sp = _PP["split"]
+            _kl_acc = 0.0
+            # PP_PROF=1: attribute each rank's step to forward / blocked-on-peer / backward.
+            # Utilisation samples CANNOT answer "who is the critical path" -- a rank blocked in recv
+            # reads 0%, and a rank doing host-bound work reads low while dominating wall clock. That
+            # ambiguity produced both the "rank 0 is the bottleneck" and the "rank 1 is the
+            # bottleneck" misreads. BLOCKED time is the unambiguous signal: whichever rank waits less
+            # owns the critical path. Costs a cuda.synchronize() per segment, so a profiled run is
+            # slightly slower than a clean one -- compare shares, not absolute s/microbatch.
+            _prof = os.environ.get("PP_PROF") == "1"
+            # PP_TRACE=1: op-level trace of ONE step on rank 0 (step 3, past warmup). The ~6 s/layer
+            # backward is ~5x a checkpointed-backward estimate and survived GPU residency unchanged,
+            # so neither transfers nor FLOPs explain it. Synthetics mislead here (they lack the
+            # compute that hides the transfers), hence tracing the real step.
+            _trace_now = (os.environ.get("PP_TRACE") == "1" and _PP["rank"] == 0 and opt_step == 2)
+            _pt = {"fwd": 0.0, "wait": 0.0, "bwd": 0.0, "send": 0.0}
+            def _pnow():
+                if _prof:
+                    torch.cuda.synchronize()
+                return _t.time()
+            if _PP["rank"] == 0:
+                # 1F1B ORDER with a NON-BLOCKING handoff. Sending every activation up front with a
+                # blocking send DEADLOCKS (rank 1 blocks sending grad0 while rank 0 blocks sending h1
+                # -- NCCL watchdog timeout). But the obvious fix -- release h(k+1) only AFTER our own
+                # backward -- leaves rank 1 idle for the whole of stage-0's backward, and measured
+                # 123.4 s/microbatch: exactly the single-process time, despite both GPUs showing 100%
+                # util. isend here + a pre-posted irecv on rank 1 hands rank 1 its next activation
+                # immediately, so its stage-1 forward overlaps our stage-0 backward.
+                def _fwd0(_bi):
+                    if _PF_ON:
+                        pf_reset()
+                        if _LAT_ORDER:
+                            _pf_start(_LAT_ORDER[0], _LAT_ORDER[0].latent.dtype)
+                    _ids = batches[_bi].to(device)
+                    _h, _ = pipe_stage0(core, _ids, _sp)
+                    return _h
+                _tr_ctx = (torch.profiler.profile(
+                               activities=[torch.profiler.ProfilerActivity.CPU,
+                                           torch.profiler.ProfilerActivity.CUDA])
+                           if _trace_now else contextlib.nullcontext())
+                _tr_obj = _tr_ctx.__enter__()
+                # --pipe-blocking-handoff restores the ORIGINAL schedule (release h(k+1) only after
+                # our own backward) purely so the 1F1B fix can be A/B'd. It leaves rank 1 idle for the
+                # whole of stage-0's backward and is never wanted in production.
+                if bool(getattr(args, "pipe_blocking_handoff", False)):
+                    _h_cur = _fwd0(_idxs[0])
+                    dist.send(_h_cur.detach().contiguous(), dst=1)
+                    for _k in range(len(_idxs)):
+                        _h_nxt = _fwd0(_idxs[_k + 1]) if _k + 1 < len(_idxs) else None
+                        _g = torch.empty_like(_h_cur)
+                        dist.recv(_g, src=1)
+                        _h_cur.backward(_g)
+                        del _h_cur, _g
+                        if _h_nxt is not None:
+                            dist.send(_h_nxt.detach().contiguous(), dst=1)
+                        _h_cur = _h_nxt
+                    _h_cur = None
+                    _sreq = None
+                    _skip_nb = True
+                else:
+                    _skip_nb = False
+                if _skip_nb:
+                    pass
+                else:
+                  _h_cur = _fwd0(_idxs[0])
+                  _sbuf = _h_cur.detach().contiguous()
+                  _sreq = dist.isend(_sbuf, dst=1)
+                  for _k in range(len(_idxs)):
+                     _ta = _pnow()
+                     _h_nxt = _fwd0(_idxs[_k + 1]) if _k + 1 < len(_idxs) else None
+                     _tb = _pnow(); _pt["fwd"] += _tb - _ta
+                     _sreq.wait()                   # prior activation delivered; _sbuf now reusable
+                     _sreq = None
+                     if _h_nxt is not None:
+                         _sbuf = _h_nxt.detach().contiguous()
+                         _sreq = dist.isend(_sbuf, dst=1)
+                     _g = torch.empty_like(_h_cur)
+                     dist.recv(_g, src=1)
+                     _tc = _t.time(); _pt["wait"] += _tc - _tb
+                     _h_cur.backward(_g)
+                     _pt["bwd"] += _pnow() - _tc
+                     del _h_cur, _g
+                     _h_cur = _h_nxt
+                  if _sreq is not None:
+                     _sreq.wait()
+                _tr_ctx.__exit__(None, None, None)
+                if _trace_now and _tr_obj is not None:
+                    for _srt in ("self_cuda_time_total", "self_cpu_time_total"):
+                        log(f"   [pp-trace] top ops by {_srt}:")
+                        log(_tr_obj.key_averages().table(sort_by=_srt, row_limit=18))
+            else:
+                # Landing pad for microbatch j+1 is posted BEFORE the backward on j, so rank 0's
+                # isend completes while we are busy and our next forward starts the instant we ship
+                # this gradient. Without this the irecv is only posted after the send below, and
+                # rank 0's activation cannot arrive until we are already idle waiting for it.
+                _ids_l = [batches[_b].to(device) for _b in _idxs]
+                _Hs = _pipe_base(core).config.hidden_size
+                def _mkbuf(_j):
+                    return torch.empty(1, _ids_l[_j].shape[1], _Hs,
+                                       dtype=torch.bfloat16, device=device)
+                # --pipe-blocking-handoff has to restore the ORIGINAL schedule on BOTH ranks. The 1F1B
+                # fix changed rank 0 (isend early) AND rank 1 (pre-post the irecv); restoring only
+                # rank 0 leaves a mismatched pair that never existed in production and hangs rank 1 in
+                # RECV until the NCCL watchdog fires an hour later.
+                _blk = bool(getattr(args, "pipe_blocking_handoff", False))
+                _hb = _mkbuf(0)
+                _rreq = None if _blk else dist.irecv(_hb, src=0)
+                if _blk:
+                    dist.recv(_hb, src=0)
+                for _j, _bi in enumerate(_idxs):
+                    _ta = _t.time()
+                    if _rreq is not None:
+                        _rreq.wait()
+                    _tb = _pnow(); _pt["wait"] += _tb - _ta
+                    if _PF_ON:
+                        pf_reset()
+                        if _LAT_ORDER:
+                            _pf_start(_LAT_ORDER[0], _LAT_ORDER[0].latent.dtype)
+                    _ids = _ids_l[_j]
+                    _hd = _hb.requires_grad_(True)
+                    _ctx = pipe_make_ctx(core, _hd)                # rebuilt locally, not shipped
+                    _hp = pipe_stage1(core, _hd, _ctx, _sp)
+                    _ti = cache["idx"][_bi].unsqueeze(0).to(_hp.device)
+                    _tv = cache["val"][_bi].unsqueeze(0).to(_hp.device)
+                    _l = pipe_mem_eff_loss(_hp, _ids, _Wlm, _ti, _tv, args, _ce_lt) / _M
+                    _tc = _pnow(); _pt["fwd"] += _tc - _tb
+                    if _j + 1 < len(_idxs):
+                        _hb = _mkbuf(_j + 1)
+                        # blocking mode: do NOT pre-post; receive after our gradient goes back, which
+                        # is what made rank 1 idle through stage-0's backward in the first place.
+                        _rreq = None if _blk else dist.irecv(_hb, src=0)
+                    else:
+                        _rreq = None
+                    _l.backward()
+                    _kl_acc += global_kl(_l)
+                    _td = _pnow(); _pt["bwd"] += _td - _tc
+                    dist.send(_hd.grad.contiguous(), dst=0)
+                    if _blk and _j + 1 < len(_idxs):
+                        dist.recv(_hb, src=0)          # original order: receive only after sending grad
+                    _pt["send"] += _t.time() - _td
+                    del _hd, _hp, _l
+            # Only rank 1 computes the loss, and log() prints only on rank 0 -- so without this the
+            # pipeline path reports kl=0.0000 every step and a real run has NO visible loss signal.
+            # One f64 scalar per step; nothing against a ~120 s step.
+            _klt = torch.tensor([_kl_acc], dtype=torch.float64, device=device)
+            dist.broadcast(_klt, src=1)
+            _kl_acc = float(_klt[0])
+            if _prof:
+                _ba = _PROF_ACC
+                log(f"   [lat-prof] r{_PP['rank']} h2d={_ba['h2d']:6.1f}s(n={_ba['n_h2d']}) "
+                    f"d2h={_ba['d2h']:6.1f}s adam={_ba['adam']:6.1f}s(n={_ba['n_step']})")
+                for _k in ("h2d", "d2h", "adam"):
+                    _PROF_ACC[_k] = 0.0
+                _PROF_ACC["n_h2d"] = _PROF_ACC["n_step"] = 0
+                _p1 = torch.zeros(4, dtype=torch.float64, device=device)
+                if _PP["rank"] == 1:
+                    _p1[0] = _pt["wait"]; _p1[1] = _pt["fwd"]; _p1[2] = _pt["bwd"]; _p1[3] = _pt["send"]
+                dist.broadcast(_p1, src=1)
+                if _PP["rank"] == 0:
+                    log(f"   [pp-prof] r0 fwd={_pt['fwd']:6.1f} BLOCKED={_pt['wait']:6.1f} "
+                        f"bwd={_pt['bwd']:6.1f} | r1 BLOCKED={float(_p1[0]):6.1f} "
+                        f"fwd={float(_p1[1]):6.1f} bwd={float(_p1[2]):6.1f} send={float(_p1[3]):5.1f}")
+            win_kl += _kl_acc
+            torch.nn.utils.clip_grad_norm_(scales, 1.0)
+            _opt_step_scales_only()
+            opt.zero_grad(set_to_none=True)
+            opt_step += 1
+            log(f"   step {opt_step}/{args.steps}  pp rank {_PP['rank']} mb={_M} kl={_kl_acc:.4f}")
+            if opt_step <= 4 and _PP["rank"] == 0:
+                host_mem_audit(f"after step {opt_step}")
+                host_tensor_inventory(f"after step {opt_step}")
+            if opt_step <= 6:
+                vram_audit(f"after pp step {opt_step}", model)
+            if held_idx and opt_step % eval_every == 0:
+                torch.cuda.empty_cache()               # release step fragmentation; the eval is tight
+                ho_kl, ho_flips = pipe_heldout_kl_flips(core, cache, held_idx, batches, device,
+                                                        _Wlm, args.temperature, _ce_lt, _sp)
+                if init_ho_kl is None:
+                    init_ho_kl = ho_kl
+                if ho_kl < best_ho_kl:
+                    best_ho_kl = ho_kl; best_ho_snap = _snap(); ho_worse = 0
+                else:
+                    ho_worse += 1
+                log(f"   [held-out] step {opt_step} KL={ho_kl:.4f} flips={ho_flips:.2f}% "
+                    f"assign-moved={_assign_flip_pct():.3f}% best={best_ho_kl:.4f} [pipelined]")
+                if ho_kl > init_ho_kl and ho_worse * eval_every >= 300 * abort_patience / 3:
+                    log(f"   ABORT: held-out KL {ho_kl:.4f} > init {init_ho_kl:.4f} for {ho_worse} evals")
+                    do_abort = True
+            if do_abort:
+                break                                  # the `continue` below skips the shared check
+            continue
+
         for bi in shard:
             if opt_step >= args.steps:
                 break
+            if _PF_ON:
+                pf_reset()          # per-microbatch: no buffer may survive into the next forward
+                if _LAT_ORDER:
+                    _pf_start(_LAT_ORDER[0], _LAT_ORDER[0].latent.dtype)
             ids = batches[bi].to(device)
             # deterministic on opt_step so ALL DDP ranks make the SAME on/off choice each step (else the
             # ranks' autograd graphs desync). every-Nth-step schedule, N = round(1/frac), gives ~frac.
@@ -2290,20 +3276,11 @@ def train(args):
                 # linearly rather than switching the full lr on at once.
                 if g.get("is_latent"):
                     g["lr"] *= _lat_frac(opt_step)
-            if _grad_release:
-                # Latents already stepped (and freed their grads) inside backward. Zeroing their lr here was
-                # NOT enough: opt.step() still ALLOCATES exp_avg/exp_avg_sq for every param it visits, so the
-                # latents ended up with TWO sets of Adam state (measured: anon RSS grew 23.9 -> 42.8GB over
-                # 100 steps and wedged the run in D state). Temporarily REMOVE the latent groups from the
-                # optimizer instead, so it only ever touches the scale group.
-                _lat_groups_saved = [g for g in opt.param_groups if g.get("is_latent")]
-                opt.param_groups = [g for g in opt.param_groups if not g.get("is_latent")]
-                opt.step()
-                opt.param_groups.extend(_lat_groups_saved)
-            else:
-                opt.step()
+            _opt_step_scales_only()
             opt.zero_grad(set_to_none=True)
             opt_step += 1
+            if opt_step <= 8:
+                vram_audit(f"after training step {opt_step}", model)
             # ── TALR: servo the latent lr to hit a target TRANSITION RATE (flips/step). lr alone cannot control
             # the flip count (it depends on the latent distribution too), so control the rate directly. ──
             if _tr_target > 0 and _lat_groups and opt_step % max(1, args.tr_every) == 0:
@@ -2672,12 +3649,7 @@ def main():
                          "casts dequant() to x.dtype, so the fp32 GPU copy bought nothing but doubled the "
                          "transient and made the grad fp32 (~6B/latent = 13.6GB at mlp@32L). Standard "
                          "mixed-precision: master fp32, compute bf16.")
-    ap.add_argument("--latent-state-nvme", action="store_true",
-                    help="Keep Adam's exp_avg/exp_avg_sq for the latents in NVMe-backed memmaps instead of RAM "
-                         "(8 of the measured 18.1 bytes/latent). mlp@32L = 2.26B latents needs ~48GB resident "
-                         "(over the 47G cap); this brings it to ~30GB. Slower per step (state is read+written "
-                         "once per tensor per step) but the page cache absorbs much of it. Needs "
-                         "--latent-grad-release.")
+
     ap.add_argument("--latent-grad-release", action="store_true",
                     help="Step each offloaded latent the moment its gradient is ready, then free the grad "
                          "(post-accumulate-grad hook). Removes the fp32 grad buffer (4B/latent) from the peak: "
@@ -2691,15 +3663,46 @@ def main():
     ap.add_argument("--latent-gpu-budget", type=float, default=0.0,
                     help="GB of latents to keep RESIDENT ON GPU (per process). Those layers do no "
                          "host->device copy in dequant(). 0 = all offloaded (default).")
+    ap.add_argument("--no-latent-snapshot", action="store_true",
+                    help="Held-out best-checkpoint snapshot covers SCALES ONLY, not latents. `scales` "
+                         "is scale_only+latents, so the snapshot otherwise clones every latent in fp32 "
+                         "-- a third full copy beside the latent and Adam's exp_avg (~106 GB at "
+                         "--tw-layer-stride 1). Trained ASSIGNMENTS are then not restorable from the "
+                         "snapshot, so use only with --select final or for memory/throughput runs.")
+    ap.add_argument("--no-final-save", action="store_true",
+                    help="Skip ALL model writes, including the final save. For throughput runs "
+                         "(--lr 0) whose output is discarded: the write is ~52 GB plus a ~108 GB "
+                         "transient and can OOM-kill the container against its cgroup memory.max.")
+    ap.add_argument("--pipe-blocking-handoff", action="store_true",
+                    help="A/B ONLY: restore the original 1F1B schedule that released the next "
+                         "activation after the backward, leaving rank 1 idle for all of stage-0's "
+                         "backward. Exists so the handoff fix can be measured against it.")
+    ap.add_argument("--no-fused-latent-grad", action="store_true",
+                    help="Disable the fused offloaded-latent gradient path (stage into a persistent "
+                         "host buffer and run the latent optimizer step inside the transfer's backward, "
+                         "returning None so autograd's AccumulateGrad never allocates). That allocation "
+                         "is a fresh 191MB mmap per latent per backward -- measured 46,721 minor page "
+                         "faults and 320.2 ms per latent, ~102 s of a 225 s step. Use this flag only to "
+                         "A/B the fused path against the old one.")
     ap.add_argument("--latent-pin-grad", action="store_true",
                     help="Stage the latent GRADIENT's device->host trip through pinned buffers. py-spy "
                          "attributed 19.5%% of step time to that copy; .to('cpu') allocates pageable "
                          "memory so the driver stages it. Requires --latent-prefetch (that is where the "
-                         "backward is ours to control), --latent-grad-release and --accum 1.")
+                         "backward is ours to control) and --latent-grad-release.")
+    ap.add_argument("--latent-prefetch-depth", type=int, default=2,
+                    help="How many prefetched latent buffers to keep resident (VRAM-for-speed dial). "
+                         "2 -> 127.9 s/step at 19.10 GB reserved; ~255 (the old leak) -> ~110 s/step at "
+                         "24.39 GB. Baseline without prefetch is 143.0 s/step at 14.69 GB.")
     ap.add_argument("--latent-prefetch", action="store_true",
-                    help="Start the NEXT latent's host->device copy on a side CUDA stream while the "
-                         "current layer computes, so transfers overlap instead of stalling. Only "
-                         "meaningful with --latent-pin (pageable copies cannot be async).")
+                    help="BROKEN - DO NOT USE (kept for reproducing old runs). Prefetches the NEXT "
+                         "latent in FORWARD order, but the checkpoint recompute runs layers in REVERSE, "
+                         "so during backward it allocates buffers for layers that already ran. Nothing "
+                         "takes them, _pf_start early-returns on ids already present, and the stranded "
+                         "entries both leak and block all later prefetching. Measured: +5.24 GB live, "
+                         "+9.70 GB peak demand (14.69 -> 24.39 GB reserved), which is what starved the "
+                         "GPU. It also stops working after step 1 and can hand a module a buffer filled "
+                         "during the PREVIOUS step, i.e. stale latents once latent-lr > 0 (invisible to "
+                         "any --latent-lr 0 benchmark). Fix direction-awareness + eviction before use.")
     ap.add_argument("--latent-pin", action="store_true",
                     help="Keep offloaded latents in PINNED host memory so H2D copies can be async. "
                          "Pageable copies are synchronous and stall the calling thread once per latent "
@@ -2709,12 +3712,32 @@ def main():
                          "DOUBLES per-latent cost (dequant + CPU->GPU latent stream + grad-release hook "
                          "run again on recompute). At arm B that is 205 GB/step of PCIe traffic; this "
                          "halves it, if activations still fit.")
-    ap.add_argument("--snap-nvme", action="store_true",
-                    help="Back the best-held-out snapshot with a memmap instead of host RAM. Saves "
-                         "4 B/latent, but ONLY worth it on FAST LOCAL STORAGE — this host has no NVMe, "
-                         "so leave it OFF here (slow disk is also why startup takes ~25 min). "
-                         "4 B/latent (102.5 GB at 27B arm B). The snapshot is write-mostly (one copy per "
-                         "held-out improvement) and read at most once, so the page cache absorbs it.")
+
+    ap.add_argument("--pipeline-mb", type=int, default=0,
+                    help="IN-PROCESS PIPELINING DOES NOT WORK HERE - measured slower in every form. "
+                         "v1 (interleave forward only, one monolithic backward): 278 vs 141 "
+                         "s/microbatch. v2 (cut the autograd graph at the stage boundary so each "
+                         "stage's backward schedules independently): 265.7 with the cut misaligned to "
+                         "MP_SPLIT, 144.9 vs 131.8 once aligned one-stage-per-device. GPU1 stayed at 0%% "
+                         "throughout. ROOT CAUSE: the single Python thread cannot run ahead. "
+                         "pipe_stage0 does not merely enqueue - each of its layers does a blocking "
+                         "host->device latent transfer in dequant(), so by the time the thread reaches "
+                         "stage 1, GPU0 has already drained. The constraint is the feeding thread, not "
+                         "the schedule, which is also why --accum showed no gain at 2 or 4. Real "
+                         "pipeline parallelism needs ONE PROCESS PER STAGE (as "
+                         "torch.distributed.pipelining does) so each stage has its own interpreter "
+                         "doing its own transfers. The stage-split helpers (pipe_stage0/pipe_stage1, "
+                         "verified bit-identical to the monolithic forward) are reusable for that.")
+    ap.add_argument("--pipe-parallel", action="store_true",
+                    help="MULTI-PROCESS pipeline parallelism: launch with torchrun --nproc_per_node=2 "
+                         "and each rank owns half the layers. Unlike in-process pipelining (which "
+                         "failed because one python thread cannot feed both GPUs) the ranks are "
+                         "separate interpreters, measured at 0.99x parallel efficiency. Each rank "
+                         "creates latents only for ITS layers, so per-rank CPU latent memory halves, "
+                         "and there is no gradient all-reduce because the ranks share no parameters.")
+    ap.add_argument("--pipe-parallel-mb", type=int, default=2,
+                    help="Microbatches in flight for --pipe-parallel. More amortises pipeline "
+                         "fill/drain (POC: 1.58x of a 2.0x ceiling at mb=1-deep) at N x stage-0 graphs.")
     ap.add_argument("--model-parallel", type=int, default=0,
                     help="Split decoder layers across N GPUs (naive layer-split model parallelism). "
                          "A 27B ternary student does NOT fit one 24GB card at seq 2560 (measured OOM at "

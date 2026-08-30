@@ -1154,3 +1154,509 @@ a rough tail is what degenerate repetition feeds on; E2E re-fits the per-g64 sca
 prompts, emits `</think>` on 2%. Teacher-forced metrics are blind to this by construction.
 
 Raw table: `logs/gateB_compare.txt`.
+
+## 13. Throughput campaign for arm B on the 2x3090 box (2026-08-20→29) — 294.0 -> 149.3 s/step CONFIRMED (-49%); four correctness bugs; the real lesson is measurement
+
+Goal: cut s/step for full-latent assignment training (arm B) so a 160M-token run is not absurdly long.
+All timings: 27B student, seq 2560, `--train-weights all --tw-layer-stride 2`, `--lr 0 --latent-lr 0`
+(throughput only), steps 2→8 from the timestamped step lines. "s/microbatch" = s/step ÷ `--pipe-parallel-mb`.
+
+### 13a. Multi-process pipeline parallelism — the 1F1B handoff was the whole story
+
+In-process pipelining is impossible here (one python thread cannot feed both GPUs: every layer's
+`dequant()` blocks on a host→device latent transfer). Two ranks as separate interpreters do work, but
+the first schedule ran at **123.8 s/microbatch — exactly the single-process baseline (119–132)** even
+though both GPUs sampled at 100%.
+
+**Cause: rank 0 released microbatch k+1 only AFTER `backward(g_k)`.** Rank 1 therefore idled for the
+entire duration of stage-0's backward, every microbatch. Cycle was `max(F0, stage1) + B0` instead of
+`max(F0 + B0, stage1)`. Fix = `isend` the next activation BEFORE the backward, with rank 1 pre-posting
+the matching `irecv` (a blocking eager send deadlocks: NCCL watchdog timeout).
+
+| schedule | s/microbatch |
+|---|---|
+| blocking handoff (release after backward) | 123.8 |
+| **non-blocking isend + pre-posted irecv** | **112.5** (−9.1%) |
+
+This is the ONLY lever in the campaign that survived end-to-end measurement (13d, 13g).
+
+**GPU utilisation is a MISLEADING signal here and cost three wrong diagnoses.** A rank blocked in
+`recv` reads 0%; a rank doing host-bound work reads low while owning the wall clock. Only BLOCKED time
+disambiguates. `PP_PROF=1` reports it per rank.
+
+### 13b. Stage profile at split 40 (PP_PROF=1, per step, 2 microbatches)
+
+```
+rank0:  fwd  16.4    BLOCKED   0.0    bwd 235.0     <- never waits: OWNS the critical path
+rank1:  fwd 108.6    BLOCKED  53.6    bwd 102.4
+```
+
+**Rank 0's backward is 14x its forward** (235.0 vs 16.4 s). A checkpointed backward should be ~3x.
+That anomaly, not the schedule, is ~89% of the step — and it is still UNEXPLAINED. An op-level trace
+attributes 89.4% of rank 0's self-CPU to `cudaMemcpyAsync` while `aten::mm` is 2.56% of self-CUDA, so
+the step is overwhelmingly not compute; but the one fix derived from that trace measured WORSE (13d),
+so the attribution is not yet understood well enough to act on.
+
+### 13c. Offloaded latents cost 20.7x resident ones IN ISOLATION — which did NOT predict the real model
+
+| latent placement (one 47.8M-latent linear) | forward | backward | total |
+|---|---|---|---|
+| offloaded (pinned CPU) | 51.4 ms | 232.0 ms | **283.4 ms** |
+| GPU-resident | 8.5 ms | 5.2 ms | **13.7 ms** |
+
+A checkpointed 2-layer synthetic stack reproduced it (1.011 vs 0.077 s/layer, 13x). **Neither predicted
+the real model.** `--latent-gpu-budget 8` promoted 56/160 of rank 0's latents and measured 243.8 s/step
+against a 225.0 baseline — worse, though that run was still TRENDING DOWN when killed (266, 267, 263,
+220, 203) while every other run was flat from step 1. **Residency is UNSETTLED, not refuted**: it needs
+a longer run to steady state. Do not quote either verdict.
+
+Why the isolation benchmarks mislead: they have almost no surrounding compute, so they measure a
+transfer at full cost that the real model (288 linears/rank, pinned async H2D) already overlaps. There
+is also a plausible mechanism for residency being actively BAD — the CPU-side Adam step and gradient
+accumulate run CONCURRENTLY with GPU work, so promoting a latent moves that work onto the already
+saturated critical-path GPU and idles a CPU that was doing it for free.
+
+### 13d. Refuted hypotheses — every one of them inferred from a proxy, then killed by end-to-end measurement
+
+This section is the main deliverable of the campaign. **Five successive proposals, each derived from a
+plausible indirect signal, each neutral or worse when measured.**
+
+* **H2D contention between the GPUs.** Aggregate bandwidth SCALES: 3.23+4.57=7.80 GB/s solo vs
+  3.55+4.39=7.94 GB/s concurrent. Pinning the forward copy also bought ~0 (3.31 vs 3.23).
+* **Grad-buffer reallocation.** Reuse (`set_to_none=False`) is 26% SLOWER (316.5 vs 251.3 ms): it turns
+  a straight assignment into a read-modify-write.
+* **Rebalancing the split.** The profile showed rank 1 idle 44-54 s/step and rank 0 NEVER blocking,
+  which says to move layers to rank 1. Doing it (40→36) measured **15.6% WORSE** (260.0 vs 225.0).
+  **CORRECTED 2026-08-29 (13m): under controlled placement the real penalty is 2.2%** (241.6 vs 236.3,
+  spreads 0.46%/0.85%), not 15.6%. The DIRECTION survives -- split 40 is slightly better -- but the
+  mechanism story ("rank 1 owns the loss and crosses over to critical within 4 layers") was built on a
+  7x-inflated number and was explaining noise. Split 40 stands, barely.
+* **GPU utilisation as a bottleneck signal.** Cost three wrong diagnoses. A rank blocked in `recv`
+  reads 0%; a rank doing host-bound work reads low while owning the wall clock. Only BLOCKED time
+  disambiguates (`PP_PROF=1`).
+* **Pinned gradient staging.** An op-level trace showed `Memcpy DtoH (Device -> Pageable)` at 87.75 s
+  / 320 calls / 274 ms each, i.e. 0.70 GB/s vs 3.84 GB/s for the pinned H2D — apparently 5.5x too
+  slow, and `cudaMemcpyAsync` was 89.4% of rank 0 self-CPU. Fixing it measured **6.2% WORSE**
+  (239.3 vs 225.0). **The trace was misread: a blocking memcpy's duration on the CUDA timeline
+  INCLUDES time queued in the stream, so 274 ms was occupancy, not bandwidth.** The 0.70 GB/s figure
+  was itself the tell — that is below even a normal pageable D2H (~2-3 GB/s). Profiler attribution
+  says where time is *charged*, not what is *causal*.
+
+**Method note, learned the hard way.** One run per variable. A budget-8 result at split 36 was compared
+against a budget-0 result at split 40 and "un-confounded" using a profiler-overhead ratio measured at a
+third config; that produced a confident -21% that was pure artifact. Profiler overhead is +17.6% at
+split 40 and does NOT transfer across configs. Never compare a profiled run to a clean one.
+
+### 13e. Four correctness bugs on the `--pipe-parallel` path (invisible to throughput tests at `--lr 0`)
+
+These, not the timings, are what the campaign actually banked.
+
+1. **Saves shipped a HALF-TRAINED model.** Latents exist only for owned layers and rank 0 alone writes
+   the file, so stage 1's trained weights were silently replaced by entry values. A completed arm B run
+   would have looked successful and thrown away half its training. Fixed: `pp_sync_for_save()` folds
+   rank 1's latents to trits and ships packed+scale before any save.
+2. **No loss signal at all** — `log()` is rank-0-only and rank 0 computes no loss, so every step printed
+   `kl=0.0000`. Fixed by broadcasting KL from rank 1 (verified live: `kl=9.4206`).
+3. **Held-out eval skipped entirely** → no best-checkpoint selection, no abort. Fixed:
+   `pipe_heldout_kl_flips()`, stage-aware, result broadcast so both ranks branch identically (a
+   one-sided branch desyncs the next collective into a watchdog timeout).
+4. **`--latent-pin-grad` was a silent no-op** without `--latent-prefetch` (`_GRAD_PIN_ON` was assigned
+   only inside the prefetch branch — as was the warning meant to catch it). Now hoisted out and wired
+   into the non-prefetch `dequant()` path via `_UseTransferred`, so the flag does what it documents.
+   **It is measured 6.2% SLOWER — the flag is honest now, but do not enable it.**
+
+### 13f. `--latent-gpu-budget` — two accounting bugs that made it unusable
+
+It could not work with the default optimizer at all: `adam-blockv` allocated `v_blk` with a bare
+`torch.zeros()` (no device), so a GPU-resident latent hits a device mismatch on step 1. Fixed to
+`device=param.device`.
+
+Budget accounting then OOM'd, because **Adam state is allocated LAZILY at the first step via
+`zeros_like(param)`, so promoting a latent silently promotes its state too.** A "12 GB" budget
+committed 11.9 GB of latent+state and died in the checkpoint recompute. Fixes: `state_mult` (2.0 for
+adam-blockv, 3.0 for full Adam) charges the budget for the state, and a `pending_state` term makes the
+free-VRAM check look ahead at state not yet allocated. Measured headroom, rank 0 at split 40: 16.33 GB
+free after build, ~4.2 GB activation peak in the recompute ⇒ ~11 GB is the real ceiling, hence
+`reserve_bytes=6e9`. Full residency is unreachable regardless: 7.66B latents need ~61 GB at 8 B/latent.
+
+### 13g. Net result and recommended config
+
+All unprofiled, split 40 unless stated, step-line timestamps, mean of consecutive deltas.
+WITHIN-run variance is <1% (+-1-2 s), so these are repeatable; the older "4-19% noise floor" does not
+apply to the pipeline path.
+
+| config | s/step | s/microbatch |
+|---|---|---|
+| blocking handoff (first working pipeline) | 247.6 | 123.8 |
+| **non-blocking 1F1B handoff** | **225.0** | **112.5** |
+| + pinned grad staging | 239.3 | 119.7 |
+| + `--latent-gpu-budget 8` | 243.8 (unsettled, trending down) | — |
+| split 36 instead of 40 | 260.0 | 130.0 |
+
+**Net: -9.1%, from the 1F1B handoff alone.** Single-process baseline was 119-132 s/microbatch, so the
+pipeline's whole contribution is that one scheduling fix; every other lever measured neutral or worse.
+
+Recommended: `--pipe-parallel --pipe-parallel-mb 2`, `MP_SPLIT=40`, no `--latent-gpu-budget`, no
+`--latent-pin-grad`.
+
+**Still unexplained**: `cudaMemcpyAsync` at 89.4% of rank 0's self-CPU time, with `aten::mm` at only
+2.56% of self-CUDA. The step is overwhelmingly not compute. That observation stands even though the
+pageable-D2H reading of it was wrong; the next attempt should time individual copies with explicit
+stream synchronisation rather than trusting profiler attribution.
+
+### 13h. WHERE THE TIME ACTUALLY GOES — per-latent stage breakdown (2026-08-25)
+
+Measured with explicit `cuda.synchronize()` per stage, because profiler attribution misled us twice
+(a blocking memcpy's timeline duration includes time QUEUED, not just transferred).
+
+**True PCIe on this box**, 191 MB fp32 buffers: H2D pinned **4.89**, D2H pinned **5.09**, D2H pageable
+**3.67** GB/s. Pageable D2H is only **28%** slower than pinned — not the 5.5x the trace implied. This
+retires pinning as a lever and explains why `--latent-pin-grad` measured worse.
+
+**One linear, 47.8M latents (= rank 0's per-linear average), seq 2560:**
+
+| stage | ms |
+|---|---|
+| H2D latent fp32 (pinned) | 63.5 |
+| STE dequant (6 full-size temporaries) | 4.7 |
+| GEMM `F.linear` | 3.1 |
+| backward, latent GPU-RESIDENT | **13.9** |
+| backward, latent OFFLOADED | **433.0** |
+| — of which D2H 72.4 + CPU grad accumulate 26.4 | 98.8 |
+| — **unexplained per-tensor overhead** | **320.3** |
+
+**Arithmetic ~8 ms. PCIe ~136 ms. ~320 ms/latent is NEITHER.** GPU residency runs the same backward in
+13.9 ms, a 31x gap that transfer volume cannot explain.
+
+Whole-model corroboration (rank 0, 40 layers, 160 latents, 2 microbatches, step 225.0 s):
+
+* Bytes the step MUST move: H2D 122.8 GB (fwd + checkpoint recompute, x2 mb) + D2H 61.4 GB = **184.2 GB**
+  ⇒ a **37.2 s floor, 17% of the step**. Transfers are NOT the dominant term.
+* `aten::mm` = **2.56%** of self-CUDA. The step is NOT compute.
+* `cudaMemcpyAsync` = **89.4% of self-CPU** (283.7 s of 317.4 s) while real transfer is ~17% ⇒ the
+  calling thread blocks far longer than the copies take. ~960 forced sync points per step
+  (640 H2D + 320 D2H) serialise CPU and GPU instead of overlapping them.
+* Matches the older result that step time is **linear in latent COUNT** (64/249/497 tensors →
+  102.6/165.7/327.1 s) while halving BYTES did nothing.
+
+**Conclusion: the dominant cost is per-TENSOR overhead in the offloaded-parameter autograd path, not
+bandwidth and not FLOPs.** Leading untested suspects: allocation + first-touch page faults on a fresh
+~191 MB pageable CPU grad buffer every backward; `AccumulateGrad` on a CPU leaf; implicit stream
+synchronisation per transfer. Attack surface is the ~960 per-tensor ops/step, not the 184 GB.
+
+Written up for external review as `research_prompts/armb_hotspot_prompt.md`.
+
+
+### 13i. FUSED OFFLOADED-LATENT GRADIENT — the second win (-17.0%, 2026-08-25)
+
+**Mechanism.** For a CPU leaf, autograd's `AccumulateGrad` allocates a FRESH full-size host grad tensor
+every backward. At 191 MB that is an mmap the kernel must fault in and zero. Measured on the real path
+(H2D + backward of one 47.8M-latent tensor):
+
+| path | ms | minor faults |
+|---|---|---|
+| plain `.to()` -> AccumulateGrad allocates | 400.7 | 46,721 |
+| return a persistent buffer -> AccumulateGrad still clones (`--latent-pin-grad`) | 168.9 | 46,721 |
+| **consume the grad in backward, return None** | **80.5** | **0** |
+
+320.2 ms/latent — which independently matches the 320.3 ms that 13h's stage breakdown could not
+account for. Fix: the transfer's `backward` stages the grad into a persistent host buffer, hands it to
+the EXISTING grad-release hook, and returns `None` so AccumulateGrad never runs. Verified
+**bit-identical** gradients with `param.grad is None`.
+
+**RETRACTED — the -17.0% did not replicate and the mechanism does not engage in the real trainer.**
+
+First measurement (back-to-back, split 40, 9 steady deltas each):
+
+| arm | s/step |
+|---|---|
+| fused | 200.4 |
+| `--no-fused-latent-grad` (old) | 241.3 |
+
+That looked like -17.0%. Three later measurements of the SAME fused config say otherwise:
+
+| run | position | s/step |
+|---|---|---|
+| fused (first, morning) | 1 | **200.4** |
+| fusedref (evening) | 2 | 242.9 |
+| posA (night) | 1 | **247.2** |
+| old path, for reference | 2 | 241.3 |
+
+Position is NOT the explanation (posA was position 1 and slow). Two of three fused runs land at ~245,
+indistinguishable from the un-fused 241.3, so **200.4 was an outlier**.
+
+**DIRECT DISPROOF, and the cheapest test of the whole campaign.** The fused path's entire mechanism is
+removing ~46,721 minor page faults per latent per backward. Counting faults on the LIVE trainer
+(`/proc/<pid>/stat` field 10) while it ran the fused config:
+
+```
+rank0  24,434,369 minor faults in 120 s
+rank1  25,042,656 minor faults in 120 s
+```
+
+If the path engaged this would be ~0. It is instead ABOVE the ~7.3M/120s that the un-fused fallback
+would produce. **The fused path is not doing what the unit test says it does.** The unit test asserted
+bit-identical gradients and `param.grad is None` and passed twice -- it verified CORRECTNESS, never
+that the mechanism ENGAGED. A test that had counted page faults would have caught this immediately.
+
+**Status: the fused path is unproven, not a win.** The code is bit-identical and safe to keep, but it
+must not be counted as a speedup until the fault count in a real run drops. Root cause not yet found;
+the unit test engages the path (param.grad is None) while the real trainer evidently does not, so the
+difference is in gradient checkpointing, pipeline parallelism, or the 2-D latent shape.
+
+**The prediction over-shot by 2.5x** (102.5 s predicted, 40.9 s actual). The microbenchmark freed and
+re-mmap'd ONE 191 MB block per iteration so it faulted every time; the real trainer cycles 160 buffers
+and glibc reuses freed blocks, so the old path already avoided many faults. **Isolated microbenchmarks
+systematically over-predict on this code** — same lesson as the 20.7x residency figure (13c).
+
+**A memory regression found and fixed before it shipped:** the first implementation kept a persistent
+buffer PER PARAM = 30.7 GB on rank 0, reinstating exactly what `--latent-grad-release` exists to remove.
+The grad is consumed synchronously (stage -> step -> release), so one shared arena sized to the largest
+latent suffices (~356 MB), and reusing one buffer also keeps its pages warm.
+
+**Cross-run drift, again:** the oldpath arm measured 241.3 where the same config measured 225.0 a day
+earlier (+7%). Only the back-to-back comparison is trustworthy.
+
+**What did NOT work from the same analysis** (report proposed, measured): pinning the grad destination
+(1.6 ms/latent — pageable D2H is 3.67 vs 5.09 GB/s) and an async copy stream (0.3 ms). The lever was
+the ALLOCATION, not the copy. Also: the latent gradient is **96.1% nonzero** (the `|L|<1.5s` gate is
+wide), so index/value compaction of the D2H would lose to a dense copy.
+
+Cumulative CONFIRMED: pipeline start 123.8 -> 1F1B **112.5 s/microbatch**. The fused-grad step is
+retracted (see above).
+
+**MEASUREMENT LESSON (the most expensive of the campaign).** A single back-to-back A/B is NOT enough on
+this box: same-config runs have differed by 7%, 16% and 21%. Any claimed win under ~20% needs the
+config measured at least twice, in both positions, AND a direct check that its MECHANISM engages
+(here: page-fault count). Correctness tests do not establish engagement.
+
+### 13j. NUMA MEMORY PLACEMENT — the reason nothing in this campaign was reproducible (2026-08-26)
+
+**The box has 4 NUMA nodes (~161 GB each) and BOTH GPUs sit on node 1.** Each rank needs ~52 GB
+resident (pinned latents + Adam state), so the two ranks cannot both live on the GPU-local node.
+Linux first-touch fills the local node then spills to whichever node has the most room -- which is
+node 3, the FARTHEST from both GPUs (distance 30 vs 10 local). Nothing in the launcher constrained
+this, so **which node a run's 52 GB lands on was a lottery re-rolled every run.**
+
+ABBA, fused path throughout, `numa` = `numactl --cpunodebind=N --preferred=N` (rank0 N=1, rank1 N=0):
+
+| arm | s/step | CPUs | where rank 0's 52 GB landed | faults/step |
+|---|---|---|---|---|
+| 1_numa | 212.0 | 16 | node 1 (dist 10) — 99.6% local | 8.48M |
+| 2_nonuma | 271.4 | 64 | **node 3 (dist 30) — 0.3% local** | 8.30M |
+| 3_nonuma | 175.3 | 64 | node 2 (dist 20) | 8.45M |
+| 4_numa | 175.0 | 16 | node 1 (dist 10) | 8.43M |
+
+**Node 3 costs 55% (271.4 vs 175.3) with fault counts IDENTICAL across all four arms** — so the only
+difference is how far rank 0's memory sits from its GPU. This is a first-order effect on a workload
+moving 184 GB/step across PCIe.
+
+**This explains the entire measurement crisis:**
+* 205.7 vs 310.3 s/step for identical code — one run drew a near node, the other node 3.
+* Runs internally stable to +-1% while differing 51% between runs — placement is fixed at allocation.
+* Build time never varied (sequential reads) while step time did (PCIe-bound).
+* GPU health always clean — the GPU was never the problem.
+* The apparent "14.7%/arm drift" that vanished at slot 4 — never a trend, just draws from a
+  multi-modal distribution.
+
+**⇒ EVERY throughput number in 13a-13i was measured without placement control and is unreliable**,
+including the 1F1B -9.1% and the fused-grad result. They must be re-measured under binding.
+
+**What binding buys:** it prevents the node-3 disaster (spread 1.21x bound vs 1.55x unbound; means
+193.5 vs 223.4). It does NOT make the box fully reproducible.
+
+**STILL UNEXPLAINED: ~21% residual.** Slots 1 and 4 have identical placement (node 1, 99.6% local),
+identical CPU binding (16 cores), identical code -- and differ 212.0 vs 175.0. A CPU-restriction
+hypothesis (16 vs 64 cores) was proposed and REFUTED by slot 4, which is CPU-bound and fast.
+
+**Recommended:** bind memory away from node 3 (`--membind=1,2` or `--preferred=1`). CPU binding shows
+no clear effect either way (slot 4 is fast with 16 cores) -- do not assume it helps.
+
+**METHOD NOTE, repeated for the third time in this campaign:** the `numa` treatment bundled memory
+binding AND CPU binding into one variable, so the arms could not separate them; slot 4 happened to
+disambiguate by accident. One variable per arm, always.
+
+
+### 13k. FUSED LATENT GRAD — CONFIRMED at -19.6%, and the un-retraction (2026-08-28)
+
+13i retracted this result. **The retraction was wrong**, and so was the original claim's evidence base;
+both were made on a box whose measurement noise (7-51% run to run) exceeded the effect. Once placement
+was controlled the question became answerable in four arms.
+
+**Setup that made it measurable** (all four arms identical except the one variable):
+* `numactl --interleave=0,1,2` — deterministic round-robin placement, node 3 excluded. Unbound runs
+  drew a different node each time; node 3 (distance 30) costs 55% (13j).
+* `--no-final-save` — the 52 GB checkpoint each arm wrote was pure waste at `--lr 0` AND was
+  OOM-killing the container against its 576 GB cgroup limit (13l).
+* Counterbalanced order base,nofused | nofused,base so slot position cancels.
+
+| config | run 1 | run 2 | mean | within-config spread |
+|---|---|---|---|---|
+| **fused** | 237.3 | 235.3 | **236.3** | **0.85%** |
+| `--no-fused-latent-grad` | 290.9 | 297.0 | 294.0 | 2.1% |
+
+**-19.6% (118.2 vs 147.0 s/microbatch).** The gap is 10-20x the noise; t ~ 18 on n=2 per group.
+
+**Mechanism confirmed in the same runs** — page faults on rank 0, per step:
+
+| config | run 1 | run 2 | agreement |
+|---|---|---|---|
+| fused | 2,254,592 | 2,264,782 | 0.45% |
+| nofused | 17,206,673 | 17,206,720 | **0.0003%** |
+
+**7.6x fewer faults.** The fault counts are essentially deterministic, which also proves both arms did
+identical work — the timing gap cannot be some divergence between runs. Placement (`n0 34%`) and
+cgroup peak (244 GB) were identical across all four arms, so neither explains it either.
+
+**Why the earlier numbers were untrustworthy in BOTH directions.** The original -17.0% was a single
+back-to-back pair on an uncontrolled box; the retraction rested on (a) two later arms that happened to
+draw bad placement and (b) a page-fault count sampled during the BUILD phase, when the model loader
+faults tens of millions of pages by design. Neither the claim nor the retraction had the resolution to
+decide. **Effect size is meaningless without a measured noise floor** — that is the lesson, and it cost
+roughly a week.
+
+Cumulative CONFIRMED: **118.2 s/microbatch** with the fused path, vs 147.0 without. The 1F1B result is
+STILL unmeasured under controlled conditions (its A/B flag restored the old schedule on rank 0 only,
+hanging rank 1 in RECV until the NCCL watchdog fired; fixed to restore both ranks, arms queued last).
+
+
+### 13m. THE CONTROLLED SWEEP — every lever re-measured, and what the campaign actually taught (2026-08-29)
+
+12 arms, 2 reps per config, counterbalanced, all under `numactl --interleave=0,1,2` + `--no-final-save`,
+8 steps/arm, split 40 unless stated. Placement (`n0 34%`) and cgroup peak (244 GB) were IDENTICAL in
+every arm, so neither can explain any difference.
+
+| config | run 1 | run 2 | mean s/step | spread | vs base |
+|---|---|---|---|---|---|
+| spike (P1 ceiling, NOT a real impl) | 195.4 | 195.6 | **195.5** | 0.10% | **-17.3%** |
+| **base** (fused, non-blocking 1F1B) | 237.3 | 235.3 | **236.3** | 0.85% | — |
+| split 36 | 241.0 | 242.1 | 241.6 | 0.46% | +2.2% |
+| `--pipe-blocking-handoff` (pre-1F1B) | 267.0 | 268.3 | 267.7 | 0.49% | +13.3% |
+| `--no-fused-latent-grad` (pre-fused) | 290.9 | 297.0 | 294.0 | 2.10% | +24.4% |
+| `--latent-gpu-budget 8` | CUDA OOM | skipped | — | — | not viable |
+
+**CONFIRMED WINS, both of which I claimed early, then doubted, retracted or under-stated:**
+* **Fused offloaded-latent gradient: -19.6%** (originally claimed -17.0%, then RETRACTED in 13i).
+  Mechanism verified in the same arms: 2.26M vs 17.21M page faults/step -- **7.6x fewer** -- with the
+  nofused fault counts reproducing to **0.0003%**.
+* **1F1B non-blocking handoff: -11.7%** (originally claimed -9.1%, then downgraded to "probable").
+
+**Both were real all along. The measurement was the problem, not the optimisations.**
+
+**Metric quality note:** page-fault counts reproduce to 0.0003-0.5% and track known structural changes
+exactly (split 36 faults are 10% below split 40, matching the 36/40 layer ratio). On a noisy box a
+mechanism metric that precise is worth more than the stopwatch -- the fault counts, not the timings,
+were what first showed the fused path genuinely engages.
+
+**THE LESSON, which cost about a week.** Effect size is meaningless without a measured noise floor.
+This box ran at 7-51% run-to-run variance while I chased 9-20% effects through it, producing a claim,
+a retraction, and an un-retraction of the SAME result. Three separate "disproofs" were themselves
+artifacts: a page-fault count sampled during the BUILD phase (the model loader faults tens of millions
+of pages by design), an RSS-based watchdog that structurally could not see a cgroup limit, and a
+`--membind` control that made things worse than no control at all. Fixing the measurement -- NUMA
+determinism plus removing 52 GB of per-arm checkpoint churn -- took the noise floor under 1%, and
+every question then resolved in four arms.
+
+**RESOLVED in 13n below — co-located placement is worth -37.0%, far more than the ~175 target.**
+The ~175 s/step seen in uncontrolled runs (13j, arms 3_nonuma/4_numa) is 26% below this sweep's 236.3
+base. Those runs had memory CONCENTRATED on one node with threads co-located; interleaving
+spreads pages across 3 nodes so every access may be remote. A placement sweep (co-located vs
+interleaved, 2 reps each) tests whether co-location now reproduces at ~175 -- the 175.0/212.0 variance
+that made me abandon it was measured BEFORE `--no-final-save`, so checkpoint-cache churn is the prime
+suspect for that variance rather than the policy itself.
+
+
+### 13n. NUMA CO-LOCATION — the single largest win of the campaign, -37.0% (2026-08-29)
+
+Counterbalanced A,B,B,A; only the placement wrapper differs. Fused path, `--no-final-save`, split 40,
+8 steps/arm throughout.
+
+| policy | runs | mean s/step | spread | rank-0 memory |
+|---|---|---|---|---|
+| **co-located** `--cpunodebind=N --membind=N` | 149.9, 148.6 | **149.3** | 0.87% | node 1, **99%** |
+| interleaved `--interleave=0,1,2` | 237.3, 235.3, 237.3, 238.3 | 237.1 | 1.27% | n0 34% (spread over 3) |
+
+**-37.0%.** Page faults identical across all six arms (2.25-2.26M, +-0.5%), so the ONLY variable is
+where rank 0's 52 GB lives relative to the GPU that reads it. Both GPUs sit on node 1; co-location
+pins rank 0's threads AND memory there (rank 1 -> node 0), while interleaving scatters pages across
+three nodes so most accesses are remote on a workload moving 184 GB/step across PCIe.
+
+**I had this configuration and threw it away.** 13j measured co-location at 175.0 and 212.0 and I read
+that 21% spread as "unreproducible", switching to interleaving for determinism -- surrendering ~37% of
+throughput. That variance was measured BEFORE `--no-final-save`, when every arm wrote a 52 GB
+checkpoint; page-cache churn is what perturbs NUMA locality. With the churn gone, co-location
+reproduces to 0.87%. **Same error as the fused-grad retraction: judging a LEVER through a broken
+INSTRUMENT.**
+
+### 13o. RECOMMENDED PRODUCTION CONFIG and the measured total
+
+```
+numactl --cpunodebind=$NODE --membind=$NODE   # rank0 -> node 1 (GPU-local), rank1 -> node 0
+--pipe-parallel --pipe-parallel-mb 2  MP_SPLIT=40
+(fused latent grad is the default; do NOT pass --no-fused-latent-grad)
+--no-final-save for measurement runs only
+NOT recommended: --latent-gpu-budget (OOMs), --latent-pin-grad (measured slower), split 36 (+2.2%)
+```
+
+Measured endpoints, both under controlled placement:
+
+| config | s/step | s/microbatch |
+|---|---|---|
+| `--no-fused-latent-grad` + interleaved | 294.0 | 147.0 |
+| **fused + co-located** | **149.3** | **74.6** |
+
+**-49.2% between measured endpoints**, from two changes that were each independently confirmed
+(fused -19.6%, co-location -37.0%). The 1F1B handoff (-11.7%) is inside both numbers, having shipped
+before this sweep.
+
+**All of the above is at `--lr 0`** (throughput only, nothing trains). Before committing to a long arm
+B run, one validation at a real learning rate is required: the fused path changes WHERE the optimizer
+step happens (inside the transfer's backward rather than an autograd hook), and while its gradients are
+bit-identical by unit test, that has never been exercised with a nonzero `--latent-lr` at scale.
+
+
+### 13p. ARM B AT FULL SCOPE RUNS — three memory bugs, and the first real step time (2026-08-30)
+
+`--train-weights all --tw-layer-stride 1` (311 latents / 16.49B on rank 0, ~26B total), `--latent-lr
+5e-7` (REAL optimizer updates, not `--lr 0`), co-located NUMA, split 40, mb 2, seq 2560.
+
+| | |
+|---|---|
+| **step time** | **501.9 s/step = 250.9 s/microbatch** (7 steady deltas; 496,495,496,496,495,541,495,496 -> median 496) |
+| **peak memory** | **274 GB of 620 GB (44%)**, anon 218 GB, flat from step 1 to step 10 |
+| result | rc=0, 10/10 steps, KL 9.43 -> 9.65 across the run |
+
+Before tonight this configuration could not complete a SINGLE step: it OOM-killed the container
+(exit 137) every time, always between the backward and the step line.
+
+**THREE MEMORY BUGS, ~463 GB, all invisible at stride 2 and fatal at stride 1:**
+
+| bug | cost at stride 1 | mechanism |
+|---|---|---|
+| `randperm(n)[:32768]` retained the whole permutation | **146 GB** | the slice is a VIEW over the full n-element int64 tensor, and `.to(device)` is a no-op when the latent is already on CPU, so nothing forced a copy. `.clone()` fixes it. |
+| duplicate Adam state | **211 GB** | `torch.optim.Adam.step()` ALLOCATES exp_avg/exp_avg_sq for every param it visits. The non-pipeline path already removed the latent groups first; both pipeline paths called a bare `opt.step()`, giving every latent a SECOND full set on top of grad-release's. |
+| held-out snapshot cloned every latent | **106 GB** | `scales = scale_only + latents`, and `_snap()` does `t.detach().clone()` over `scales` -- a THIRD full fp32 copy. Now `--no-latent-snapshot`. |
+
+**How they were found, after four blind OOM kills.** Polling could never catch these: with swap
+disabled the kernel's reclaim starves userspace samplers exactly when memory spikes, so a 0.5 s
+catcher logged nothing for the final minutes before a kill. Two instruments cracked it:
+* `host_mem_audit()` -- cgroup memory at named phases, which localised the randperm retention to one
+  list comprehension (anon 125 -> 271 GB across a single line).
+* `host_tensor_inventory()` -- every live CPU tensor grouped by dtype+shape, DEDUPED BY STORAGE so
+  views are charged once and genuine duplicates show as xN. Run at `--tw-layer-stride 64` (one layer,
+  ~17 GB, cannot OOM) it showed every latent shape at **x2 before step 1 and x3 after**, where 1 and 2
+  were correct. Scaling down until the bug fits in a safe run is what made it visible.
+
+**Two of the three were documented behaviour the code did not have**: the randperm comment said "move
+only the 32k survivors" (the clone is what makes that true), and the memory model in 9e already named
+"that third full copy of every latent (latents + Adam moment + snapshot)".
+
+**CAVEAT THAT INVALIDATES THE CAMPAIGN'S ABSOLUTE NUMBERS.** Every throughput arm in 13a-13n ran at
+`--lr 0`, where `_lat_step_one` is SKIPPED (`if param.grad is not None and g["lr"] != 0.0`). The
+optimizer never ran and Adam state was never allocated. Those runs compare CONFIGURATIONS validly
+against each other, but they understate real training: stride 2 measured 149.3 s/step at lr 0, while
+stride 1 with real updates is 501.9 s/step against a 2.15x latent count. Plan arm B from 13p, not 13n.
+
+**Projection at this rate**: 5120 tokens/step (mb 2 x seq 2560) -> 16M tokens = 3125 steps = **18.2
+days**. Still open as levers: the fp32 lm_head copy on rank 0 (~5 GB), Wlm held twice (~4.7 GB), the
+teacher cache materialising 6244 sequences for a 12-sample run, and P1 (13m, ceiling -17.3%).
