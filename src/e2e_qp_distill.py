@@ -1275,6 +1275,36 @@ def place_for_pipeline(model, device):
     print(f"   [pp rank {_PP['rank']}] owns {n_gpu} layers on {device}, {n_cpu} idle on host "
           f"(split at {_PP['split']})", flush=True)
 
+def host_tensor_inventory(tag, top=14):
+    """Inventory every live CPU tensor, grouped by dtype+shape, deduped BY STORAGE.
+
+    Phase probes say WHICH PHASE grows; this says WHAT IS HELD. Deduping on storage id is the point:
+    a view (e.g. randperm(n)[:32768]) is charged to its full backing storage exactly once, and a
+    genuine duplicate (two storages of the same shape) shows up as x2 instead of x1. That is the
+    signature we are hunting -- ~317 GB appearing between two 2 s samples is a duplication, not a
+    fill, since writing that much would take 10-30 s at memory bandwidth.
+    """
+    import gc, collections
+    seen = {}
+    for o in gc.get_objects():
+        try:
+            if torch.is_tensor(o) and o.device.type == "cpu":
+                st = o.untyped_storage() if hasattr(o, "untyped_storage") else o.storage()
+                sid = id(st)
+                if sid not in seen:
+                    seen[sid] = (str(o.dtype), tuple(o.shape), st.nbytes())
+        except Exception:
+            continue
+    agg, cnt = collections.Counter(), collections.Counter()
+    for dt, shape, nb in seen.values():
+        k = f"{dt} {shape}"
+        agg[k] += nb; cnt[k] += 1
+    tot = sum(agg.values())
+    print(f"   [tensors] {tag}: {tot/2**30:.1f} GiB live CPU tensors, {len(seen)} storages", flush=True)
+    for k, nb in agg.most_common(top):
+        print(f"      {nb/2**30:8.2f} GiB  x{cnt[k]:<5d} {k}", flush=True)
+
+
 def host_mem_audit(tag):
     """Log cgroup memory at a named phase. The container is killed by the CGROUP (page cache counts,
     RSS does not), and a 330 GB allocation burst once took us from 290 GB to the 620 GB limit in under
@@ -2633,18 +2663,39 @@ def train(args):
         """Buffer shaped like `t`."""
         return t.detach().clone()
 
+    # `scales` is scale_only + latents (see its definition), so snapshotting it clones EVERY LATENT
+    # in full fp32 -- a THIRD full copy alongside the latent and Adam's exp_avg. Measured by live-tensor
+    # inventory at --tw-layer-stride 64: every latent shape appears x2 before step 1 (latent + snapshot)
+    # and x3 after (+ exp_avg), stable across steps. At stride 1 that third copy is ~106 GB across both
+    # ranks, which is what put the run at 220 GB anon before Adam had allocated anything and left no
+    # room for exp_avg under the 620 GB cgroup cap.
+    # The snapshot is LOAD-BEARING (RESULTS_SUMMARY 5: a stage that never beats its step-0 entry must
+    # restore that entry), so it is not simply removed. --no-latent-snapshot skips only the LATENT
+    # portion, keeping the scale snapshot intact; the trained assignments then are not restorable, so
+    # it is for throughput/memory runs and for --select final, not for a production stage that relies
+    # on best-checkpoint restore.
+    _snap_skip_latents = bool(getattr(args, "no_latent_snapshot", False))
+    _snap_list = scale_only if _snap_skip_latents else scales
+    if _snap_skip_latents and latents:
+        log(f"   --no-latent-snapshot: held-out snapshot covers {len(scale_only)} scale tensors only, "
+            f"skipping {len(latents)} latents "
+            f"({sum(p_.numel() for p_ in latents)*4/1e9:.1f}GB of fp32 clones NOT taken)")
+
     def _snap():
         if _snap_bufs["s"] is None:
-            _snap_bufs["s"] = [_snap_alloc(s, "s", i) for i, s in enumerate(scales)]
+            _snap_bufs["s"] = [_snap_alloc(s, "s", i) for i, s in enumerate(_snap_list)]
             _snap_bufs["t"] = [_snap_alloc(m.tern_b, "t", i) for i, m in enumerate(arm_b_mods)]
         else:
             with torch.no_grad():
-                for dst, src in zip(_snap_bufs["s"], scales):
+                for dst, src in zip(_snap_bufs["s"], _snap_list):
                     dst.copy_(src.detach())
                 for dst, m in zip(_snap_bufs["t"], arm_b_mods):
                     dst.copy_(m.tern_b.detach())
         return (_snap_bufs["s"], _snap_bufs["t"])
     def _restore(snap):
+        # zip() truncates to the shorter sequence, and `scales` is scale_only + latents, so under
+        # --no-latent-snapshot (snapshot = scale_only) the scale entries still align exactly and the
+        # latents are simply left as they are. No index skew.
         with torch.no_grad():
             for s, b in zip(scales, snap[0]): s.copy_(b)
             for m, t in zip(arm_b_mods, snap[1]): m.tern_b.copy_(t)
@@ -2849,6 +2900,7 @@ def train(args):
                          f"nothing after --heldout-n {args.heldout_n} (+probe/gate). Raise --max-samples.")
 
     host_mem_audit("entering training loop")
+    host_tensor_inventory("entering training loop")
     while opt_step < args.steps:
         # ── PIPELINED PATH (cut-graph 1F1B) ──────────────────────────────────────────────────
         # v1 interleaved only the FORWARD and then ran one monolithic backward: measured 278 s vs
@@ -3093,6 +3145,7 @@ def train(args):
             log(f"   step {opt_step}/{args.steps}  pp rank {_PP['rank']} mb={_M} kl={_kl_acc:.4f}")
             if opt_step <= 4 and _PP["rank"] == 0:
                 host_mem_audit(f"after step {opt_step}")
+                host_tensor_inventory(f"after step {opt_step}")
             if opt_step <= 6:
                 vram_audit(f"after pp step {opt_step}", model)
             if held_idx and opt_step % eval_every == 0:
@@ -3587,6 +3640,12 @@ def main():
     ap.add_argument("--latent-gpu-budget", type=float, default=0.0,
                     help="GB of latents to keep RESIDENT ON GPU (per process). Those layers do no "
                          "host->device copy in dequant(). 0 = all offloaded (default).")
+    ap.add_argument("--no-latent-snapshot", action="store_true",
+                    help="Held-out best-checkpoint snapshot covers SCALES ONLY, not latents. `scales` "
+                         "is scale_only+latents, so the snapshot otherwise clones every latent in fp32 "
+                         "-- a third full copy beside the latent and Adam's exp_avg (~106 GB at "
+                         "--tw-layer-stride 1). Trained ASSIGNMENTS are then not restorable from the "
+                         "snapshot, so use only with --select final or for memory/throughput runs.")
     ap.add_argument("--no-final-save", action="store_true",
                     help="Skip ALL model writes, including the final save. For throughput runs "
                          "(--lr 0) whose output is discarded: the write is ~52 GB plus a ~108 GB "
