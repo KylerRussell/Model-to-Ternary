@@ -2014,3 +2014,95 @@ holding rank 0's 22.4 GB has not been identified; `vram_audit()` exists but is g
 `VRAM_AUDIT=1`, which no arm in this campaign set. **Run one arm with `VRAM_AUDIT=1` before
 speculating about G=4** -- that is the single highest-value diagnostic left, because tokens/s is now
 limited by VRAM and nothing else.
+
+## 13t. Where rank 0's VRAM actually goes, and what that permits (2026-08-31)
+
+13s left tokens/s limited by VRAM: G=3 ran with ~1 GB free on rank 0 while the marginal cost per
+extra sequence was still FALLING. First run in the campaign with `VRAM_AUDIT=1` (the flag existed all
+along; no arm had ever set it).
+
+**Rank 0, `--mb-seqs 3`, mid-training:**
+
+    cuda:0  packed 3.80  other params 2.55  scale 0.24        -> 7.40 GB persistent
+    cuda:0  allocated 7.40  reserved 23.39  peak 22.32  free 1.03 / 25.21 GB
+
+**Fragmentation is NOT the problem, which kills the obvious fix.** Peak ALLOCATED is 22.32 GB and
+reserved is 23.39 -- barely 1 GB of allocator slack. Rank 0's memory is genuinely live, so
+`PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` has almost nothing to reclaim there. (Rank 1 does
+carry ~3.5 GB of slack -- allocated 3.47, reserved 19.95 -- but rank 1 is not the constraint.)
+
+So of rank 0's 22.3 GB: **7.4 GB is persistent weights and ~14.9 GB is activations + dequant
+transients**, and the latter is exactly what scales with G. Measured VRAM by G: 16.3 / 19.4 / 22.4 GB
+for G = 1 / 2 / 3, i.e. **~3.0 GB per extra sequence**, which puts G=4 at ~25.4 GB against 25.21 GB
+usable. It misses by ~2 GB after the 1 GB already free.
+
+**RETRACTED: "a 5.1 GB fp32 latent is GPU-resident on rank 0."** Inferred in 13s from the
+code-transfer log (311 latents = 66.0 GB, but only 310 = 60.9 GB got codes). The audit shows NO
+`latent` category on either device. The exclusion test is `latent.device != scale.device`, and the
+excluded module has BOTH on CPU -- it belongs to the other rank's stage -- so it was never in VRAM.
+Nothing to reclaim there.
+
+**Also stale, confirmed:** the §13p note listing "the fp32 lm_head copy on rank 0 (~5 GB), Wlm held
+twice (~4.7 GB)" as open VRAM levers. `_Wlm` is already `.to(torch.bfloat16).cpu()` and pinned --
+host memory, already offloaded, and 2.55 GB of "other params" on rank 0 is the bf16 embedding table.
+
+**Minor bug in the instrument:** `vram_audit` counts `packed` twice, once by module attribute and
+once as a registered buffer, which is why every report shows `buffers` equal to `packed` and a
+NEGATIVE "unnamed". The per-category numbers are right; the `named` total is inflated by exactly the
+packed size.
+
+**The real lever for G>=4 is the dequant transient.** `_LATENT_DEQUANT_MIN_ELEMS` defaults to
+268M elements, so only tensors ABOVE that chunk at all -- but a typical 27B latent is 53M, so the
+common case takes the unchunked path and materialises ~6 full-size temporaries (~1.3 GB for a 202 MiB
+latent). Lowering the threshold makes every latent chunk, bounding that transient. It costs a
+`torch.cat` per dequant and does not touch the persistent 7.4 GB.
+
+### G=4 REACHED: 68.5 tok/s, 2.70 days -- by freeing ~3 GB, not by finding slack
+
+The first `--mb-seqs 4` attempt OOMed, and the traceback named the exact site:
+
+    File "e2e_qp_distill.py", line 280, in dequant
+      return torch.cat(outs, dim=0).reshape(...)
+    OutOfMemoryError: Tried to allocate 340.00 MiB ... 310.06 MiB is free.
+    Of the allocated memory 22.32 GiB is allocated by PyTorch, and 114.20 MiB is
+    reserved by PyTorch but unallocated.
+
+**114 MiB reserved-but-unallocated proves `expandable_segments:True` worked and that there was no
+fragmentation to reclaim** -- the run needed ~3 GB of real reduction. Two changes supplied it:
+
+1. **The chunked dequant's `torch.cat` doubled its own peak.** `outs` holds a full output's worth of
+   chunks while `cat` allocates a SECOND full-size result. Writing each chunk into a preallocated
+   tensor makes the peak 1x the output plus one chunk. Verified against `cat`: max|dvalue|,
+   max|dgrad_L| and max|dgrad_s| all exactly 0, with non-trivial gradients.
+2. **bf16 decode on the code path.** `dequant()` built the weight in fp32 (q, mask and the output all
+   4 B/element) and `forward()` then cast to bf16, so ~12 B/element of transient per weight, with
+   ~7 weights alive per layer during a checkpoint recompute. Decoding in bf16 halves that to 6.
+
+**bf16 is safe HERE and only here.** Plain `--latent-bf16-compute` rounds `L/s` in bf16, whose 8-bit
+mantissa puts ~0.5% of latents close enough to a bin boundary to flip spuriously -- against a real
+motion rate of only ~3.55%, that is noise comparable to the signal. With `--latent-code-transfer` the
+assignment q and the STE gate are computed on the CPU in fp32 and shipped exactly, so bf16 touches
+only the weight VALUE q*s, which the GEMM consumes in bf16 anyway. **The code path, which was a WASH
+on speed at G=1 (13r, -1.0%), is what makes the memory saving admissible.**
+
+Result: rank 0's peak allocated is **22.32 GiB at G=4 -- identical to G=3** (22.80 GiB by step 4).
+
+| G | s/step | tokens/step | tok/s | vs G=1 | days for 16M | GPU0 peak |
+|---|---|---|---|---|---|---|
+| 1 | 234.7 | 5120 | 21.8 | — | 8.5 | ~16.3 GB |
+| 2 | 256.7 | 10240 | 39.9 | +83% | 4.6 | ~19.4 GB |
+| 3 | 275.0 | 15360 | 55.9 | +156% | 3.3 | 22.32 GiB |
+| **4** | **299.0** | **20480** | **68.5** | **+214%** | **2.70** | **22.80 GiB, 0.70 free** |
+
+Steady deltas at G=4: 299/299/299. **s/step rose 27% while tokens/s rose 214%.**
+
+**CAVEAT -- G=4's arm is not config-identical to G<=3.** It adds `--latent-code-transfer` and
+`--latent-bf16-compute`, so the latent gradient and the scale gradient are bf16 (the fp32 master and
+the assignment decisions are untouched). Adam normalises by sqrt(v), so a ~0.4% relative gradient
+error should be benign, but this is a PRECISION CHANGE that no quality metric has been run against.
+Validate assign-moved ratio and held-out KL before committing to it for a production run; G=3 at
+55.9 tok/s needs neither flag and is the conservative fallback.
+
+**G=5 is not reachable**: 0.70 GB free at G=4, and each sequence costs ~0.5 GB even after the bf16
+saving. The next real headroom would have to come from the ~7.4 GB of persistent weights or from
+rank 1's loss transients, neither of which this campaign has attacked.

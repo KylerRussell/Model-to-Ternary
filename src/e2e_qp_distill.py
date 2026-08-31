@@ -146,7 +146,15 @@ class TernaryScaleLinear(nn.Module):
         code_gpu = self._code.to(dev, non_blocking=True)
         _PROF_ACC["h2d"] += _clock() - _t0
         _PROF_ACC["n_h2d"] += 1
-        q, mask = _lat_code_decode(code_gpu, self.block_size, torch.float32)
+        # bf16 decode when --latent-bf16-compute is on. This is SAFE ONLY on the code path: q and
+        # the STE gate were computed on the CPU in fp32 and shipped exactly, so bf16 never touches an
+        # assignment decision -- it only affects the weight VALUE q*s, which forward() casts to bf16
+        # anyway. Plain --latent-bf16-compute (no code path) would round L/s in bf16, whose 8-bit
+        # mantissa puts ~0.5% of latents close enough to a bin boundary to flip spuriously, against a
+        # real motion rate of only ~3.55%.
+        # Memory: q, mask and the output all halve, 12 -> 6 B/element of transient per weight.
+        _cdt = torch.bfloat16 if getattr(self, "_latent_bf16_compute", False) else torch.float32
+        q, mask = _lat_code_decode(code_gpu, self.block_size, _cdt)
         s_all = self.scale.unsqueeze(1).clamp_min(1e-8).to(q.dtype)
         # q carries no grad, so `q * s_all` feeds the SCALE exactly as `q.detach() * s` did.
         proxy = (_UseTransferred.apply(self.latent, q)
@@ -154,12 +162,12 @@ class TernaryScaleLinear(nn.Module):
         _chunk = _LATENT_DEQUANT_CHUNK_BLOCKS
         if _chunk and q.numel() > _LATENT_DEQUANT_MIN_ELEMS and self.n_blocks > _chunk:
             pb = proxy.reshape(self.n_blocks, self.block_size)
-            outs = []
-            for i in range(0, self.n_blocks, _chunk):
+            out = torch.empty(self.n_blocks, self.block_size, dtype=q.dtype, device=q.device)
+            for i in range(0, self.n_blocks, _chunk):     # preallocated, not cat -- see dequant()
                 q_i, p_i = q[i:i + _chunk], pb[i:i + _chunk]
-                outs.append(q_i * s_all[i:i + _chunk]
-                            + (p_i - p_i.detach()) * mask[i:i + _chunk])
-            return torch.cat(outs, dim=0).reshape(self.out_features, self.in_features)
+                out[i:i + _chunk] = (q_i * s_all[i:i + _chunk]
+                                     + (p_i - p_i.detach()) * mask[i:i + _chunk])
+            return out.reshape(self.out_features, self.in_features)
         pb = proxy.reshape(self.n_blocks, self.block_size)
         deq = q * s_all + (pb - pb.detach()) * mask
         return deq.reshape(self.out_features, self.in_features)
@@ -270,14 +278,22 @@ class TernaryScaleLinear(nn.Module):
             _n = Lb.numel()
             _chunk = _LATENT_DEQUANT_CHUNK_BLOCKS
             if _chunk and _n > _LATENT_DEQUANT_MIN_ELEMS and self.n_blocks > _chunk:
-                outs = []
+                # Write each chunk into a PREALLOCATED output instead of `torch.cat(outs)`.
+                # cat held the full set of chunks (one full-size tensor's worth) AND allocated a
+                # second full-size result, so the chunked path peaked at 2x the output -- which is
+                # exactly where --mb-seqs 4 died: "OutOfMemory ... Tried to allocate 340.00 MiB" at
+                # this cat, with 22.32 GiB already live. Slice-assignment records CopySlices, so the
+                # STE gradient still reaches the latent unchanged; each chunk is freed as soon as it
+                # is copied, so the peak is 1x the output plus one chunk.
+                out = torch.empty(self.n_blocks, self.block_size,
+                                  dtype=s_all.dtype, device=Lb.device)
                 for i in range(0, self.n_blocks, _chunk):
                     L_i = Lb[i:i + _chunk]
                     s_i = s_all[i:i + _chunk]
                     q_i = torch.clamp(torch.round(L_i / s_i), -1, 1)
                     m_i = (L_i.abs() < 1.5 * s_i).to(L_i.dtype)
-                    outs.append(q_i.detach() * s_i + (L_i - L_i.detach()) * m_i)
-                return torch.cat(outs, dim=0).reshape(self.out_features, self.in_features)
+                    out[i:i + _chunk] = q_i.detach() * s_i + (L_i - L_i.detach()) * m_i
+                return out.reshape(self.out_features, self.in_features)
             s = s_all
             q = torch.clamp(torch.round(Lb / s), -1, 1)
             mask = (Lb.abs() < 1.5 * s).to(Lb.dtype)         # STE grad gate (inside the rounding band)
