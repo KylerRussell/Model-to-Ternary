@@ -1901,3 +1901,116 @@ hand-written C++/OpenMP kernel; at a -1.0% starting point that is not justified.
 ~84 s gap, ~21 s is residual transfer and the rest is GPU compute that the timers had been hiding.
 The next real lever is therefore GPU-side work, not host transfer -- a different problem from
 everything in 13a-13r.
+
+## 13s. Sequences per microbatch: the only lever left is TOKENS/s, not s/step (2026-08-31)
+
+13r established that every component of the 234.7 s step sits at a wall: GPU compute cannot shed its
+recompute (checkpointing is mandatory, below), H2D payload reduction is a wash (host DRAM is only
+6.5x PCIe), and the Adam and gradient D2H are both near their bandwidth limits. What was still on the
+table is the OTHER axis.
+
+**The latent plumbing is paid PER MICROBATCH, not per token.** A latent is transferred, stepped and
+its gradient shipped once per microbatch forward, however many sequences ride along in the batch
+dimension. At 13q that fixed cost is ~158 s of the 233 s step (H2D 85 + Adam 40 + D2H 33); only the
+~75 s of GPU compute scales with tokens. Grouping G sequences into each microbatch therefore gives
+
+    s/step  = 158 + 75*G          tokens/step = 5120*G
+
+which RAISES s/step while raising tokens/s toward an asymptote of 5120/75 = 68 tok/s.
+
+`--mb-seqs G` (default 1) implements this. Note the metric change: **s/step gets worse on purpose.**
+The quantity that sets the wall-clock cost of arm B is tokens/s, which is what the day count in 13p
+was always derived from.
+
+**Semantics change, deliberately.** With grad-release each latent takes one Adam step per microbatch,
+so at G>1 that step sees a G-sequence gradient instead of a 1-sequence one -- equivalent to a G-fold
+larger batch. Less gradient noise, generally an improvement, but the latent lr is tuned against G=1
+and would eventually want revisiting.
+
+**Batch-1 assumptions found and fixed** (all silent, none would have raised an error except the last):
+* `pipe_mem_eff_loss` computed the CE term from `h[0]` / `ids[0]` -- with G>1 it would have trained
+  cross-entropy on the FIRST sequence only and quietly ignored the rest.
+* the inter-rank activation landing pad was `torch.empty(1, seq, H)`, hard-coding the batch dim.
+* rank 0's stage-0 forward and rank 1's `_ids_l` both indexed a single `batches[i]`.
+* `cache["idx"][bi].unsqueeze(0)` faked a batch dim for one sample. `cache["idx"]` is a LIST of
+  [seq, K] tensors, not a tensor, so a group needs `torch.stack`, not list indexing -- the one that
+  did raise (`TypeError: list indices must be integers or slices, not list`).
+
+`chunked_hidden_state_loss` (flattens B*T) and `pipe_make_ctx` (expands to `inputs_embeds.shape[0]`)
+were already batch-general and needed nothing.
+
+### WHY the recompute cannot be removed instead (measured, 13s)
+
+The obvious alternative -- stop recomputing, since checkpointing is what doubles both the H2D and the
+forward GEMMs -- is not affordable, and by a wide margin. Instrumented with
+`torch.autograd.graph.saved_tensors_hooks`, the STE dequant saves **five FULL-SIZE fp32 tensors,
+20.03 bytes per latent element**:
+
+    rank 0 holds 16.5e9 latent elements -> 330 GB per microbatch, 661 GB with 2 in flight
+    free VRAM: 8.3 GB
+
+So `--grad-ckpt-stride 2` (un-checkpointing 20 of 40 layers) is off by ~40x, not marginally short.
+Gradient checkpointing here is LOAD-BEARING, and the 2x H2D it causes is structural. Even a custom
+autograd Function saving a packed 3-bit code instead of the five fp32 tensors (6.2 GB/microbatch,
+12.4 GB for two) would still not fit, so this direction is closed, not merely expensive.
+
+### Measured: --mb-seqs 2 is +83% tokens/s, nearly double the +51% predicted
+
+| | G=1 (13q) | G=2 | |
+|---|---|---|---|
+| latent H2D count | 1240 | **1240** | unchanged, as the model requires |
+| latent Adam count | 620 | **620** | unchanged |
+| h2d | 148.1 s | 163.8 s | |
+| adam | 40.1 s | 40.4 s | |
+| d2h | 40.0 s | 46.3 s | |
+| **s/step** | **234.7** | **256.7** | **+9.4%** |
+| tokens/step | 5120 | 10240 | |
+| **tokens/s** | **21.8** | **39.9** | **+83%** |
+| **days for 16M tokens** | **8.5** | **4.6** | |
+
+Steady deltas 257/255/257/258 -- tight. The plumbing counts are IDENTICAL at 1240 H2D and 620 Adam
+while tokens doubled, which is the whole thesis confirmed directly rather than inferred.
+
+**It beat the +51% projection because the projection assumed GPU compute would double. It rose only
+~22 s, not 75.** At batch 1 the GEMMs are WEIGHT-LOAD BOUND -- a 27B ternary weight streamed from VRAM
+for a single 2560-token sequence -- so the second sequence reuses the already-loaded weight and rides
+along at roughly a third of the cost of the first. This is the same arithmetic-intensity argument as
+the host-side one in 13r, one level down the memory hierarchy, and it means the per-token GPU cost
+FALLS as G grows.
+
+**VRAM is the binding constraint, not compute.** GPU 0 went 16.3 -> 19.4 GB of 24.6 (~3.1 GB per extra
+sequence), so G=3 (~22.5 GB) is the practical ceiling on rank 0 and G=4 (~25.6 GB) would OOM. Rank 1
+has far more headroom (12.7 GB used), which is a REASON TO REVISIT THE SPLIT: 13r found split 36
+slower per step, but per-step time is no longer the objective -- moving layers to rank 1 to buy VRAM
+headroom for a larger G could win on tokens/s even while losing on s/step.
+
+### The G sweep, and where it stops
+
+| G | s/step | tokens/step | tok/s | vs G=1 | days for 16M | GPU0 VRAM |
+|---|---|---|---|---|---|---|
+| 1 | 234.7 | 5120 | 21.8 | — | 8.5 | 16.3 / 24.6 GB |
+| 2 | 256.7 | 10240 | 39.9 | **+83%** | 4.6 | 19.4 GB |
+| 3 | **275.0** | 15360 | **55.9** | **+156%** | **3.3** | **22.4 GB (2.2 free)** |
+| 4 | — | — | — | — | — | ~25.9 GB — **would OOM** |
+
+Steady deltas at G=3: 275/273/273/279. The marginal cost of each extra sequence FALLS (+22.0 s for
+the 2nd, +18.3 s for the 3rd) because the GEMMs are weight-load bound, so tokens/s is still climbing
+when VRAM runs out. **G=3 is the ceiling on the current split**, and the limit is memory, not compute.
+
+**Session total: 501.9 s/step at 5120 tokens (10.2 tok/s, 18.1 days) -> 275.0 s/step at 15360 tokens
+(55.9 tok/s, 3.3 days) = 5.5x throughput.**
+
+Note the two halves are independent and multiply: 13q made the step 2.14x cheaper by fixing the
+optimizer, and 13s got 2.57x more tokens through each step by amortising what the step pays per
+microbatch.
+
+### Reaching G=4 is a VRAM problem, and the recorded lever for it is STALE
+
+G=4 needs ~3.5 GB more per rank. Rebalancing cannot supply it: at G=3 rank 0 holds 22.4 GB and rank 1
+19.6 GB, so split 36 would land both near 24 GB. The §13p note listing "the fp32 lm_head copy on rank
+0 (~5 GB), Wlm held twice (~4.7 GB)" as open levers is **stale for VRAM** -- `_Wlm` is already
+`.to(torch.bfloat16).cpu()` and pinned, i.e. it is HOST memory and was already offloaded. Whatever is
+holding rank 0's 22.4 GB has not been identified; `vram_audit()` exists but is gated behind
+`VRAM_AUDIT=1`, which no arm in this campaign set. **Run one arm with `VRAM_AUDIT=1` before
+speculating about G=4** -- that is the single highest-value diagnostic left, because tokens/s is now
+limited by VRAM and nothing else.

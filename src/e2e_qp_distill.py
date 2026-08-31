@@ -1227,8 +1227,10 @@ def pipe_mem_eff_loss(h, ids, Wlm, t_idx, t_val, args, ce_lt):
                                      loss_type=ce_lt, chunk_size=4096)
     ce_w = float(getattr(args, "ce_weight", 0.0))
     if ce_w > 0:
-        Hf = h[0, :-1, :]
-        tgt = ids[0, 1:]
+        # Flatten across the BATCH: with >1 sequence per microbatch (--mb-seqs) `h[0]` would have
+        # silently trained the CE term on the first sequence only.
+        Hf = h[:, :-1, :].reshape(-1, h.shape[-1])
+        tgt = ids[:, 1:].reshape(-1)
         n_ce = int(getattr(args, "ce_positions", 512) or 0)
         if 0 < n_ce < Hf.shape[0]:
             sel = torch.randint(0, Hf.shape[0], (n_ce,), device=Hf.device)
@@ -3145,11 +3147,20 @@ def train(args):
         if _PP["on"]:
             import torch.distributed as dist
             _M = _PP["mb"]
+            # Each microbatch is a GROUP of --mb-seqs sequences. The latent plumbing (H2D, the CPU
+            # Adam, the gradient D2H) is paid PER MICROBATCH, not per token: the weight is transferred
+            # and stepped once per microbatch forward however many sequences ride along. Measured at
+            # 13q, 158 s of the 233 s step is that fixed cost, so grouping is the only lever that
+            # improves TOKENS/s once the per-microbatch costs are at their limits. It raises s/step.
+            _G = max(1, int(getattr(args, "mb_seqs", 1) or 1))
             _idxs = []
             for _ in range(_M):
-                if _pipe_pos[0] >= len(shard):
-                    _pipe_pos[0] = 0
-                _idxs.append(shard[_pipe_pos[0]]); _pipe_pos[0] += 1
+                _grp = []
+                for _ in range(_G):
+                    if _pipe_pos[0] >= len(shard):
+                        _pipe_pos[0] = 0
+                    _grp.append(shard[_pipe_pos[0]]); _pipe_pos[0] += 1
+                _idxs.append(_grp)
             if _grad_release:
                 _f = lr_frac(opt_step)
                 for g in opt.param_groups:
@@ -3188,7 +3199,7 @@ def train(args):
                         pf_reset()
                         if _LAT_ORDER:
                             _pf_start(_LAT_ORDER[0], _LAT_ORDER[0].latent.dtype)
-                    _ids = batches[_bi].to(device)
+                    _ids = torch.cat([batches[_b] for _b in _bi], dim=0).to(device)
                     _h, _ = pipe_stage0(core, _ids, _sp)
                     return _h
                 _tr_ctx = (torch.profiler.profile(
@@ -3250,10 +3261,10 @@ def train(args):
                 # isend completes while we are busy and our next forward starts the instant we ship
                 # this gradient. Without this the irecv is only posted after the send below, and
                 # rank 0's activation cannot arrive until we are already idle waiting for it.
-                _ids_l = [batches[_b].to(device) for _b in _idxs]
+                _ids_l = [torch.cat([batches[_b] for _b in _g], dim=0).to(device) for _g in _idxs]
                 _Hs = _pipe_base(core).config.hidden_size
                 def _mkbuf(_j):
-                    return torch.empty(1, _ids_l[_j].shape[1], _Hs,
+                    return torch.empty(_ids_l[_j].shape[0], _ids_l[_j].shape[1], _Hs,
                                        dtype=torch.bfloat16, device=device)
                 # --pipe-blocking-handoff has to restore the ORIGINAL schedule on BOTH ranks. The 1F1B
                 # fix changed rank 0 (isend early) AND rank 1 (pre-post the irecv); restoring only
@@ -3277,8 +3288,11 @@ def train(args):
                     _hd = _hb.requires_grad_(True)
                     _ctx = pipe_make_ctx(core, _hd)                # rebuilt locally, not shipped
                     _hp = pipe_stage1(core, _hd, _ctx, _sp)
-                    _ti = cache["idx"][_bi].unsqueeze(0).to(_hp.device)
-                    _tv = cache["val"][_bi].unsqueeze(0).to(_hp.device)
+                    # _bi is a GROUP of sample indices. cache["idx"] is a LIST of [seq, K] tensors,
+                    # not a tensor, so stack the group -- giving [G, seq, K], which is what the old
+                    # unsqueeze(0) faked for a single sample.
+                    _ti = torch.stack([cache["idx"][_b] for _b in _bi]).to(_hp.device)
+                    _tv = torch.stack([cache["val"][_b] for _b in _bi]).to(_hp.device)
                     _l = pipe_mem_eff_loss(_hp, _ids, _Wlm, _ti, _tv, args, _ce_lt) / _M
                     _tc = _pnow(); _pt["fwd"] += _tc - _tb
                     if _j + 1 < len(_idxs):
@@ -3906,6 +3920,13 @@ def main():
                          "Measured coverage at 4B: tau=0.001 -> 14.9%%, 0.01 -> 15.7%%, 0.05 -> 19.6%%. "
                          "Only 3.55%% of assignments ever move and motion saturates by ~step 60, so the "
                          "frozen majority contributes optimizer traffic and nothing else.")
+    ap.add_argument("--mb-seqs", type=int, default=1,
+                    help="Sequences per PIPELINE microbatch (default 1). The latent H2D, the CPU Adam "
+                         "and the gradient D2H are paid per microbatch, not per token -- 158 s of the "
+                         "233 s step at 13q -- so grouping sequences amortises them and is the only "
+                         "remaining lever on TOKENS/s. It RAISES s/step while lowering wall-clock time "
+                         "per token: modelled 1->2 seqs takes 233->308 s/step but 22.0->33.2 tok/s. "
+                         "Note each latent Adam step then sees --mb-seqs sequences of gradient.")
     ap.add_argument("--latent-code-transfer", action="store_true",
                     help="Send a uint8 CODE (ternary assignment + STE gate bit) to the GPU instead of "
                          "the fp32 latent: 1/4 the H2D bytes, and EXACT because q and the gate are "
