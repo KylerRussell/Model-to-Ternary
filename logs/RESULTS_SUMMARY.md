@@ -1660,3 +1660,119 @@ stride 1 with real updates is 501.9 s/step against a 2.15x latent count. Plan ar
 **Projection at this rate**: 5120 tokens/step (mb 2 x seq 2560) -> 16M tokens = 3125 steps = **18.2
 days**. Still open as levers: the fp32 lm_head copy on rank 0 (~5 GB), Wlm held twice (~4.7 GB), the
 teacher cache materialising 6244 sequences for a 12-sample run, and P1 (13m, ceiling -17.3%).
+
+## 13q. The 503 s step was a single-threaded optimizer and a wasted temporary (2026-08-31) — 501.9 -> 234.7 s/step CONFIRMED (-53.2%)
+
+Acting on the external deep-research report for §13p's breakdown (CPU Adam 47.0%, H2D 42.5%, D2H
+8.3%, GPU compute 2.2%). Its ranked Stage-1 recommendation was right, but its diagnosis was wrong in
+a way worth recording, because the wrong reason would have sent the next round of work somewhere
+useless.
+
+**FIRST: the report's hardware model is not this machine.** It reasoned throughout about AMD EPYC
+Rome/Milan in NPS4 (single-core ~30 GB/s STREAM, ~65 GB/s per node, AVX2 fallback for
+DeepSpeedCPUAdam). This box is a 4-socket **Intel Xeon E5-4650 (Sandy Bridge-EP, 2012), `avx` only —
+no AVX2, no FMA**, 8 cores/socket, 4 NUMA nodes of 161 GB. The ~8.1 GB/s single-thread figure the
+report quotes *as a contrast* is in fact this machine's own ceiling. Any future prompt must state
+the CPU.
+
+**SECOND: there was no "3.5x Adam anomaly" to explain.** The report compared the measured 381.6
+ms/latent against 108 ms implied by an older 2.04 ns/element benchmark and inferred a 3.5x shortfall
+caused by page faults, dispatch overhead and DMA contention. Rebuilding the exact kernel standalone
+(53.0M-element fp32 latent, node-bound) measured **384.1 ms at 1 thread = 238.1 s across 620 calls,
+against 236.6 s in production — a 0.6% reproduction.** Nothing was missing. The kernel was simply
+single-threaded, because torchrun sets `OMP_NUM_THREADS=1` for every rank when it is unset and
+nothing in this repo overrode it.
+
+The report's premise came from a byte undercount. It assumed ~3 DRAM passes (394 GB/step). The
+kernel actually moved **44 bytes/element**: `mul_` and `add_` are separate passes over `exp_avg`
+(20n, not 12n), and `gb.pow(2)` allocates a FULL-SIZE 202 MiB temporary that is written and then
+re-read to produce a result 256x smaller (12n). That is **1.45 TB/step, a 3.7x undercount**, and it
+is what produced the report's "~1.5 GB/s aggregate = ~2% of one node, therefore a concurrency wall,
+not a bandwidth wall". Corrected: the old kernel ran at **6.07 GB/s = 76% of this CPU's single-core
+ceiling** — near-saturated *for one core*. Threading was still the right lever, but the report
+explicitly ruled out bytes, and bytes were worth 1.94x on their own.
+
+**Measured on the real kernel (ms per 53.0M-element latent, node-bound, 9 reps, median):**
+
+| variant | 1 thr | 8 thr | 16 thr | bytes/elem |
+|---|---|---|---|---|
+| as-shipped | 384.1 | 116.7 | 120.9 | 44n |
+| `+ vector_norm` (kills the `pow(2)` temp) | 197.9 | 71.9 | 74.7 | 32n |
+| `+ lerp_` (both) | 344.9 | **67.2** | **62.6** | 28n |
+
+Three changes, all in `_adam_blockv_step_one` plus one new flag:
+* **`exp_avg.lerp_(gr, 1 - b1)`** IS the Adam moment update (`b1*m + (1-b1)*g`) in one fused
+  read-modify-write, where `mul_` then `add_` costs two passes. 20n -> 12n.
+* **`torch.linalg.vector_norm(gb, dim=1).pow_(2).div_(256)`** replaces `gb.pow(2).mean(dim=1)`,
+  reducing each 256-wide row in a single streaming pass with no full-size temporary. Against an fp64
+  reference it is *no less* accurate than the original (err 2.9e-7 vs 2.0e-7, both fp32 rounding).
+* **`--cpu-threads N`** -> `torch.set_num_threads(N)`, which overrides torchrun's env default
+  (verified in-log: `intra-op=8 (OMP_NUM_THREADS=1)`).
+
+**Placement note the report got backwards.** It worried both ranks contend for node 1's cores.
+`numa_colocate.sh` already splits rank 0 -> node 1, rank 1 -> node 0, so they do not. Measured
+directly with two concurrent processes: **co-located 115 ms each, split 70 ms each** (solo is 67 ms).
+8 threads/rank is contention-free as configured; 16 buys nothing once both ranks run.
+
+**Correctness.** Six successive steps of old vs new on identical gradients: parameter divergence is
+**flat at 2.3e-07 and does not accumulate**, and **zero ternary assignments differ** — assignments
+being the only thing that moves KL. Production KL differs from baseline by +0.028, +0.027, -0.010 at
+steps 1-3: random sign, i.e. run-to-run GPU nondeterminism (bf16 reduction order), not a systematic
+effect of the rewrite.
+
+**Result, stride 1 / `--train-weights all`, same config otherwise:**
+
+| | baseline (13p) | 13q | change |
+|---|---|---|---|
+| CPU Adam | 236.6 s | **40.1 s** | **5.90x** |
+| latent H2D | 214.1 s | **148.1 s** | 1.45x |
+| gradient D2H | 41.6 s | 40.0 s | — |
+| **s/step** | **501.9** | **234.7** | **-53.2%** |
+
+**The H2D fell 66 s although nothing on that path was touched** — the one place the report's
+contention argument was right, for a reason it did not give. Host DRAM traffic dropped 1.45 -> 0.92
+TB/step when the `pow(2)` temporary went away, and the pageable H2D's driver staging copy reads host
+DRAM, so it now contends with far less optimizer traffic. The report predicted contention from the
+Adam being *slow*; it was contention from the Adam being *wasteful*.
+
+**New composition: H2D 63.3%, D2H 17.1%, Adam 17.1%, everything else 2.5%.** The step is still ~97%
+latent plumbing, but the target has moved to the transfer.
+
+**Final: 234.7 s/step, rc=0, 6/6 steps, peak 273/620 GB** (steady deltas 234/234/235/235/234 -- a
+tight spread, unlike the 7-51% placement noise of 13a-13n). Baseline 501.9 -> **-53.2%**.
+
+### 13q-i. `--latent-prefetch` is BOTH broken and unusable with the fused path — ARM KILLED
+
+Tried next because `_PROF_ACC["h2d"]` is incremented ONLY in the non-prefetch branch, which means
+every H2D number in 13p and above was measured with prefetch OFF: those 1240 copies/step were fully
+blocking and had no overlap even attempted.
+
+**Correctness bug found by the arm, not by the timing.** Step 1 reported `adam n=440` where 620 is
+correct -- 180 latents (29%) silently received NO optimizer step -- and `d2h` fell to 27.7 s, exactly
+the 440/620 ratio of 40 s. Cause: on a prefetch MISS the `_PF_ON` branch fell back to a bare
+`self.latent.to(...)` with no `_UseTransferred` wrapper. Under `--latent-offload
+--latent-grad-release` the post-accumulate hook is deliberately not registered (`if not
+_OFFLOAD_STEP_ON`), so `_UseTransferred.backward` is the ONLY thing that steps a latent. Fixed to
+mirror the non-prefetch branch. This is the sixth `--pipe-parallel`-adjacent path found to be
+silently inert rather than wrong-answered.
+
+**Not worth re-measuring even fixed.** The code's own startup line already says it: *"without
+--latent-pin the copies are pageable and therefore synchronous, so prefetch cannot overlap"*. Pageable
+`cudaMemcpyAsync` blocks the host thread on the driver's staging copy, so the side stream buys
+nothing, and `--latent-pin` is the rejected 106 GB mlock. Measured anyway: rank 0 bwd 186.9 s vs
+136.7 s for 13q on the same step, i.e. SLOWER while doing 29% less optimizer work.
+
+**Also rejected on arithmetic, not run:** the report's Stage-1 gradient accumulation across the 2
+microbatches. It needs a persistent per-latent accumulator (the D2H currently stages through ONE
+shared `_LAT_GRAD_ARENA`), so **+106 GB anon, 212 -> 318 GB of the 620 GB cap** on a swapless box with
+four prior OOM kills, to buy 40 s of a 234.7 s step (17.1%). It was sized against a 236.6 s Adam
+where it was worth 27.7%; the threading fix removed the reason to want it.
+
+**Next lever, measured but NOT yet implemented.** The 1240 H2D transfers are 620 latents x 2 --
+forward plus gradient-checkpoint RECOMPUTE. Eliminating the recompute transfer is worth ~74 s (31%
+of the step). Caching the fp32 latent is the known-impossible option (65 GB on rank 0), but the
+recompute does not need it: in `deq = q.detach()*s + (Lb - Lb.detach())*mask` the forward VALUE is
+just `q*s`, and the `(Lb - Lb.detach())` term contributes zero to the value while carrying gradient
+`*mask`. So only `q` (2-bit), `mask` (1-bit) and the small per-block `s` are required --
+**3 bits/latent = 6.1 GB on rank 0's 40/64 layers, against 8.3 GB free**. Unlike the 13m SPIKE probe
+(which skipped the H2D with a deliberately wrong all-ones mask and was timing-only), this is exact.

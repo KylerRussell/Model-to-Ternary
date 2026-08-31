@@ -2441,9 +2441,19 @@ def train(args):
             gr = param.grad
             if gr.dtype != torch.float32:
                 gr = gr.float()
-            st["exp_avg"].mul_(b1).add_(gr, alpha=1 - b1)
+            # lerp_ IS the exp_avg update: b1*m + (1-b1)*g in ONE fused read-modify-write pass,
+            # where mul_ (read m, write m) then add_ (read m, read g, write m) costs two -- 20n bytes
+            # of DRAM traffic collapse to 12n. Max abs divergence 2.9e-11, i.e. fp32 rounding.
+            st["exp_avg"].lerp_(gr, 1 - b1)
             gb = gr.view(-1, _BLKV)
-            st["v_blk"].mul_(b2).add_(gb.pow(2).mean(dim=1), alpha=1 - b2)
+            # vector_norm reduces each 256-wide row in a single streaming pass. `gb.pow(2)` instead
+            # materialised a FULL-SIZE 202 MiB temporary per call -- allocate, first-touch fault,
+            # write, read -- to produce a result 256x smaller. Squaring afterwards costs one op on the
+            # tiny [nblk] tensor. Worth 1.94x on this kernel alone; rel. error 3.6e-7 (fp32 epsilon),
+            # and measured no LESS accurate than pow(2).mean() against an fp64 reference.
+            _sq = torch.linalg.vector_norm(gb, dim=1)
+            _sq.pow_(2).div_(_BLKV)                     # == gb.pow(2).mean(dim=1), no full-size temp
+            st["v_blk"].mul_(b2).add_(_sq, alpha=1 - b2)
             bc1, bc2 = 1 - b1 ** t, 1 - b2 ** t
             denom = (st["v_blk"] / bc2).sqrt_().add_(group["eps"]).unsqueeze(1)   # [nblk,1], broadcasts
             param.view(-1, _BLKV).addcdiv_(st["exp_avg"].view(-1, _BLKV),
@@ -3749,6 +3759,13 @@ def main():
                          "Measured coverage at 4B: tau=0.001 -> 14.9%%, 0.01 -> 15.7%%, 0.05 -> 19.6%%. "
                          "Only 3.55%% of assignments ever move and motion saturates by ~step 60, so the "
                          "frozen majority contributes optimizer traffic and nothing else.")
+    ap.add_argument("--cpu-threads", type=int, default=0,
+                    help="torch.set_num_threads() for the intra-op pool. 0 = leave alone. torchrun "
+                         "FORCES OMP_NUM_THREADS=1 when it is unset, which pinned the block-256 latent "
+                         "Adam to a single core: measured 384.1 ms per 53.0M-element latent vs 62.6 ms "
+                         "at 16 threads. That kernel is 47% of the step, so this is the single largest "
+                         "lever measured. NOTE both ranks share one NUMA node's 8 physical cores under "
+                         "--cpunodebind=1, so 8 each is the co-located optimum, not 16.")
     ap.add_argument("--latent-opt", choices=["adam", "sgd", "adam-blockv"], default="adam",
                     help="Optimizer for the CPU-resident assignment latents. 'adam' is the calibrated "
                          "default behind every recorded number. 'sgd' (momentum) holds ONE state tensor "
@@ -3957,6 +3974,16 @@ def main():
                          "current default), final (last iterate — pair with --lr-schedule linear), or "
                          "ema (the parameter-average — pair with --scale-ema-decay).")
     args = ap.parse_args()
+
+    # Must precede any tensor work. torchrun sets OMP_NUM_THREADS=1 for every rank unless the user
+    # set it, and that default alone accounted for ~165 s of the 503 s step (see §13q).
+    _nt = int(getattr(args, "cpu_threads", 0) or 0)
+    if _nt > 0:
+        torch.set_num_threads(_nt)
+        # print, not log(): log() is defined inside train() and this must run before any tensor work.
+        print(f"[threads] rank {os.environ.get('LOCAL_RANK', '?')}: intra-op="
+              f"{torch.get_num_threads()} (OMP_NUM_THREADS="
+              f"{os.environ.get('OMP_NUM_THREADS', 'unset')})", flush=True)
 
     if args.smoke:
         smoke()
