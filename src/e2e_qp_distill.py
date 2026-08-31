@@ -129,6 +129,41 @@ class TernaryScaleLinear(nn.Module):
         self.register_buffer("flip_grad", torch.zeros(self.n_blocks, self.block_size, dtype=torch.bfloat16, device=self.scale.device))
         self._arm_b = True
 
+    def _dequant_from_code(self):
+        """dequant() for --latent-code-transfer: move 1 B/latent instead of 4, EXACTLY.
+
+        The fp32 master never reaches the GPU. `self._code` already holds q and the STE gate, both
+        computed on the CPU in fp32 by _lat_code_encode(), so the reconstruction here is bit-identical
+        to what the fp32 path would have produced -- unlike a bf16 mirror, which would shift roundings
+        near a bin boundary and silently move assignments.
+
+        The gradient still reaches the CPU leaf: _UseTransferred routes it, and `(p - p.detach())` is
+        zero in VALUE while carrying grad*mask, so the tensor it wraps only has to have the right
+        shape. We wrap the decoded q and never transfer the latent at all.
+        """
+        dev = self.scale.device
+        _t0 = _clock()
+        code_gpu = self._code.to(dev, non_blocking=True)
+        _PROF_ACC["h2d"] += _clock() - _t0
+        _PROF_ACC["n_h2d"] += 1
+        q, mask = _lat_code_decode(code_gpu, self.block_size, torch.float32)
+        s_all = self.scale.unsqueeze(1).clamp_min(1e-8).to(q.dtype)
+        # q carries no grad, so `q * s_all` feeds the SCALE exactly as `q.detach() * s` did.
+        proxy = (_UseTransferred.apply(self.latent, q)
+                 if (_GRAD_PIN_ON or _OFFLOAD_STEP_ON) else q)
+        _chunk = _LATENT_DEQUANT_CHUNK_BLOCKS
+        if _chunk and q.numel() > _LATENT_DEQUANT_MIN_ELEMS and self.n_blocks > _chunk:
+            pb = proxy.reshape(self.n_blocks, self.block_size)
+            outs = []
+            for i in range(0, self.n_blocks, _chunk):
+                q_i, p_i = q[i:i + _chunk], pb[i:i + _chunk]
+                outs.append(q_i * s_all[i:i + _chunk]
+                            + (p_i - p_i.detach()) * mask[i:i + _chunk])
+            return torch.cat(outs, dim=0).reshape(self.out_features, self.in_features)
+        pb = proxy.reshape(self.n_blocks, self.block_size)
+        deq = q * s_all + (pb - pb.detach()) * mask
+        return deq.reshape(self.out_features, self.in_features)
+
     def dequant(self):
         if getattr(self, "_arm_b", False):
             deq = self.tern_b.to(self.scale.dtype) * self.scale.unsqueeze(1)   # int8 support × trained scale
@@ -154,6 +189,9 @@ class TernaryScaleLinear(nn.Module):
                 _dq.register_hook(_spike_hook)
             return _dq.reshape(self.out_features, self.in_features)
         if getattr(self, "latent", None) is not None:
+            if (_LAT_CODE_ON and getattr(self, "_code", None) is not None
+                    and self.latent.device != self.scale.device):
+                return self._dequant_from_code()
             # --latent-offload: the latent lives in CPU RAM (fp32 params AND their grads, 6.04GB for all 32
             # down_proj) and is streamed to the GPU for this layer's forward. Because the module's forward runs
             # INSIDE a gradient-checkpointed region, the GPU copy is freed after the first pass and recreated
@@ -192,8 +230,17 @@ class TernaryScaleLinear(nn.Module):
                         _nx = _LAT_ORDER[_i + 1] if 0 <= _i < len(_LAT_ORDER) - 1 else None
                     if _nx is not None:
                         _pf_start(_nx, _dt)
-                    latent_gpu = (_UseTransferred.apply(self.latent, _buf) if _buf is not None
-                                  else self.latent.to(self.scale.device, dtype=_dt, non_blocking=True))
+                    # A prefetch MISS must still go through _UseTransferred. It used to fall back to
+                    # a bare .to(), and under --latent-offload --latent-grad-release the release hook
+                    # is deliberately NOT registered (`if not _OFFLOAD_STEP_ON`), so the fused
+                    # backward in _UseTransferred is the ONLY thing that steps a latent. Every missed
+                    # latent therefore received NO optimizer step at all, silently: measured
+                    # adam n=440 of 620 (29% of latents untrained) at --latent-prefetch-depth 1,
+                    # with d2h falling to exactly the 440/620 ratio. Mirrors the non-prefetch branch.
+                    if _buf is None:
+                        _buf = self.latent.to(self.scale.device, dtype=_dt, non_blocking=True)
+                    latent_gpu = (_UseTransferred.apply(self.latent, _buf)
+                                  if (_GRAD_PIN_ON or _OFFLOAD_STEP_ON) else _buf)
                 else:
                     _th0 = _clock()
                     _gcp = self.latent.to(self.scale.device, dtype=_dt, non_blocking=True)
@@ -806,6 +853,81 @@ def heldout_kl_flips(model, cache, held_idx, batches, device, loss_fn, temperatu
 #     serialised stalls per forward and transfers that overlap compute. Pinned memory is unswappable,
 #     so this trades RAM flexibility for latency.
 _LAT_PLACE = {"budget_bytes": 0, "used": 0, "pin": False, "n_gpu": 0, "n_cpu": 0, "n_pin": 0}
+
+
+# ── uint8 CODE TRANSFER (--latent-code-transfer) ─────────────────────────────────────────────────
+# The H2D moves 4 B/latent of fp32 master, but the GPU only ever needs two DISCRETE things from it:
+#   q    = round(L/s).clamp(-1,1)     the ternary assignment
+#   mask = |L| < 1.5*s                the STE gate
+# because `deq = q.detach()*s + (L - L.detach())*mask` is q*s IN VALUE -- the second term is
+# identically zero and exists only to carry gradient*mask back to the CPU leaf. So one uint8 code
+# per latent is sufficient and EXACT, at 1/4 the bytes.
+#
+#   0,1,2 -> q = -1,0,+1  with mask=1      (inside the gate)
+#   3,5   -> q = -1,  +1  with mask=0      (saturated, gate closed; 4 is unused)
+#
+# Measured basis: H2D is bandwidth-bound and LINEAR in bytes on this box (flat 0.31 ms/MiB from 3 to
+# 202 MiB), and the SPIKE ceiling says ~84.7 s of the 148.1 s attributed to h2d is real transfer.
+# NOTE the in-code claim at "cost tracks the NUMBER of per-latent operations, not bandwidth" was
+# REFUTED: that arm used `.to(device, dtype=bf16)`, which moves fp32 and casts ON THE GPU, so it
+# never halved any bytes (measured 62.00 ms vs 61.78 ms fp32; a real bf16 host source is 30.69 ms).
+_LAT_CODE_ON = False
+_LAT_CODE_MODS = []          # modules carrying a ._code buffer, for the post-scale-step refresh
+_LAT_CODE_OF = {}            # id(latent tensor) -> module, so the release hook can re-encode
+
+
+def _lat_code_kernel(L, s, out):
+    """out = code, where u = round(L/s): {0,1,2} inside the gate, {3,5} when saturated.
+
+    Written as ONE expression so Inductor fuses it. The eager form materialised ~8 full-size 202 MiB
+    temporaries and cost 314 ms per 53.0M latent -- 5x the whole Adam step -- which would have eaten
+    the entire transfer saving. Fused: 72.5 ms.
+
+    Keep the DIVISION. `L * (1/s)` differs from `L / s` in the last ulp and flipped one element in
+    53M at an exact bin boundary; the point of this path is that it is bit-exact.
+    """
+    u = torch.round(L / s)
+    out.copy_((u.clamp(-1.0, 1.0) + 1.0) + 3.0 * (u.abs() >= 2.0))
+
+
+_LAT_CODE_FN = {"f": None}
+
+
+@torch.no_grad()
+def _lat_code_encode(mod):
+    """Refresh mod._code from the CURRENT fp32 latent and the cached CPU scale."""
+    fn = _LAT_CODE_FN["f"]
+    if fn is None:
+        try:
+            fn = torch.compile(_lat_code_kernel, dynamic=False)
+        except Exception:
+            fn = _lat_code_kernel                        # compile unavailable: correct but 4.3x slower
+        _LAT_CODE_FN["f"] = fn
+    L = mod.latent.data.reshape(-1, mod.block_size)
+    fn(L, mod._scale_cpu, mod._code.reshape(-1, mod.block_size))
+
+
+@torch.no_grad()
+def _lat_code_sync_scale(mod):
+    """Cache the scale on the CPU. q = round(L/s) depends on s, so a scale step STALES every code."""
+    mod._scale_cpu = mod.scale.detach().float().cpu().unsqueeze(1).clamp_min(1e-8)
+
+
+def _lat_code_refresh_all(reason=""):
+    """Re-encode every latent. Required after the SCALE optimiser steps -- miss this and the trits
+    silently drift from what the fp32 master implies, with no error anywhere."""
+    for m in _LAT_CODE_MODS:
+        _lat_code_sync_scale(m)
+        _lat_code_encode(m)
+
+
+def _lat_code_decode(code_gpu, block_size, dtype):
+    """uint8 code -> (q, mask) on the GPU, inverse of _lat_code_encode."""
+    c = code_gpu.reshape(-1, block_size)
+    sat = c >= 3
+    cf = c.to(dtype)
+    q = torch.where(sat, cf - 4.0, cf - 1.0)             # 3->-1, 5->+1 ; 0,1,2 -> -1,0,+1
+    return q, (~sat).to(dtype)
 
 
 def _place_latent(L, lat_off, dev):
@@ -2335,6 +2457,18 @@ def train(args):
             if getattr(_m, "latent", None) is not None:
                 _m._latent_bf16_compute = True
         log("   latent bf16-compute ON (fp32 master on CPU, bf16 GPU copy + bf16 grad)")
+    if getattr(args, "latent_code_transfer", False):
+        globals()["_LAT_CODE_ON"] = True
+        _cm = [m for m in _lat_mods if m.latent.device != m.scale.device]
+        for _m in _cm:
+            _m._code = torch.empty(tuple(_m.latent.shape), dtype=torch.uint8)
+            _lat_code_sync_scale(_m)
+            _lat_code_encode(_m)
+        globals()["_LAT_CODE_MODS"] = _cm
+        globals()["_LAT_CODE_OF"] = {id(m.latent): m for m in _cm}
+        _cb = sum(m._code.numel() for m in _cm)
+        log(f"   latent CODE transfer ON: {len(_cm)} latents, {_cb/1e9:.1f}GB of uint8 codes on the "
+            f"host, replacing {_cb*4/1e9:.1f}GB of fp32 per H2D pass (1/4 the bytes, EXACT)")
     host_mem_audit("after latents created / before grad-release setup")
     _grad_release = bool(getattr(args, "latent_grad_release", False)) and bool(latents)
     if _grad_release:
@@ -2499,6 +2633,12 @@ def train(args):
                     _grad_diag["done"] = True
                 if param.grad is not None and g["lr"] != 0.0:
                     _lat_step_one(g, param)
+                    if _LAT_CODE_ON:
+                        # The latent just moved, so its code is stale. Re-encode HERE, before the next
+                        # microbatch's forward reads it.
+                        _m_ = _LAT_CODE_OF.get(id(param))
+                        if _m_ is not None:
+                            _lat_code_encode(_m_)
                 param.grad = None                          # free it either way (warmup holds lr at 0)
             return _hook
         global _OFFLOAD_STEP_ON
@@ -2545,6 +2685,13 @@ def train(args):
                 opt.param_groups.extend(_saved)
         else:
             opt.step()
+        # STALENESS TRAP: q = round(L/s) and mask = |L| < 1.5s both depend on the SCALE, so a scale
+        # step invalidates EVERY code, not just the ones whose latent moved. Skipped when no scale
+        # group actually has a non-zero lr (the throughput arms run --lr 0), since a full re-encode
+        # costs a CPU pass over every latent.
+        if _LAT_CODE_ON and any(gg.get("lr", 0.0) != 0.0
+                                for gg in opt.param_groups if not gg.get("is_latent")):
+            _lat_code_refresh_all("scale step")
 
     _lat_groups = [g for g in opt.param_groups if g.get("is_latent")]
     _lat_base_lr = (_lat_groups[0]["base_lr"] if _lat_groups else args.lr)
@@ -3759,6 +3906,14 @@ def main():
                          "Measured coverage at 4B: tau=0.001 -> 14.9%%, 0.01 -> 15.7%%, 0.05 -> 19.6%%. "
                          "Only 3.55%% of assignments ever move and motion saturates by ~step 60, so the "
                          "frozen majority contributes optimizer traffic and nothing else.")
+    ap.add_argument("--latent-code-transfer", action="store_true",
+                    help="Send a uint8 CODE (ternary assignment + STE gate bit) to the GPU instead of "
+                         "the fp32 latent: 1/4 the H2D bytes, and EXACT because q and the gate are "
+                         "computed on the CPU in fp32. H2D on this box is bandwidth-bound and linear "
+                         "in bytes (flat 0.31 ms/MiB from 3 to 202 MiB), and the SPIKE ceiling puts "
+                         "~84.7 s of the 148.1 s attributed to h2d at real transfer, so this targets "
+                         "~64 s of a 234.7 s step. Costs one CPU encode pass per latent per optimizer "
+                         "step plus 1 B/latent of host memory.")
     ap.add_argument("--cpu-threads", type=int, default=0,
                     help="torch.set_num_threads() for the intra-op pool. 0 = leave alone. torchrun "
                          "FORCES OMP_NUM_THREADS=1 when it is unset, which pinned the block-256 latent "

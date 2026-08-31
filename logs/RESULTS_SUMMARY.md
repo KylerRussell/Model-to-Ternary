@@ -1776,3 +1776,128 @@ just `q*s`, and the `(Lb - Lb.detach())` term contributes zero to the value whil
 `*mask`. So only `q` (2-bit), `mask` (1-bit) and the small per-block `s` are required --
 **3 bits/latent = 6.1 GB on rank 0's 40/64 layers, against 8.3 GB free**. Unlike the 13m SPIKE probe
 (which skipped the H2D with a deliberately wrong all-ones mask and was timing-only), this is exact.
+
+## 13r. Where the H2D actually goes (2026-08-31) — split NEGATIVE, code-transfer a WASH, and the
+## profiler's h2d attribution REFUTED (real ceiling: 151.0 s/step)
+
+After 13q the step is 234.7 s: H2D 148.1 s (63.3%), D2H 40.0 s, Adam 40.1 s. Everything below targets
+the H2D. Rank 0 holds **311 latents = 66.0 GB fp32**, each transferred 4x/step (2 microbatches x 2 for
+the gradient-checkpoint recompute) = **264 GB/step at 1.78 GB/s**.
+
+### Pipeline split re-tune: NEGATIVE, and the balance model is wrong
+
+r0 was active 211.8 s vs r1 149.0 s with r1 idling 83.7 s, so a balance model predicted split 34 at
+~204 s (-13.2%). Measured **split 36 = 243.7 s/step, +3.8%** -- worse, reproducing §13m's +2.2% under
+a completely different cost structure. The model is wrong, and the profiler says why:
+
+| | split 40 | split 36 |
+|---|---|---|
+| r0 latents | 311 (66.0 GB) | 280 (59.9 GB) |
+| r0 h2d | 148.1 s (n=1240) | 164.1 s (n=1116) |
+| per transfer | 119.4 ms | **147.0 ms** |
+| effective BW | 1.78 GB/s | **1.45 GB/s** |
+
+Rank 0 got **9.2% fewer bytes but 11.4% MORE time**. Moving layers off the critical path made the
+critical path slower, so r0's cost is NOT independent of r1's load. Do not re-tune the split by
+balancing active time; the coupling term dominates the balance term.
+
+### Four transfer facts, measured on this box (GPU 0, node-1 bound, 202 MiB fp32 unless stated)
+
+| test | result | meaning |
+|---|---|---|
+| size scaling 3 -> 202 MiB | flat **0.31 ms/MiB** (3.34-3.63 GB/s) | H2D is **bandwidth-bound, linear in bytes** |
+| `MADV_HUGEPAGE` | 61.7 vs 60.8 ms | THP is a **non-lever** (THP is `madvise`-only here, 32 MB in use) |
+| two GPUs concurrently | r0 60.9 -> 66.3 ms (+8.9%) | cross-rank PCIe contention is **NOT** the bottleneck |
+| pinned vs pageable | 3.47 -> **5.62 GB/s** | pinning is worth **1.62x**, contradicting §13's "pinned 4.89 vs pageable 4.88, no difference" |
+
+### REFUTED: "the cost tracks the NUMBER of per-latent operations, not bandwidth"
+
+`src/e2e_qp_distill.py:807` records that halving the bytes via `--latent-bf16-compute` did not help
+(+3.8%), and concludes H2D cost is per-operation rather than per-byte. **The experiment never halved
+the bytes.**
+
+| | time | bytes moved |
+|---|---|---|
+| fp32 host -> fp32 gpu | 61.78 ms | 202 MiB |
+| fp32 host -> bf16 gpu, `.to(dtype=)` | **62.00 ms** | **202 MiB — the cast runs ON THE GPU** |
+| bf16 host -> bf16 gpu | **30.69 ms** | 101 MiB |
+
+`.to(device, dtype=)` from a pageable fp32 source moves fp32 and casts on the device, so
+`--latent-bf16-compute` paid a cast for zero byte reduction -- exactly the +3.8% observed. Casting on
+the HOST first halves the time, as the size-scaling row predicts. The conclusion drawn from that arm
+is unfounded and the size scaling above is the direct refutation: **bytes are what matter.**
+
+Consequence: a smaller host-side payload converts to time roughly proportionally, which is what makes
+the code-transfer design worth building.
+
+### The h2d timer OVER-ATTRIBUTES by 63 s, and "GPU compute is 2.2%" is WRONG
+
+`SPIKE_NO_H2D=1` removes only the latent H2D (both forward and recompute) and keeps D2H + the Adam
+step via `_stage_and_step`. §13m measured -17.3% for it, but at **stride 2 and `--lr 0`** where the
+optimizer never ran, so that number never applied here. Re-measured at the 13q config:
+
+| | 13q | SPIKE | |
+|---|---|---|---|
+| h2d | 148.1 s | 0 | bypassed |
+| **d2h** | 40.0 s | **100.8 s** | **+60.8 s on a path that was not touched** |
+| adam | 40.1 s | 40.8 s | unchanged |
+| r0 fwd | 22.0 s | **2.2 s** | |
+| **s/step** | **234.7** | **151.0** | **-35.7%** |
+
+D2H nearly tripled while nothing on that path changed. **The GPU wait did not disappear, it
+RELOCATED** from the h2d timer into the d2h timer. A pageable `.to()` is enqueued on the current
+stream and blocks until prior kernels drain, so `_PROF_ACC["h2d"]` was charging GPU compute to the
+transfer. Of the 148.1 s attributed to H2D, **~84.7 s is real transfer and ~63.4 s was GPU wait**.
+
+**This retracts the headline of the §13p decomposition** (and of
+`research_prompts/armb_step_breakdown_prompt.md`, which was built on it): "GPU compute is 2.2% of the
+step" is false. Real GPU work is ~60-85 s/step, hidden inside the transfer timers. Any future
+decomposition must be validated by REMOVING a phase and seeing whether the step actually shrinks by
+the attributed amount -- a wall-clock timer around a blocking call measures the queue, not the work.
+
+### `--latent-code-transfer`: implemented, bit-exact, and a WASH (-1.0%) on this hardware
+
+The GPU never needs the fp32 master, only `q = round(L/s).clamp(-1,1)` and `mask = |L| < 1.5s`,
+because `deq = q.detach()*s + (L - L.detach())*mask` is `q*s` in VALUE -- the second term is
+identically zero and exists solely to carry `grad*mask` to the CPU leaf. So one uint8 code suffices
+(0,1,2 = q with the gate open; 3,5 = saturated), at 1/4 the bytes. Verified against the fp32 path:
+**max|dvalue| = 0, max|dgrad_L| = 0, max|dgrad_s| = 0, zero q/mask mismatches** across three scale
+regimes -- bit-exact, unlike a bf16 mirror which would shift roundings at bin boundaries and silently
+move assignments.
+
+The encode had to be fused to be viable: eager it materialised ~8 full-size 202 MiB temporaries and
+cost **314 ms per latent, 5x the entire Adam step**. `torch.compile` brings it to **72.5 ms**.
+
+MEASURED, full run, 6/6 steps rc=0, peak 291/620 GB (`--latent-code-transfer`, 310 latents,
+15.2 GB of codes replacing 60.9 GB of fp32 per pass):
+
+| | 13q | code | delta |
+|---|---|---|---|
+| h2d | 148.1 s | **93.0 s** | **-55.1** |
+| adam (encode is charged here) | 40.1 s | **92.1 s** | **+52.0** |
+| d2h | 40.0 s | 39.8 s | — |
+| **s/step** | **234.7** | **232.3** | **-1.0%** |
+
+The transfer saving landed close to prediction (-55.1 measured vs -63.5 projected) and the encode cost
+close too (+52.0 vs +44.9), so the two nearly cancel: **-1.0%, a wash. Left OFF by default.**
+
+**Why it is only marginal, and the general rule:** host DRAM here runs at 22 GB/s and PCIe at
+3.4 GB/s -- only **6.5x apart**. Spending a CPU pass over the fp32 latent to avoid *sending* that
+latent is therefore barely profitable, and it stays barely profitable for any payload size, because
+the encode cost is set by reading L, not by what is written. The compiled encode achieves only
+3.65 GB/s effective, so it is compute-bound (round + type conversion) rather than bandwidth-bound;
+a hand-written kernel could close part of the gap. A comparison-based reformulation would be faster
+but breaks bit-exactness at round-half-to-even ties (round(0.5)=0, round(1.5)=2), which is not worth
+trading away.
+
+**Fusing the encode into the Adam tail FAILED.** The encode reads `param` immediately after Adam
+writes it, so in principle the updated value is already in registers. Measured: adam 69.2 ms + encode
+80.8 ms = 150.0 ms separately, but **1924 ms** when the addcdiv_ and the encode were put in one
+`torch.compile` region -- 13x WORSE. Inductor cannot handle the in-place `addcdiv_` on an
+`expand`-ed view and falls back to something pathological. Making this path pay would need a
+hand-written C++/OpenMP kernel; at a -1.0% starting point that is not justified.
+
+**What is actually left.** The step is 232-235 s against a 151 s floor with zero latent H2D. Of the
+~84 s gap, ~21 s is residual transfer and the rest is GPU compute that the timers had been hiding.
+The next real lever is therefore GPU-side work, not host transfer -- a different problem from
+everything in 13a-13r.
