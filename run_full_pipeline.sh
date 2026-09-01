@@ -306,6 +306,17 @@ ASSIGN_LR_DOWN=${ASSIGN_LR_DOWN:-5e-7}   # servo-calibrated at 32L; base only ne
 ASSIGN_LR_ATTN=${ASSIGN_LR_ATTN:-7.5e-7} # the servo's PLATEAUED answer (2.5e-7 starves, 5e-6 bursts)
 ASSIGN_ATTN_STRIDE=${ASSIGN_ATTN_STRIDE:-2}   # attn@32L = 1347M ~= 41GB; stride 2 = 674M ~= 23GB (proven)
 ASSIGN_ATTN_SAMP=${ASSIGN_ATTN_SAMP:-3240}
+# ── FULL-LATENT ("arm B") variant, off by default so the validated down->attn recipe is unchanged.
+# ASSIGN_SCOPE=all + ASSIGN_STRIDE_ALL=1 replaces the two staged passes with ONE pass over every
+# trained weight. MB_SEQS is the 13s/13t sequences-per-microbatch knob: the latent H2D, the CPU Adam
+# and the gradient D2H are paid PER MICROBATCH, so grouping amortises them (27B: 21.8 -> 68.5 tok/s
+# at G=4). CPU_THREADS overrides torchrun's OMP_NUM_THREADS=1, worth 5.9x on the latent Adam (13q).
+ASSIGN_SCOPE=${ASSIGN_SCOPE:-}                # empty = validated down+attn; "all" = single full pass
+ASSIGN_STRIDE_ALL=${ASSIGN_STRIDE_ALL:-1}
+ASSIGN_LR_ALL=${ASSIGN_LR_ALL:-5e-7}
+MB_SEQS=${MB_SEQS:-1}
+CPU_THREADS=${CPU_THREADS:-0}
+ASSIGN_EXTRA=${ASSIGN_EXTRA:-}
 ASSIGNED="$RECOVERED"
 if [ "$ASSIGN" != "0" ]; then
   run_assign () {   # tag scope lr max_samples eval_every stride student
@@ -322,15 +333,20 @@ if [ "$ASSIGN" != "0" ]; then
         --target-tr 1.25e-4 --tr-every 5 --tr-final-frac 0.2 \
         --lr-schedule linear --scale-ema-decay 0 --select final --loss-fn cakld --decision-gamma 2 \
         --ce-weight 0.1 --ce-positions 128 --train-weights "$2" --scale-qat-bits "$SBITS" \
-        --latent-opt "$ASSIGN_OPT" \
+        --latent-opt "$ASSIGN_OPT" --mb-seqs "$MB_SEQS" --cpu-threads "$CPU_THREADS" $ASSIGN_EXTRA \
         --heldout-n 4 --eval-every "$5" --ckpt-every 0 --abort-patience 30 \
       || { echo "  assign_$1 FAILED"; exit 1; }
     touch "$WORK/assign_$1/.done"; ASSIGNED="$OUT"
   }
+  if [ -n "$ASSIGN_SCOPE" ]; then
+    run_assign all "$ASSIGN_SCOPE" "$ASSIGN_LR_ALL" "$NSAMP" 400 "$ASSIGN_STRIDE_ALL" "$RECOVERED"
+    eval2k_stage assign_all "$ASSIGNED"
+  else
   run_assign a down "$ASSIGN_LR_DOWN" "$NSAMP"           400 1                    "$RECOVERED"
   eval2k_stage assign_down "$ASSIGNED"
   run_assign b attn "$ASSIGN_LR_ATTN" "$ASSIGN_ATTN_SAMP" 200 "$ASSIGN_ATTN_STRIDE" "$ASSIGNED"
   eval2k_stage assign_attn "$ASSIGNED"
+  fi
   echo "=== Phase 4.5 done — E2E will start from $ASSIGNED ==="
 else echo "=== [skip] Phase 4.5: ASSIGN=0 ==="; fi
 

@@ -2892,9 +2892,21 @@ def train(args):
             for s, b in zip(scales, snap[0]): s.copy_(b)
             for m, t in zip(arm_b_mods, snap[1]): m.tern_b.copy_(t)
     if getattr(args, "epochs", 0) and args.epochs > 0:               # epochs → steps (data-size-invariant budget)
-        spe = max(1, n // (world * max(1, args.accum)))              # optimizer steps per epoch
+        # SEQUENCES CONSUMED PER OPTIMIZER STEP. Under DDP that is world x accum (each rank takes its
+        # own slice). Under --pipe-parallel the ranks are STAGES, not replicas -- both walk the SAME
+        # sequences, so `world` does not divide the data; a step consumes pipe_parallel_mb x mb_seqs.
+        # The old formula happened to agree only because mb defaulted to 2 and world was 2; with
+        # --mb-seqs 4 it over-counted 4x, turning a 1-epoch budget into 3122 steps of 8 sequences
+        # (64M tokens) instead of 780.
+        _per_step = world * max(1, args.accum)
+        if _PP.get("on"):
+            _per_step = (max(1, int(_PP.get("mb", 1) or 1))
+                         * max(1, int(getattr(args, "mb_seqs", 1) or 1))
+                         * max(1, args.accum))
+        spe = max(1, n // _per_step)                                 # optimizer steps per epoch
         args.steps = max(1, round(args.epochs * spe))
-        log(f"   --epochs {args.epochs} → steps={args.steps} ({spe}/epoch; n={n} world={world} accum={args.accum})")
+        log(f"   --epochs {args.epochs} → steps={args.steps} ({spe}/epoch; n={n} "
+            f"seqs/step={_per_step} world={world} accum={args.accum})")
 
     best_kl = float("inf")
     # BEST-LOSS SNAPSHOT — allocated ONLY when `--select best` will actually read it. `scales` includes
@@ -3355,7 +3367,8 @@ def train(args):
             log(f"   step {opt_step}/{args.steps}  pp rank {_PP['rank']} mb={_M} kl={_kl_acc:.4f}")
             if opt_step <= 4 and _PP["rank"] == 0:
                 host_mem_audit(f"after step {opt_step}")
-                host_tensor_inventory(f"after step {opt_step}")
+                if os.environ.get("HOST_TENSOR_INVENTORY") == "1":
+                    host_tensor_inventory(f"after step {opt_step}")   # debug only: walks gc every step
             if opt_step <= 6:
                 vram_audit(f"after pp step {opt_step}", model)
             if held_idx and opt_step % eval_every == 0:
