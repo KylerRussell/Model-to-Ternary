@@ -2106,3 +2106,77 @@ Validate assign-moved ratio and held-out KL before committing to it for a produc
 **G=5 is not reachable**: 0.70 GB free at G=4, and each sequence costs ~0.5 GB even after the bf16
 saving. The next real headroom would have to come from the ~7.4 GB of persistent weights or from
 rank 1's loss transients, neither of which this campaign has attacked.
+
+## 13u. Quality check on the G=4 config — and why the obvious experiment has NO POWER (2026-09-01)
+
+13t shipped `--mb-seqs 4` at 68.5 tok/s but flagged that its arm is not config-identical to G<=3: it
+adds `--latent-code-transfer --latent-bf16-compute`, making the latent GRADIENT bf16. This is that
+check.
+
+### The training-run comparison was ABANDONED because it cannot discriminate
+
+Design was three arms at equal DATA (96 sequences each): A = G3 fp32, B = G3 + code + bf16 (isolating
+precision at fixed batch), C = G4 + code + bf16. Arm B's first eval:
+
+    [held-out] ENTRY  KL=8.2820 flips=96.26%
+    [held-out] step 4 KL=8.2820 flips=96.26% assign-moved=0.000%
+
+**Bit-identical, and zero assignments moved.** Not a short-run artefact -- it is what this config
+does. `--latent-init center` sets `L = tern*scale`, so every latent sits EXACTLY on a bin centre;
+`init_latent`'s own docstring records "0.000% of weights within 0.05 of a decision boundary" and calls
+it DEGENERATE, with a measured bimodality of **0% flips at lr<=2e-4, 18%->37% runaway at 5e-3**. Every
+throughput arm in 13a-13t ran `center` init at `--latent-lr 5e-7`, i.e. deep in the inert branch.
+
+Since the forward VALUE is `q*s`, if no `q` changes the output is bit-identical whatever the gradient
+precision. All three arms would have returned the same numbers after ~5 h, and reporting that as
+"G=4 passes" would have been a **false pass from a test with no power**. Stopped at that point.
+
+The regime where assignments actually move is fp-spread init + `--lr 0` + latent-lr 1e-4 + TALR
+(§8r). `--latent-init fp-spread` requires `--fp-model <rotated FP dir>`, which does not exist on this
+box (only the base 27B and the naive student), so the faithful experiment is not runnable here.
+
+**Note for anyone reading 13a-13t as training results: they are not.** At `center` init and lr 5e-7
+nothing moves, so those arms measure throughput on a model that never changes. That is exactly what
+they were for, but it also means no quality claim can be read out of them.
+
+### Direct measurement instead: does a bf16 gradient move a DIFFERENT SET of latents?
+
+Quality can only change through `q`, so the question is not the size of the gradient error but
+whether it pushes different latents across a boundary. Simulated in `L/s` units (center init puts
+every latent on an integer; the boundary is 0.5 away) through the REAL adam-blockv kernel (lerp_ +
+block-256 vector_norm second moment). Both arms consume an IDENTICAL gradient sequence; the only
+difference is bf16 rounding, exactly as `--latent-bf16-compute` delivers it. 384k latents, 200 steps.
+
+| regime | moved (fp32) | bf16 differs | as % of moved | fp32-eps control |
+|---|---|---|---|---|
+| signal-dominated | 40.174% | 0.0016% | 0.00% | 0.0000% |
+| balanced | 32.117% | 0.0060% | 0.02% | 0.0000% |
+| noise-dominated | 1.103% | 0.0021% | **0.19%** | 0.0000% |
+
+Aggregate motion is unchanged to three decimals (40.174 vs 40.175, 32.117 vs 32.116, 1.103 vs 1.103).
+bf16 relocates **at most 0.19% of the assignments that move**, and 0.00% in the signal-dominated
+regime that real training should occupy.
+
+The control matters: perturbing the fp32 gradient at fp32 rounding level (1.2e-7 relative, what a
+different GPU reduction order does) changes **0.0000%** of flips. So flip decisions are NOT
+chaotically sensitive, which means bf16's effect is a real, bounded signal rather than noise
+amplification -- and that the measurement is sensitive enough to have detected a problem.
+
+**A CONTROL BUG WORTH RECORDING.** The first version drew the perturbation from the SAME generator as
+the gradients, which advanced the stream and made the "control" a different RUN rather than the same
+run perturbed. It reported the control changing 2.29-69.43% of flips -- 150-575x MORE than bf16 --
+which would have inverted the conclusion. A control that consumes randomness is not a control.
+
+### Verdict
+
+**bf16 latent gradients are safe for this use**, with the residual risk quantified rather than
+asserted: identical aggregate motion, <=0.19% of flip decisions relocated, 0% where the gradient
+signal dominates. Combined with the fact that the code path already keeps the assignment decision
+itself exact (q and the STE gate are computed on the CPU in fp32 and shipped as a uint8 code), the
+G=4 config's only numerical difference from G<=3 is bounded at this level.
+
+**CAVEAT, stated plainly:** this is a mechanism study with synthetic gradients, not an end-to-end
+training comparison. It isolates precision -> flip decisions correctly, but does not capture real
+gradient structure or its correlation across steps. The end-to-end check still wants fp-spread init
+and a rotated FP model; until then, G=3 at 55.9 tok/s remains the option with no precision change at
+all, and G=4 at 68.5 tok/s carries this bounded and measured risk.
