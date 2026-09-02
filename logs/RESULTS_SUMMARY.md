@@ -2180,3 +2180,145 @@ training comparison. It isolates precision -> flip decisions correctly, but does
 gradient structure or its correlation across steps. The end-to-end check still wants fp-spread init
 and a rotated FP model; until then, G=3 at 55.9 tok/s remains the option with no precision change at
 all, and G=4 at 68.5 tok/s carries this bounded and measured risk.
+
+## 13v. First END-TO-END pipeline run with the throughput work (4B, all latents, G=4) — 2026-09-01/02
+
+Everything in 13a-13u measured throughput on a config that never moved an assignment. This is the
+first run that actually trains through the full recipe and reaches the deploy gates.
+
+**Why the 4B and not the 27B.** A 27B quality run needs three upstream phases that do not exist on
+this box -- a 27B rotation, a 27B teacher cache, and a block-AP skeleton -- and, decisively, **the
+teacher cache every throughput arm used is the 4B one** (`output_4bpipe` is 32 layers / hidden 2560;
+`_scratch_naive27b` is 64 / 5120). Distilling a 27B student toward a 4B teacher is fine for timing
+and useless for quality. The 4B also has every prerequisite on disk AND is the testbed the recipe's
+constants were calibrated on, so its gate thresholds actually apply.
+
+**Setup.** Fresh `output_4b_g4/` symlinking the 4B rotation, the 16M-token calib (6244 seqs =
+15.98M tok), the teacher cache and the block-AP skeleton, so phases 1-4 skip in 50 s and nothing in
+`output_4bpipe` is touched. Assignment run as ONE full-latent pass (`--train-weights all
+--tw-layer-stride 1`) instead of the validated down->attn pair, at `--mb-seqs 4 --cpu-threads 8`
+with `--pipe-parallel --pipe-parallel-mb 2`. **This config actually trains**: `--latent-init
+fp-spread --fp-model $ROT` + `--target-tr 1.25e-4` (TALR), not the inert `center` init of the
+throughput arms.
+
+### Stage results (frozen 1946-seq eval2k referee)
+
+| stage | agreement | mean KL |
+|---|---|---|
+| block-AP skeleton | 62.92% | 0.9222 |
+| + assignment, all latents, G=4 | **73.63%** | **0.5098** |
+| + E2E (2 ep) | (pending) | (pending) |
+| **Gate A threshold** | **>=77%** | — |
+
+The full-latent assignment pass alone bought **+10.71 points of agreement and -45% KL** -- the payoff
+for the scope the whole throughput campaign existed to make affordable. **And it did so on HALF the
+intended token budget** -- see the selection bug below -- so 16M tokens of assignment should do
+better than this.
+
+### THE DELIVERED ASSIGNMENT MODEL IS THE STEP-400 STATE, NOT STEP 780
+
+    [22:10:51]  [held-out] step 400 KL=0.2899 flips=21.16% assign-moved=0.590%  best=0.2899
+       restored best held-out checkpoint (KL 0.2899, flips_used 0)
+       final save (select=final)
+
+The end-of-training restore is UNCONDITIONAL -- it ignores `--select final` by design ("deliverable =
+best HELD-OUT-KL checkpoint"). That is defensible alone, but it is fatal in combination with the eval
+cadence: `--eval-every 400` with `steps=780` evaluates ONLY step 400, so the final state is never
+scored, can never be "best", and the run silently reverts. **Steps 401-780 were discarded: 48.7% of
+the assignment compute, ~13.6 h, and half the 16M-token budget.** The stage still reports its full
+27:53:31 wall time, so the cost was paid and thrown away.
+
+`--select final` being silently overridden is a second wart: the flag reads as "keep the final
+state" and does not. Behaviour left as-is (it is the validated recipe's intent), but the name lies.
+
+FIX (both eval sites): `if held_idx and (opt_step % eval_every == 0 or opt_step >= args.steps)` --
+always evaluate the final step so it is a selection candidate. The same bug was about to cost E2E its
+last 244 of 6244 steps (3.9%), since 300 does not divide 6244 either.
+
+LESSON: any run whose deliverable is "the best evaluated checkpoint" MUST evaluate its last step, and
+`eval_every` should divide `steps`. A cadence that does not divide silently truncates training.
+
+Assignment held-out trajectory (4-seq set, not comparable to the referee): entry KL 0.5595 /
+flips 29.47% -> step 400 KL 0.2899 / flips 21.16% / **assign-moved 0.590%**. Non-zero motion is the
+point: it confirms the run is training, against the flat 0.000% that made the 13u quality comparison
+vacuous.
+
+### TWO BUGS THE THROUGHPUT ARMS COULD NEVER HAVE CAUGHT
+
+Both were in code this session had touched, and both were silent.
+
+1. **`--mb-seqs` broke the epoch budget.** `spe = n // (world * accum)` assumes one sequence per rank
+   per step. Under `--pipe-parallel` the ranks are STAGES, not replicas -- both walk the SAME
+   sequences -- so `world` does not divide the data; a step consumes `mb * mb_seqs`. The formula
+   agreed only by coincidence (mb defaulted to 2, world was 2). At G=4 it over-counted 4x: a 1-epoch
+   16M-token budget became 3122 steps of 8 sequences = **64M tokens, 124 h instead of 31**. It would
+   have over-trained silently and produced a wrong "16M tokens took X" number. The log now prints
+   `seqs/step` so the budget is checkable at a glance.
+2. **`host_tensor_inventory` ran every step, ungated** -- `gc.get_objects()` plus a 14-line dump
+   after every optimizer step, left over from the 13p memory hunt. Measured cost: **143.0 -> 107.3
+   s/step, i.e. 25% of the step.** It inflated every throughput number taken after 13p equally, so
+   the relative comparisons in 13q-13t still hold, but the absolute s/step figures there are ~25%
+   pessimistic.
+
+### Timings (lib_timing.sh, per phase)
+
+| phase | wall |
+|---|---|
+| 1-4 (rotation, chat pool, calib, block-AP, teacher) | 00:00:50 (all skipped/reused) |
+| 4.5 assignment — all latents, stride 1, G=4, 780 steps | **27:53:31** |
+| 5 E2E — 2 epochs, 6244 steps | (pending) |
+| 6 gates A + B | (pending) |
+
+Assignment ran 780 steps at ~107 s/step early, drifting to ~122 s; 16M tokens at ~191 tok/s.
+
+### RESULT: Gate A PASS, Gate B marginal FAIL
+
+| stage | eval2k agreement | mean KL |
+|---|---|---|
+| block-AP skeleton | 62.92% | 0.9222 |
+| + assignment (all latents, G=4, ~8.2M tok effective) | 73.63% | 0.5098 |
+| + E2E (2 ep, commit-beta 1.5) | **78.50%** | **0.3800** |
+| **Gate A threshold** | **>=77% → PASS (+1.50)** | |
+
+E2E held-out trajectory was monotonic throughout: KL 0.2776 -> 0.2088 (-24.8%), flips 23.56% ->
+20.74%, no instability at G=4.
+
+**Gate B (the deploy gate) — FAIL on 2 of 3, both marginal:**
+
+| criterion | result | target | FP teacher |
+|---|---|---|---|
+| commit_rate | **0.7917 PASS** | >=0.68 | 0.75 |
+| loop_rate | **0.3125 FAIL** | <=0.30 | 0.25 |
+| mean_comp_ratio | **3.2481 FAIL** | <=3.1 | 2.40 |
+
+(n=48, temp 0.6, maxnew 2048; trunc 0.1875, mean_think_len 748, max_comp_ratio 14.08.)
+
+**The commit rate BEATS the FP teacher** (79.2% vs 75%) -- the failure mode §8 was built to prevent
+(the model never emitting `</think>`) is solidly fixed. The two failures are loop/repetition.
+
+**The loop_rate failure is not statistically distinguishable from a pass.** n=48, so 0.3125 is
+15/48; 14/48 = 0.2917 would pass. The threshold sits **0.19 standard errors** away (SE = 6.7 pts).
+One sequence decides it. `mean_comp_ratio` is likewise a mean over a heavy tail (max 14.08).
+Do NOT read this as "G=4 degrades quality" -- the sample cannot support that claim either way.
+
+**Two confounds, both favouring a re-run before drawing conclusions:**
+1. The assignment stage effectively trained on **~8.2M tokens, not 16M** (the eval/restore truncation
+   above). Half the intended budget.
+2. The scope was ONE full-latent pass (`--train-weights all --tw-layer-stride 1`), not the validated
+   `down` -> `attn` pair the gate thresholds were calibrated against.
+
+So this run does not show the recipe failing; it shows a non-validated scope, on half the assignment
+budget, landing one sequence outside a noisy gate.
+
+### Timings — the answer to "how long does this take"
+
+| phase | wall |
+|---|---|
+| 1-4 rotation / chat pool / calib / block-AP / teacher | 00:00:50 (reused) |
+| 4.5 assignment — all latents, stride 1, G=4, 780 steps | **27:53:31** |
+| 5 E2E — 2 epochs, 6244 steps | **06:10:59** |
+| 6 gates (eval2k + free-gen) | ~00:30 |
+| **total (with phases 1-4 reused)** | **~34.6 h** |
+
+From scratch on the 4B, phases 1-4 would add roughly a day (block-AP + teacher cache dominate).
+Assignment ran ~107 s/step early, drifting to ~122 s (191 tok/s); E2E ~2.76 s/step.
