@@ -3371,7 +3371,14 @@ def train(args):
                     host_tensor_inventory(f"after step {opt_step}")   # debug only: walks gc every step
             if opt_step <= 6:
                 vram_audit(f"after pp step {opt_step}", model)
-            if held_idx and opt_step % eval_every == 0:
+            # `or opt_step >= args.steps`: ALWAYS evaluate the final step. The deliverable is the
+            # best HELD-OUT checkpoint (restored unconditionally below, regardless of --select), so a
+            # state that is never evaluated can never win -- and with eval_every not dividing steps,
+            # that is the END of training. Measured on the 4B assignment stage: eval_every 400 with
+            # 780 steps evaluated only step 400, so the run "restored best held-out checkpoint
+            # (KL 0.2899)" and threw away steps 401-780 -- 48.7% of the compute, ~13.6 h, and half
+            # the token budget. The last eval must include the final state.
+            if held_idx and (opt_step % eval_every == 0 or opt_step >= args.steps):
                 torch.cuda.empty_cache()               # release step fragmentation; the eval is tight
                 ho_kl, ho_flips = pipe_heldout_kl_flips(core, cache, held_idx, batches, device,
                                                         _Wlm, args.temperature, _ce_lt, _sp)
@@ -3587,7 +3594,14 @@ def train(args):
                             f"realΔ={realΔ:+.4f} ρ={rho:+.2f} ΔKLg={dkl_g:+.4f}±{se_g:.4f} η→{eta:.2e} flips={flip_used}")
                 opt.zero_grad(set_to_none=True)                # clear probe-pass grads before resuming scale steps
             # ── held-out eval drives selection + abort (training KL is inadmissible for weight-training) ──
-            if held_idx and opt_step % eval_every == 0:
+            # `or opt_step >= args.steps`: ALWAYS evaluate the final step. The deliverable is the
+            # best HELD-OUT checkpoint (restored unconditionally below, regardless of --select), so a
+            # state that is never evaluated can never win -- and with eval_every not dividing steps,
+            # that is the END of training. Measured on the 4B assignment stage: eval_every 400 with
+            # 780 steps evaluated only step 400, so the run "restored best held-out checkpoint
+            # (KL 0.2899)" and threw away steps 401-780 -- 48.7% of the compute, ~13.6 h, and half
+            # the token budget. The last eval must include the final state.
+            if held_idx and (opt_step % eval_every == 0 or opt_step >= args.steps):
                 if _mem_ctx is not None:
                     torch.cuda.empty_cache()               # release training-step fragmentation; the eval is tight
                 ho_kl, ho_flips = heldout_kl_flips(model, cache, held_idx, batches, device, loss_fn, args.temperature, mem_eff=_mem_ctx)
