@@ -2322,3 +2322,49 @@ budget, landing one sequence outside a noisy gate.
 
 From scratch on the 4B, phases 1-4 would add roughly a day (block-AP + teacher cache dominate).
 Assignment ran ~107 s/step early, drifting to ~122 s (191 tok/s); E2E ~2.76 s/step.
+
+## 13w. GATE B IS NOT REPRODUCIBLE — and that retracts 13v's verdict (2026-09-03)
+
+Testing OPSA (arXiv 2608.31046) against Gate B surfaced a measurement failure that invalidates the
+gate's own prior result.
+
+### The finding
+
+`loop_gate.py` samples at `TEMP=0.6` with `do_sample=True` and had **NO SEED ANYWHERE**, so every
+invocation drew a different RNG stream. Three runs on ONE UNCHANGED model (4B `e2eqp`), identical
+`think/temp/maxnew/tau`, identical model path:
+
+| run | loop_rate | commit_rate | comp_ratio |
+|---|---|---|---|
+| pipeline, N=48 | **0.3125** | 0.7917 | 3.248 |
+| re-run, N=48 | **0.7083** | 0.3542 | 4.629 |
+| re-run, N=96 | **0.6875** | 0.4062 | 4.573 |
+
+**loop_rate spans 0.396** (sd 0.223) on a model that never changed. That is ~6 binomial SE, so it is
+not sampling noise of the kind the n=48 SE implies: looping is BISTABLE per prompt and this model
+sits near that boundary, so a single RNG stream flips many prompts together. The N=96 prompt set was
+verified to CONTAIN the N=48 set (deterministic round-robin over EASY=40 / REASON=32 / PLAIN=16), so
+the prompts are not the explanation.
+
+### What this retracts
+
+**13v concluded "Gate B fails on loop_rate by one sequence (15/48 vs 14/48), 0.19 SE from the
+threshold, not statistically distinguishable from a pass."** That reading came from the 0.3125 run,
+which two subsequent measurements identify as the OUTLIER. Two of three runs put loop_rate at
+**0.69-0.71, ~6 SE ABOVE the 0.30 gate**. The 4B G=4 model is not marginally failing Gate B; on the
+weight of evidence it is failing it badly. The commit_rate claim ("beats the FP teacher's 0.75") came
+from the same outlier run and does not survive either: the other two runs give 0.35-0.41.
+
+### Fix
+
+`SEED` env (default 0), seeding torch + CUDA at import, recorded in the output JSON. A seeded run is
+reproducible; **a single run still must not be used to compare two models** -- report a mean over
+seeds and its spread. Any gate that samples and does not seed is not a gate.
+
+### Consequence for OPSA
+
+The paired N=96 comparison showed OPSA moving both target metrics the right way -- loop_rate
+0.6875 -> 0.6042 (-8.3 pts), comp_ratio 4.573 -> 4.063 (-0.51), commit 0.4062 -> 0.3750 (-3.1 pts) --
+which is exactly its intended mechanism. But an 8.3-pt effect cannot be read against a 39.6-pt
+run-to-run swing. **The OPSA result is currently UNINTERPRETABLE**, not negative. A 5-seed paired
+re-measurement is the minimum needed to say anything.
