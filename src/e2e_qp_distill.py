@@ -2082,6 +2082,53 @@ def on_policy_loss(model, teacher, core, ids, args, temperature):
     return kl
 
 
+def opsa_loss(model, core, ids, args):
+    """OPSA — On-Policy Self-Adaptation (arXiv 2608.31046), TEACHER-FREE tail suppression.
+
+    That paper's finding is that on-policy distillation's gains do not come from the teacher at all:
+    they come from applying NEGATIVE advantage to the student's own lowest-log-probability tokens,
+    and a fixed negative advantage matches teacher-provided ones. So OPSA drops the teacher entirely
+    and scales the advantage by token entropy instead:
+
+        S = lowest `opsa_tail_frac` of rollout positions by log p(realised token)
+        A_i = -1/2 - (delta/2) * (H_i - H_min) / (H_max - H_min)      in [-1, -1/2] at delta=1
+        maximise  sum_{i in S} A_i * log pi(y_i | x, y_<i)
+
+    Minimising `-(A * logp)` therefore pushes those tail tokens DOWN and redistributes mass across
+    the head -- which is the mechanism we want against Gate B's loop/repetition failure.
+
+    WHY THIS IS WORTH RE-TRYING HERE despite the pipeline header saying "NO on-policy": §3's actual
+    verdict was that on-policy "WORKS directionally (degen/slope/recall all improve)" but was PARKED
+    as UNDER-DOSED (rollout len 96 vs the 480-token regime where looping happens) and costing ~4.7x
+    E2E wall-clock, nearly all of it the FP-teacher forward. OPSA removes the teacher outright, so
+    the cost objection largely goes away and the rollout can be long enough to matter.
+
+    NOTE the objective is unbounded below (driving logp -> -inf lowers it without limit). It is meant
+    as a SHORT refinement at small lr on an already-converged model, not a training stage; judge it on
+    Gate B, not on this loss value.
+    """
+    prefix = ids[:, : args.rollout_prefix]
+    full, P = student_rollout(core, prefix, args.rollout_len, args.rollout_temp)
+    s_logits = model(full).logits                                  # [1, T, V]; DDP-wrapped for grad sync
+    lo = P - 1                                                     # lo..T-2 predict rollout tokens P..T-1
+    z = s_logits[0, lo:-1].float()                                 # [R, V]
+    if z.shape[0] < 2:
+        return s_logits.sum() * 0.0                                # degenerate rollout: no-op with a graph
+    lp = torch.log_softmax(z, dim=-1)
+    tgt = full[0, lo + 1:]                                         # [R] the tokens actually sampled
+    lp_tok = lp.gather(1, tgt.unsqueeze(1)).squeeze(1)             # [R]
+    ent = -(lp.exp() * lp).sum(-1)                                 # [R] full-vocab entropy
+    k = max(1, int(round(float(getattr(args, "opsa_tail_frac", 0.2)) * lp_tok.numel())))
+    idx = torch.topk(-lp_tok.detach(), k).indices                  # the lowest-logp positions
+    H = ent[idx].detach()                                          # advantages are constants, not a path
+    rng = (H.max() - H.min()).clamp_min(1e-8)
+    A = -0.5 - 0.5 * float(getattr(args, "opsa_delta", 1.0)) * (H - H.min()) / rng
+    loss = -(A * lp_tok[idx]).mean()
+    if getattr(args, "unlikelihood_weight", 0.0) > 0 and getattr(args, "opsa_with_unlik", False):
+        loss = loss + args.unlikelihood_weight * repetition_unlikelihood(s_logits, full, P)
+    return loss
+
+
 def train(args):
     # DDP when launched via torchrun (LOCAL_RANK set); plain single-GPU otherwise.
     local_rank = int(os.environ.get("LOCAL_RANK", -1))
@@ -2285,6 +2332,9 @@ def train(args):
         opt = torch.optim.Adam(opt_groups)                  # two groups: scales @lr, latents @latent-lr
 
     teacher = None
+    if float(getattr(args, "opsa_frac", 0.0) or 0.0) > 0:
+        log(f"   OPSA {args.opsa_frac:.0%} (teacher-free): bottom-{args.opsa_tail_frac:.0%} logp tokens, "
+            f"delta={args.opsa_delta}, rollout {args.rollout_prefix}+{args.rollout_len} @T={args.rollout_temp}")
     if on_policy:
         from transformers import AutoModelForCausalLM
         tpath = getattr(args, "onpolicy_teacher", None) or args.orig_config_path
@@ -3410,7 +3460,17 @@ def train(args):
             _op_every = max(2, round(1.0 / args.on_policy_frac)) if on_policy and args.on_policy_frac > 0 else 0
             use_op = (on_policy and opt_step >= int(args.on_policy_warmup_frac * args.steps)
                       and _op_every and (opt_step % _op_every == 0))
-            if use_op:
+            # OPSA schedule: deterministic in opt_step so every DDP rank makes the SAME choice (the
+            # rollouts differ per rank, which is fine -- the gradients all-reduce -- but the branch
+            # must not, or the ranks' autograd graphs desync).
+            _opsa_on = float(getattr(args, "opsa_frac", 0.0) or 0.0) > 0
+            _opsa_every = max(1, round(1.0 / args.opsa_frac)) if _opsa_on else 0
+            use_opsa = (_opsa_on and opt_step >= int(getattr(args, "opsa_warmup_frac", 0.0) * args.steps)
+                        and _opsa_every and (opt_step % _opsa_every == 0))
+            if use_opsa:
+                op_ids = op_batches[opt_step % len(op_batches)].to(device) if op_batches else ids
+                loss = opsa_loss(model, core, op_ids, args)
+            elif use_op:
                 op_ids = op_batches[opt_step % len(op_batches)].to(device) if op_batches else ids
                 loss = on_policy_loss(model, teacher, core, op_ids, args, args.temperature)
             elif _mem_eff:
@@ -4092,6 +4152,24 @@ def main():
                          "only scales, so this is weaker leverage than block_qat.py's assignment "
                          "training — the main use is block_qat.")
     # ── on-policy / degeneration fix (E2E report A1+B2; default-off → byte-equivalent) ──
+    ap.add_argument("--opsa-frac", type=float, default=0.0,
+                    help="Fraction of steps trained with OPSA (arXiv 2608.31046): teacher-free "
+                         "suppression of the student's own lowest-logp rollout tokens, entropy-scaled. "
+                         "1.0 = every step. Aimed at Gate B's loop/repetition failure; no teacher "
+                         "forward, so it avoids the ~4.7x cost that got --on-policy-frac parked. Use a "
+                         "SHORT run at small lr on an already-converged model -- the objective is "
+                         "unbounded below.")
+    ap.add_argument("--opsa-tail-frac", type=float, default=0.2,
+                    help="OPSA: fraction of rollout positions (lowest log-prob) that receive negative "
+                         "advantage. 0.2 is the paper's value.")
+    ap.add_argument("--opsa-delta", type=float, default=1.0,
+                    help="OPSA: entropy coupling. 1 = larger-magnitude negative advantage at higher "
+                         "entropy (the paper's best), 0 = fixed -0.5 for every tail token, -1 = inverted.")
+    ap.add_argument("--opsa-warmup-frac", type=float, default=0.0,
+                    help="OPSA: fraction of steps kept purely off-policy first.")
+    ap.add_argument("--opsa-with-unlik", action="store_true",
+                    help="OPSA: also add the B2 repetition-unlikelihood term. Off by default so the "
+                         "OPSA effect can be attributed on its own.")
     ap.add_argument("--on-policy-frac", type=float, default=0.0,
                     help="Fraction of E2E steps that are ON-POLICY (GKD, arXiv:2306.13649): the student "
                          "rolls out its own continuation, the FP teacher scores it live, and the SAME "

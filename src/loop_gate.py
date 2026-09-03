@@ -8,7 +8,21 @@ signal for the exposure-bias residual — teacher-forced KL cannot see it.
   trunc_rate : frac that hit the token budget WITHOUT emitting EOS/</think>  (over-thinking / no-commit)
   commit_rate: frac (thinking-mode) that emitted </think> AND a non-empty, non-looping answer
 
-Env: ORIG, E2E_MODEL, N_PREFIX, MAXNEW, TAU, THINK(1/0), TEMP, BATCH, GATE_OUT.  Model -> cuda:0."""
+Env: ORIG, E2E_MODEL, N_PREFIX, MAXNEW, TAU, THINK(1/0), TEMP, BATCH, SEED, GATE_OUT.  Model -> cuda:0.
+
+REPRODUCIBILITY (added 2026-09-03). At TEMP>0 this gate samples, and it had NO seed, so every
+invocation drew a different RNG stream. Measured on ONE unchanged model (4B e2eqp), three runs at
+identical settings:
+
+    pipeline N=48   loop 0.3125   commit 0.7917   comp 3.248
+    rerun    N=48   loop 0.7083   commit 0.3542   comp 4.629
+    rerun    N=96   loop 0.6875   commit 0.4062   comp 4.573
+
+A 0.396 swing in loop_rate -- ~6 binomial SE, so NOT sampling noise of the reported kind. Looping is
+bistable per prompt and the whole prompt set sits near that boundary, so one RNG stream flips many
+prompts at once. Any single unseeded run is therefore uninterpretable, and 13v's "Gate B fails by one
+sequence" conclusion came from the 0.3125 outlier. SEED now makes a run reproducible; report a MEAN
+OVER SEEDS (and its spread) before comparing two models."""
 import os, re, json, zlib, torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from e2e_qp_distill import build_student, BLOCK_SIZE
@@ -17,6 +31,11 @@ try:
     from build_chat_calib import EASY, PLAIN
 except Exception:
     EASY, PLAIN = [], []
+
+SEED = int(os.environ.get("SEED", "0"))
+torch.manual_seed(SEED)
+if torch.cuda.is_available():
+    torch.cuda.manual_seed_all(SEED)
 
 ORIG = os.environ.get("ORIG", "output_4b/untied_4b")
 E2E = os.environ.get("E2E_MODEL", "output_4b/chatfix_v2/e2e_v1/modified_model")
@@ -70,7 +89,8 @@ def ngram_loop(text, n=5, rep=5):
     return False
 
 
-print(f"loop-gate: model={E2E} | N={N_PREFIX} maxnew={MAXNEW} think={THINK} temp={TEMP} tau={TAU}", flush=True)
+print(f"loop-gate: model={E2E} | N={N_PREFIX} maxnew={MAXNEW} think={THINK} temp={TEMP} tau={TAU} "
+      f"seed={SEED}", flush=True)
 if os.environ.get("MODEL_KIND", "tern") == "fp":                # FP baseline for TAU calibration
     st = AutoModelForCausalLM.from_pretrained(E2E, trust_remote_code=True,
                                               dtype=torch.bfloat16).to("cuda:0").eval()
@@ -156,7 +176,8 @@ with torch.no_grad():
 n = len(prompts)
 mean_cr = sum(ratios) / n
 res = {"model": E2E, "n": n, "think": THINK, "temp": TEMP, "maxnew": MAXNEW, "tau": TAU,
-       "loop_rate": loops / n, "trunc_rate": truncs / n, "commit_rate": commits / n,
+       "seed": SEED,
+    "loop_rate": loops / n, "trunc_rate": truncs / n, "commit_rate": commits / n,
        "mean_comp_ratio": mean_cr, "max_comp_ratio": max(ratios),
        "mean_think_len": (sum(think_lens)/len(think_lens)) if think_lens else None,
        "n_closed": len(think_lens)}
