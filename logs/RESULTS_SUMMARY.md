@@ -2368,3 +2368,75 @@ The paired N=96 comparison showed OPSA moving both target metrics the right way 
 which is exactly its intended mechanism. But an 8.3-pt effect cannot be read against a 39.6-pt
 run-to-run swing. **The OPSA result is currently UNINTERPRETABLE**, not negative. A 5-seed paired
 re-measurement is the minimum needed to say anything.
+
+## 13x. OPSA CONFIRMED on a seeded gate (5/5 seeds, all three metrics) — and SoftWater is REJECTED
+
+First paper method from the 2026-09 batch tested end to end. Prerequisite was 13w's seeding fix:
+without it the gate swung 0.396 on an unchanged model and could not resolve anything.
+
+### OPSA (arXiv 2608.31046) — teacher-free tail suppression
+
+5 seeds x 2 models, N=48, `--seed 0..4`, everything else identical. PAIRED by seed:
+
+| seed | base loop | opsa loop | base commit | opsa commit | base comp | opsa comp |
+|---|---|---|---|---|---|---|
+| 0 | 0.7292 | 0.5208 | 0.3542 | 0.4583 | 4.964 | 3.425 |
+| 1 | 0.7500 | 0.5417 | 0.2917 | 0.4583 | 4.777 | 3.611 |
+| 2 | 0.6875 | 0.6250 | 0.3750 | 0.4167 | 5.307 | 4.255 |
+| 3 | 0.6667 | 0.6250 | 0.3542 | 0.3750 | 3.959 | 3.761 |
+| 4 | 0.7083 | 0.5000 | 0.3333 | 0.4167 | 5.276 | 4.092 |
+
+| metric | base | OPSA | paired delta | seeds improved | paired t (df 4) |
+|---|---|---|---|---|---|
+| loop_rate | 0.7083 ± 0.0329 | **0.5625 ± 0.0589** | **-0.1458** | **5/5** | 3.80 |
+| commit_rate | 0.3417 ± 0.0316 | **0.4250 ± 0.0349** | **+0.0833** | **5/5** | 3.27 |
+| mean_comp_ratio | 4.8567 ± 0.5483 | **3.8287 ± 0.3410** | **-1.0280** | **5/5** | 4.61 |
+
+**Every metric improves on every seed**, all three significant at p<0.05. This is the first
+CONFIRMED quality win in the campaign, and it cost 200 steps / 12h24m with NO teacher forward.
+
+**It does NOT pass Gate B.** loop 0.5625 vs the <=0.30 target -- it closes 36% of the gap. That is
+consistent with its mechanism: it suppresses degenerate tails, while 8a attributes the underlying
+failure to distribution collapse at the `assistant\n<think>\n` position caused by the TERNARY
+lm_head. OPSA treats the symptom well; it is not the cure.
+
+**The seeding fix is what made it measurable.** Seeded baseline sd is 0.0329 -- 12x tighter than the
+0.396 unseeded range. The pipeline's original 0.3125 sits **12.0 sd** from the seeded baseline mean,
+which retires it as an outlier for good.
+
+**Retraction of an interim claim.** The single-run N=96 comparison in 13w reported commit_rate
+getting WORSE under OPSA (-3.1 pts). With 5 seeds it is clearly BETTER (+8.3 pts, 5/5). A single
+unseeded run got the SIGN wrong, not merely the magnitude.
+
+### SoftWater (arXiv 2608.12026) — REJECTED, incompatible with TQ1_64
+
+Rated "Strongly Adopt" in the incoming analysis and targeted at exactly our failure (the ternary
+lm_head). Reading the paper rejects it on the SAME grounds the same analysis used to reject ECASQ:
+
+* SoftWater's entire benefit is **unequal rate across classes** -- "fine grids to frequent,
+  low-variance classes and coarse grids to rare ones".
+* Alg. 1 step 10 is `B_i <- EC(Z_SIC[:,i])`, entropy coding per column, and §2.2 states outright:
+  **"any unequal-rate scheme needs: entropy coding, which turns the integer codes into a bitstream"**.
+* TQ1_64 is "1.7812 bpw, uniform (self-contained, no row term)" on a fixed 512-weight superblock.
+  Variable-length codes break the strided GEMV layout -- **the exact reason ECASQ (§7) was rejected**.
+
+The paper's "the decode format does not change" means unchanged relative to WaterSIC, its baseline,
+which already entropy-codes. It is NOT a statement of fixed-stride compatibility.
+
+**There is no free residual to salvage at fixed rate.** `β_k` is normalised to unit geometric mean
+(Alg. 1 step 2) and "rows are quantized independently against the same L" (§4), so a per-row scalar
+CANCELS in the rounding decisions. Without variable rate SoftWater reduces to plain GPTQ.
+
+Cost comparison for the same goal (fixing the ternary head), computed from real tensor shapes --
+embed+head is 2.543B of 27.78B (**9.2%**) on the 27B and 1.271B of 5.30B (**24.0%**) on the 4B:
+
+| option | 27B bpw | 27B size | delta |
+|---|---|---|---|
+| all ternary TQ1_64 | 1.7812 | 6.19 GB | — |
+| q4_K head+embed | 2.0300 | 7.05 GB | +0.86 GB (+14.0%) |
+| int4 + g64 fp16 scales | 2.0072 | 6.97 GB | +0.79 GB (+12.7%) |
+| SoftWater | — | — | **format-incompatible** |
+
+So the head can be fixed by SPENDING 14% bpw, but not for free via SoftWater. Note the 4B is the
+worst case for this failure mode (24% of params in embed+head vs 9.2% at 27B) and it is what we are
+testing on.
