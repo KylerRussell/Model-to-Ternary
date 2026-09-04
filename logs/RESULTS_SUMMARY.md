@@ -2440,3 +2440,68 @@ embed+head is 2.543B of 27.78B (**9.2%**) on the 27B and 1.271B of 5.30B (**24.0
 So the head can be fixed by SPENDING 14% bpw, but not for free via SoftWater. Note the 4B is the
 worst case for this failure mode (24% of params in embed+head vs 9.2% at 27B) and it is what we are
 testing on.
+
+## 13y. SchurOpt grid refit GRAFTED ONTO GPTQ — NEGATIVE, and the graft is the reason (2026-09-04)
+
+Second paper method from the batch. Result: **56.11% -> 5.59% eval2k agreement**. The method is not
+refuted; my ADAPTATION of it is.
+
+### What was implemented
+
+SchurOpt (arXiv 2608.15567) names two gaps in GPTQ-family PTQ: (a) group decisions ignore what the
+continuous suffix can absorb, and (b) "discrete refinements typically keep the affine quantization
+grid fixed". Our `_gptq_ternary` had exactly (b): the per-row scale came from `_block_scale`'s
+UNWEIGHTED MSE search, chosen once BEFORE any code was picked, never revisited. For symmetric ternary
+the zero-point drops out of Prop. 2, leaving a clean closed form
+
+    s* = diag(Z S W^T) / diag(Z S Z^T)
+
+alternated with code updates. Implemented as `_schur_refit`, wired as `--gptq-refit-iters` (default 0).
+
+Pre-run checks all passed: converges by ~2 iterations, every scale positive and finite, and on
+synthetic groups the weighted reconstruction error falls in proportion to Hessian anisotropy
+(0.11% isotropic, **16.87%** at a realistic condition number ~4e3).
+
+### Clean A/B at the skeleton (same harness, only the flag differs)
+
+| arm | eval2k agreement | mean KL | block-MSE (L31) | sparsity |
+|---|---|---|---|---|
+| refit=0 (control) | **56.11%** | 1.1988 | 3.793e-02 | 0.456 |
+| refit=4 | **5.59%** | 6.7739 | **3.667e-02** | 0.462 |
+
+**The refit did exactly what it was designed to do and the model still collapsed.** Local block-MSE
+IMPROVED (3.793e-2 -> 3.667e-2), sparsity is unchanged, no NaN, no scale explosion, and every 64-wide
+block is still exactly {-s, 0, +s} (2560 blocks sampled, 0 violations) so the TQ1_64 format is intact.
+
+### Why the graft is invalid
+
+SchurOpt's refit is defined INSIDE SchurOpt's optimizer -- Schur-conditioned coordinate descent with
+the suffix's continuous response eliminated analytically. Their ablation's "refit" arm refits within
+THAT optimizer. I grafted Eq. 16 onto GPTQ's sequential error-feedback pass, a hybrid the paper never
+proposes and whose numbers therefore do not apply.
+
+Mechanically: GPTQ pushes each column's rounding residual forward through Hinv, so the scale is not a
+free local choice -- it sets the residual structure the compensation then propagates. Optimising the
+grid for the block's ISOLATED weighted error changes those residuals, and the error accumulates over
+40 blocks x 32 layers. Better per-block reconstruction with catastrophically worse end-to-end output
+is the exact pattern the paper warns about ("tighter reconstruction does not consistently improve
+end-model metrics"), here in the extreme.
+
+**Testing SchurOpt properly requires replacing GPTQ's optimizer, not decorating it** -- Schur
+conditioning and code descent together, since the ablation shows the refit's value is conditional on
+the curvature it is refitting against. That is a much larger change than this was.
+
+### Two measurement notes
+
+* **The recorded 62.92% skeleton was NOT a valid control.** It came from `output_4bpipe`, an earlier
+  run with different settings. The same-harness control is **56.11%**. Comparing the refit arm against
+  62.92% would have overstated the damage; building the control was necessary and cheap.
+* **Stale `_recovery_staging` silently produces an UNRECOVERED model.** The resume check only tests
+  that `inputs_after_l` + `layer_l` exist for `l < NUM_HIDDEN_LAYERS`. A crashed run leaves those
+  behind; the next run then sets `start_layer = 32`, executes an EMPTY recovery loop, and saves the
+  input model. Symptoms: `recovery_report.json` shows `layers: {}`, block-AP "finishes" in ~2 min, and
+  eval2k reads 3.75%. The A/B driver now asserts `layers_recovered == 32`. Root cause of that crash was
+  mine: `ORIG_MODEL` must be EXPORTED because `config.py` binds `NUM_HIDDEN_LAYERS` at import and
+  defaults to the 27B's 64 -- a 4B run then walks off the end at layer 33.
+
+`--gptq-refit-iters` is left in the tree, defaulted OFF, with this result recorded against it.
