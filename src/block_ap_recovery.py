@@ -509,6 +509,16 @@ def _tern_round(x, kappa=None):
 
 # SchurOpt grid refit, off by default so the validated recipe is unchanged. Env/CLI settable.
 _GPTQ_REFIT_ITERS = int(os.environ.get("GPTQ_REFIT_ITERS", "0"))
+_QUANT_OPT = os.environ.get("QUANT_OPTIMIZER", "gptq")          # "gptq" (validated) | "schuropt"
+_SCHUROPT_REFINE = int(os.environ.get("SCHUROPT_REFINE", "8"))
+_SCHUR_DEBUG = os.environ.get("SCHUR_DEBUG") == "1"
+
+
+def _ternary_fit(W_fp, H, block_size, percdamp=0.01, act_order=False):
+    """Single entry point so every call site honours --quant-optimizer. Default is unchanged GPTQ."""
+    if _QUANT_OPT == "schuropt":
+        return _schuropt_ternary(W_fp, H, block_size, percdamp, _SCHUROPT_REFINE)
+    return _gptq_ternary(W_fp, H, block_size, percdamp, act_order=act_order)
 
 
 def _schur_refit(W1, S, s, iters):
@@ -543,6 +553,142 @@ def _schur_refit(W1, S, s, iters):
         ok = torch.isfinite(s_new) & (s_new > 0)
         s = torch.where(ok, s_new, s)
     return s.clamp_min(1e-8)
+
+
+def _schuropt_ternary(W_fp, H, block_size, percdamp=0.01, refine_iters=4):
+    """SCHUROPT (arXiv 2608.15567, Alg. 1) as a SIBLING of _gptq_ternary -- not a modification of it.
+
+    GPTQ fixes each column in turn and pushes the residual forward, so a group is decided while the
+    continuous suffix is held still even though that suffix can absorb part of the error. SchurOpt
+    instead ELIMINATES the suffix's optimal continuous response analytically, leaving an exact
+    quadratic in the current chunk with Schur-complement curvature, and optimises that chunk jointly:
+    alternating the closed-form scale refit with coordinate descent over the integer codes.
+
+    Crucially the paper states "SCHUROPT needs no explicit suffix error-propagation step. The optimal
+    response is already incorporated into (S, T)". 13y's failure (56.11% -> 5.59%) came from grafting
+    only the scale refit onto GPTQ, which KEPT the forward propagation and so double-counted the
+    suffix. The two are alternative optimizers for the same objective and must not be mixed. The paper
+    also notes SchurOpt REDUCES to GPTQ's column update at g=1 with the grid held fixed, i.e. it is a
+    strict generalisation.
+
+    Self-reconstruction objective, matching GPTQ's:
+        L(W) = tr(W G W^T) - 2 tr(W C^T) + const,   G = X X^T,  C = W_ref G
+    With the prefix p already quantised, the suffix r free and the chunk c discrete, eliminating W_r
+    gives curvature S = G_cc - G_cr G_rr^-1 G_rc and linear term
+        T = (C_c - W_p G_pc) - (C_r - W_p G_pr) G_rr^-1 G_rc.
+    Alg. 1 gets S from the running inverse: S = inv(P_cc), then P <- P_rr - P_cr^T S P_cr.
+
+    Symmetric ternary => the zero-point drops out, so per row i:
+        scale   a_i = (z_i T_i^T) / (z_i S z_i^T)                       (Eq. 16 with o = 0)
+        codes   z_ij = clamp(round( (T_ij/a_i - sum_{k!=j} z_ik S_kj) / S_jj ), -1, 1)   (Eq. 17)
+
+    Format-safe: one positive scale per row per block, exactly what TQ1_64 stores. bpw unchanged.
+    """
+    out, inp = W_fp.shape
+    dev = W_fp.device
+    Wr = W_fp.clone().float()                         # W_ref
+    G = H.clone().float()
+    dead = torch.diag(G) == 0
+    G[dead, dead] = 1.0
+    Wr[:, dead] = 0.0
+    G[torch.arange(inp, device=dev), torch.arange(inp, device=dev)] += percdamp * torch.diag(G).mean()
+    C = Wr @ G                                        # [out, inp] linear term of the self-recon objective
+    P = torch.linalg.inv(G)                           # Alg. 1 line 1 (damped inverse)
+    Q = torch.zeros_like(Wr)
+    Wq_pref = torch.zeros_like(Wr)                    # quantised prefix, zero where not yet decided
+    for i1 in range(0, inp, block_size):
+        i2 = min(i1 + block_size, inp)
+        g = i2 - i1
+        k = slice(i1, i2)
+        # S = inv(P_cc) is the curvature left after the suffix's best continuous response (Alg. 1 L5)
+        Pcc = P[:g, :g]
+        S = torch.linalg.inv(Pcc + 1e-9 * torch.eye(g, device=dev))
+        S = 0.5 * (S + S.T)
+        if _SCHUR_DEBUG:
+            _ev = torch.linalg.eigvalsh(S)
+            _dbg = {"chunk": i1 // block_size, "S_eigmin": float(_ev.min()), "S_eigmax": float(_ev.max())}
+        # effective linear term with the fixed prefix folded in (see docstring)
+        Ceff = C[:, k] - Wq_pref[:, :i1] @ G[:i1, k] if i1 else C[:, k]
+        if i2 < inp:
+            Cr = C[:, i2:] - (Wq_pref[:, :i1] @ G[:i1, i2:] if i1 else 0.0)
+            # Alg. 1 line 6: K = -P_cr^T S, taken from the SAME recursion that produced S. Identical
+            # to solve(G_rr, G_rc) to ~1e-7 but with no O(n^3) solve per chunk -- the explicit solve
+            # is what made the first run crawl (74 min for 1.5 layers).
+            K = -P[:g, g:].T @ S
+            T = Ceff - Cr @ K
+        else:
+            T = Ceff
+        # Init from the EFFECTIVE target, not W_ref. Alg. 1 line 9 initialises from W_c^ref, but our
+        # T already has the prefix's quantisation error folded in, so from chunk 1 onward the
+        # unconstrained optimum of this chunk's objective is W_eff = S^-1 T, not W_ref[:, c].
+        # Anchoring the grid to W_ref instead made the refit pull the scale >=10x off a_init on
+        # essentially every chunk (measured), which unclamped explodes the layer (block-MSE 6.5e22)
+        # and clamped just pins it at the ceiling. Initialising codes AND scale from W_eff makes the
+        # grid consistent with the quadratic actually being minimised.
+        W_eff = torch.linalg.solve(S, T.T).T
+        a = _block_scale(W_eff).clamp_min(1e-8).reshape(-1)
+        a_init = a.clone()
+        Z = _tern_round((W_eff / a.unsqueeze(1)).clamp(-1, 1))
+        sd = torch.diag(S).clamp_min(1e-12)
+        for _ in range(max(1, refine_iters)):
+            a = _schur_scale(Z, S, T, a, a_init)      # Eq. 16 (guarded)
+            U = Z @ S                                 # [out, g]
+            Ta = T / a.unsqueeze(1).clamp_min(1e-12)
+            for j in range(g):                        # Eq. 17 coordinate sweep
+                part = U[:, j] - Z[:, j] * sd[j]
+                znew = torch.clamp(torch.round((Ta[:, j] - part) / sd[j]), -1, 1)
+                dz = znew - Z[:, j]
+                nz = dz != 0
+                if nz.any():
+                    U[nz] += dz[nz].unsqueeze(1) * S[j].unsqueeze(0)
+                    Z[:, j] = znew
+        a = _schur_scale(Z, S, T, a, a_init)          # final refit (Alg. 1 line 15)
+        if _SCHUR_DEBUG:
+            _den = ((Z @ S) * Z).sum(1)
+            _dbg.update(den_min=float(_den.min()), a_over_init_max=float((a / a_init).max()),
+                        a_max=float(a.max()), T_absmax=float(T.abs().max()))
+            if _dbg["chunk"] < 3 or _dbg["a_over_init_max"] > 5 or _dbg["den_min"] <= 0:
+                print(f"   [schur-dbg] {_dbg}", flush=True)
+        Wc = Z * a.unsqueeze(1)
+        Q[:, k] = Wc
+        Wq_pref[:, k] = Wc
+        if i2 < inp:                                  # Alg. 1 line 16: shrink P onto the suffix
+            Pcr = P[:g, g:]
+            P = P[g:, g:] - Pcr.T @ S @ Pcr
+            P = 0.5 * (P + P.T)
+    if _SCHUR_CLAMPED[1] and _SCHUR_CLAMPED[0]:
+        print(f"   [schuropt] scale guard fired on {_SCHUR_CLAMPED[0]}/{_SCHUR_CLAMPED[1]} "
+              f"row-blocks ({100*_SCHUR_CLAMPED[0]/_SCHUR_CLAMPED[1]:.3f}%)", flush=True)
+        _SCHUR_CLAMPED[0] = _SCHUR_CLAMPED[1] = 0
+    return Q
+
+
+_SCHUR_CLAMPED = [0, 0]        # [rows clamped, rows seen] -- diagnostic for the guard below
+
+
+def _schur_scale(Z, S, T, a_prev, a_init=None):
+    """Eq. 16 with zero-point o = 0 (symmetric ternary): a_i = (z_i T_i^T) / (z_i S z_i^T).
+
+    GUARDED. Eq. 16 is an unconstrained ratio: a row whose codes lie near a null direction of S has
+    a vanishing denominator, so a single row can take an astronomically large but FINITE and POSITIVE
+    scale, which the isfinite/positive test lets through. Empirically that is what broke the first
+    real-model run -- mean block-MSE 6.5e22 at L0 while SPARSITY stayed normal (0.447), the signature
+    of a few pathological rows rather than a systematic blow-up, then NaN at L1. A ternary scale far
+    outside the weight magnitude is meaningless by construction (the levels ARE +-a), so clamp to a
+    band around the MSE-optimal init and count how often it fires.
+    """
+    ZS = Z @ S
+    num = (Z * T).sum(1)
+    den = (ZS * Z).sum(1)
+    a = num / den.clamp_min(1e-12)
+    ok = torch.isfinite(a) & (a > 0)
+    a = torch.where(ok, a, a_prev)
+    if a_init is not None:
+        lo, hi = 0.1 * a_init, 10.0 * a_init
+        clamped = (a < lo) | (a > hi)
+        _SCHUR_CLAMPED[0] += int(clamped.sum()); _SCHUR_CLAMPED[1] += a.numel()
+        a = torch.clamp(a, lo, hi)
+    return a.clamp_min(1e-8)
 
 
 def _gptq_ternary(W_fp, H, block_size, percdamp=0.01, act_order=False, refit_iters=None):
@@ -666,7 +812,7 @@ def reconstruct_linear(module, gram, block_size, iters, lr, device, sensitivity=
     init_mse = gram_mse(rtn_deploy).item()                          # RTN floor / keep-best candidate
 
     try:                                                           # GPTQ can throw on a non-PD Hessian
-        gptq_deploy = _gptq_ternary(W_fp, H, block_size, act_order=act_order)
+        gptq_deploy = _ternary_fit(W_fp, H, block_size, act_order=act_order)
         if cdquant:                                                # refine assignments on-grid (≥ GPTQ)
             gptq_deploy = _cdquant_refine(gptq_deploy, W_fp, H, block_size, sweeps=cd_sweeps)
         gptq_mse = gram_mse(gptq_deploy).item()
@@ -798,6 +944,16 @@ def main():
                     help="CDQuant: greedy/Jacobi coordinate-descent refinement of the ternary assignments "
                          "after GPTQ (same on-grid objective, stronger local search; keep-best, ≥ GPTQ).")
     ap.add_argument("--cd-sweeps", type=int, default=4, help="CDQuant max coordinate-descent sweeps per linear.")
+    ap.add_argument("--quant-optimizer", choices=["gptq", "schuropt"], default="gptq",
+                    help="Discrete optimizer for the ternary fit. 'gptq' (default) is the validated "
+                         "sequential error-feedback pass. 'schuropt' (arXiv 2608.15567 Alg. 1) is an "
+                         "ALTERNATIVE that eliminates the suffix's continuous response analytically "
+                         "and optimises each chunk jointly (scale refit + code coordinate descent); it "
+                         "needs NO forward error propagation, so the two must not be combined -- doing "
+                         "that is what broke 13y. Reduces to GPTQ at g=1 with the grid fixed.")
+    ap.add_argument("--schuropt-refine", type=int, default=8,
+                    help="SchurOpt refinement sweeps R per chunk (paper uses 16; the refit converges "
+                         "by ~2 and each sweep costs O(out*g^2)).")
     ap.add_argument("--gptq-refit-iters", type=int, default=0,
                     help="SchurOpt (arXiv 2608.15567) Eq. 16 grid refit: alternate ternary codes with "
                          "the curvature-weighted closed-form per-row scale s* = diag(ZSW^T)/diag(ZSZ^T), "
@@ -871,6 +1027,8 @@ def main():
                          "fixable drift; if it still explodes with clean input, it is intrinsic (go 2-bit).")
     args = ap.parse_args()
     globals()['_GPTQ_REFIT_ITERS'] = int(getattr(args, 'gptq_refit_iters', 0) or 0)
+    globals()['_QUANT_OPT'] = getattr(args, 'quant_optimizer', 'gptq')
+    globals()['_SCHUROPT_REFINE'] = int(getattr(args, 'schuropt_refine', 4) or 4)
     if args.epochs is not None:
         print(f"⚠️  --epochs is ignored in the Gram-matrix reconstruction; using --iters {args.iters}")
 
@@ -1339,7 +1497,7 @@ def main():
                     if g is None or g[1] == 0:
                         continue
                     try:
-                        gptq_deq[name] = _gptq_ternary(module.weight.data.to(g[0].device, torch.float32),
+                        gptq_deq[name] = _ternary_fit(module.weight.data.to(g[0].device, torch.float32),
                                                        g[0], args.block_size, act_order=ACTORDER)
                     except Exception as e:
                         print(f"   {name:28s} ⚠️ GPTQ-init failed ({type(e).__name__}); cold FP init", flush=True)
@@ -1663,9 +1821,9 @@ def main():
                     continue
                 is_head = disk.endswith("lm_head.weight")
                 if is_head and lmhead_H is not None:
-                    q = _gptq_ternary(W, lmhead_H, args.block_size); meth = "GPTQ"
+                    q = _ternary_fit(W, lmhead_H, args.block_size); meth = _QUANT_OPT.upper()
                 elif (not is_head) and ('embed_H' in dir()) and embed_H is not None:
-                    q = _gptq_ternary(W, embed_H, args.block_size); meth = "GPTQ"
+                    q = _ternary_fit(W, embed_H, args.block_size); meth = _QUANT_OPT.upper()
                 else:
                     q = _mse_rtn_ternary(W, args.block_size); meth = "MSE-RTN"
                 spars = float((q == 0).float().mean())

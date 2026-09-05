@@ -2505,3 +2505,63 @@ the curvature it is refitting against. That is a much larger change than this wa
   defaults to the 27B's 64 -- a 4B run then walks off the end at layer 33.
 
 `--gptq-refit-iters` is left in the tree, defaulted OFF, with this result recorded against it.
+
+---
+
+## 13z. SchurOpt as a SIBLING optimizer — ABANDONED after a verified-correct implementation diverged
+## on the real model (2026-09-05)
+
+13y ended with "testing SchurOpt properly requires replacing GPTQ's optimizer, not decorating it."
+That was done: `_schuropt_ternary()` implements Alg. 1 as a sibling of `_gptq_ternary()`, dispatched by
+`_ternary_fit()` behind `--quant-optimizer gptq|schuropt` (default **gptq**, unchanged). It is
+abandoned NEGATIVE. No skeleton was ever scored, because the smoke never produced a finite model.
+
+### The failure
+
+Per-layer mean block-MSE, 4B, `--samples 32 --qat-epochs 1`, against a GPTQ control run at the
+IDENTICAL reduced config (this control was built specifically to rule out a low-sample confound):
+
+| layer | GPTQ (same config) | SchurOpt |
+|---|---|---|
+| L0 | 8.760e-05 | **1.851e+01** |
+| L1 | 6.681e-05 | 1.281e-03 |
+| L2 | 1.246e-04 | **4.242e+06** |
+| L3 | 2.062e-04 | **nan** |
+| L17 | 1.634e-03 | (dead) |
+
+GPTQ holds 1e-5..1e-3 across all 18 layers and drifts up only gently. SchurOpt is **five orders worse
+at L0** — before any depth accumulation exists — and NaNs by L3. The scale-guard fire rate escalates
+with depth (0.489, 0.000, 0.001, ..., 2.222, 4.775, 3.854%), i.e. scales run away systematically
+rather than failing on isolated rows.
+
+### The algebra is NOT the bug
+
+Verified against independent references before and after the failure: the Schur complement `S` to
+8e-6, `K = -P[:g, g:].T @ S` (Alg. 1 line 6) against `solve(G_rr, G[i2:,k])` to 6e-7, the `inv(G_rr)`
+block-recursion identity, and PSD preservation across all 144 chunks. On synthetic problems the
+sibling BEATS GPTQ on the weighted objective. Two fix attempts were made and both failed: the
+effective-target init `W_eff = solve(S, T.T).T` with an `a_init`-relative `[0.1, 10]x` clamp cleaned up
+the synthetic case (guard 0/184320) and pushed the blow-up from L0/L1 to L2/L3, but did not remove it.
+
+### The structural reading
+
+SchurOpt eliminates the suffix *analytically, assuming it responds continuously*. Our suffix is
+ternarised too. At 3 symmetric levels with no zero-point there is far less absorption capacity than at
+the paper's 2-bit **asymmetric, zero-pointed, g=128** grid, so `W_eff = S^-1 T` drifts to targets the
+ternary grid cannot represent and each chunk's unabsorbed error feeds the next. That is consistent
+with both the paper's large reported gains and our blow-up, and with 13y's separate finding that the
+scale refit helps the isolated block objective while destroying the end model. Measured upside here
+was +1.26% on the local objective vs GPTQ, against the paper's +11.88 pp — the premise the gain rests
+on is the part that does not hold at ternary.
+
+### Process notes (mine)
+
+* I called it "Fixed" after reading only L0/L1 of the smoke log. It was not; the user caught it.
+* I did not flag that L0's 1.851e+01 was already ~3 orders above the control's ~3.8e-02 — the failure
+  was visible in the FIRST layer of the first smoke and I read it as a warm-up transient.
+* The reduced-config GPTQ control should have been built with the first SchurOpt smoke, not after two
+  fix attempts; without it, "is 1.85e+01 bad?" was unanswerable.
+
+`--quant-optimizer schuropt` stays in the tree, defaulted OFF, with this result recorded against it.
+**SchurOpt (paper #6) is closed.** Along with SoftWater (#3, 13x), that retires both remaining
+"Strongly Adopt" Phase-3 entries except ICBQ (#10).
