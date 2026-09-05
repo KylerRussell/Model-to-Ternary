@@ -1504,6 +1504,10 @@ def main():
                  "windows": [], "pairs": 0, "seam_visits": 0}
     _icbq_seen = set()                        # pair indices already refined -> counts seam revisits
     _ICBQ_ANCHOR = staging_dir / "icbq_anchor.pt"   # stream ENTERING the next window's first block
+    # The two heavy self-tests re-roll a whole window and re-read every staged layer. They validate
+    # code paths, not data, so running them on the FIRST window is enough; after that they are pure
+    # cost. The cheap passthrough-teacher assert stays on for every pair.
+    _ICBQ_ST = {"on": os.environ.get("ICBQ_SELFTEST") == "1"}
 
     def _icbq_dev(li, pname):
         """Honour the sweep's 2-GPU split. The sweep does layer.mlp.to("cuda:1") and registers
@@ -1524,10 +1528,16 @@ def main():
         with safe_open(str(staging_dir / f"layer_{li}.safetensors"),
                        framework="pt", device="cpu") as f:
             keys = set(f.keys())
+            _miss = []
             for pname, _ in list(lyr.named_parameters()):
                 full = f"model.layers.{li}.{pname}"
                 if full in keys:
                     assign_tensor_to_module(lyr, pname, f.get_tensor(full), _icbq_dev(li, pname))
+                else:
+                    _miss.append(pname)          # would stay on meta and read as a silent zero
+            if _miss:
+                raise RuntimeError(f"ICBQ: layer_{li}.safetensors is missing {len(_miss)} param(s) "
+                                   f"still live on the module: {_miss[:6]}")
         return lyr
 
     def _icbq_load_fp(li):
@@ -1538,12 +1548,17 @@ def main():
         for pname, param in list(lyr.named_parameters()):
             full = f"model.layers.{li}.{pname}"
             dv = _icbq_dev(li, pname)
-            if full in weight_map:
-                assign_tensor_to_module(lyr, pname,
-                                        load_tensor_from_shards(model_path, weight_map, full), dv)
-            else:
-                assign_tensor_to_module(lyr, pname,
-                                        torch.zeros(param.shape, dtype=torch.bfloat16), dv)
+            # NEVER pre-check `full in weight_map`: this checkpoint indexes layers as
+            # "model.language_model.layers.N", and load_tensor_from_shards applies that alias
+            # internally. A raw dict lookup misses EVERY tensor -- which silently zeroed the whole
+            # FP teacher and trained every pair towards a passthrough block (1.19% agreement).
+            try:
+                w = load_tensor_from_shards(model_path, weight_map, full)
+            except KeyError:
+                if not pname.endswith("bias"):
+                    raise                       # a missing WEIGHT is a bug, not a deploy-time extra
+                w = torch.zeros(param.shape, dtype=torch.bfloat16)   # tequila-folded bias only
+            assign_tensor_to_module(lyr, pname, w, dv)
         return lyr
 
     def _icbq_free(li):
@@ -1634,7 +1649,18 @@ def main():
             _entry = sum(F.mse_loss(_icbq_pair_forward(la, lb, stream[j].to(device), j).float(),
                                     tgt[j].to(device).float()).item()
                          for j in range(len(stream))) / max(1, len(stream))
-        print(f"   ICBQ ({i},{i+1}) entry pair-MSE {_entry:.3e}", flush=True)
+        # A degenerate (zeroed) FP teacher is indistinguishable from a good one by pair-MSE alone,
+        # so compare the target against the pair INPUT: a passthrough teacher leaves them equal.
+        _tr = sum(tgt[j].float().pow(2).mean().item() for j in range(len(tgt))) / max(1, len(tgt))
+        _xr = sum(stream[j].float().pow(2).mean().item() for j in range(len(stream))) / max(1, len(stream))
+        print(f"   ICBQ ({i},{i+1}) entry pair-MSE {_entry:.3e}  "
+              f"[teacher ms={_tr:.3e} vs input ms={_xr:.3e}]", flush=True)
+        if abs(_tr - _xr) <= 1e-6 * max(_xr, 1e-30):
+            raise RuntimeError(
+                f"ICBQ pair ({i},{i+1}): the FP teacher is a PASSTHROUGH (teacher ms {_tr:.6e} == "
+                f"input ms {_xr:.6e}). Every projection in the teacher is zero, so refining against "
+                f"it trains the blocks to contribute nothing. This is what a failed shard lookup "
+                f"looks like -- check the model.language_model.* alias in _icbq_load_fp.")
         _icbq_log.setdefault("pair_mse", {})[f"{i},{i+1}"] = {"entry": _entry}
         if latent_params:
             opt = torch.optim.AdamW([{"params": latent_params, "lr": _ICBQ_LR},
@@ -1671,7 +1697,23 @@ def main():
             _icbq_set_sub(model.model.layers[li], name, lin)
             stats["layers"].setdefault(str(li), {}).setdefault(name, {})["sparsity"] = spars
         del qmods, latent_params, scale_params
+        if _ICBQ_ST["on"]:
+            _want = {}
+            for li in (i, i + 1):
+                for pn, pv in model.model.layers[li].named_parameters():
+                    _want[(li, pn)] = pv.data.detach().to("cpu", torch.bfloat16).clone()
         _icbq_stage(i); _icbq_stage(i + 1)
+        if _ICBQ_ST["on"]:
+            _bad = 0
+            for li in (i, i + 1):
+                _icbq_load_staged(li)
+                for pn, pv in model.model.layers[li].named_parameters():
+                    if not torch.equal(pv.data.to("cpu", torch.bfloat16), _want[(li, pn)]):
+                        _bad += 1
+                _icbq_free(li)
+            print(f"   [icbq-selftest] restage round-trip pair ({i},{i+1}): "
+                  f"{_bad} mismatched param(s) (must be 0)", flush=True)
+            del _want
         torch.cuda.empty_cache(); gc.collect()
 
     def _icbq_advance(li, stream):
@@ -1706,6 +1748,23 @@ def main():
         print(f"\n🪡 ICBQ chunk close at L{b}: window [{wmin},{b}], {len(pairs)} pair(s), "
               f"{len(seam)} seam revisit(s) {seam}", flush=True)
         stream = torch.load(str(_ICBQ_ANCHOR))
+        if _ICBQ_ST["on"]:
+            # Re-rolling WITHOUT refinement must reproduce the sweep's own stream exactly: same
+            # blocks, same inputs, same kwargs. Any drift here means the reload/advance path -- not
+            # the refinement -- is what moves the model, and every later layer is then fit to a
+            # fictitious operating point while its block-MSE (measured on that same wrong stream)
+            # looks excellent.
+            _chk = stream
+            for _i in range(wmin, b + 1):
+                _chk = _icbq_advance(_i, _chk)
+            _num = _den = 0.0; _mx = 0.0
+            for _j in range(len(cur_inputs)):
+                _x = cur_inputs[_j].float(); _y = _chk[_j].float()
+                _num += (_x - _y).pow(2).sum().item(); _den += _x.pow(2).sum().item()
+                _mx = max(_mx, (_x - _y).abs().max().item())
+            print(f"   [icbq-selftest] re-roll vs sweep stream: rel={(_num/max(_den,1e-30))**0.5:.3e} "
+                  f"absmax={_mx:.3e}  (both must be ~0)", flush=True)
+            del _chk
         nxt_wmin = max(0, (b + 1) - 2)          # where the NEXT window starts -> anchor to save
         for i in pairs:
             _icbq_refine_pair(i, stream)
@@ -1719,6 +1778,7 @@ def main():
                 torch.save(stream, str(tmpk)); os.replace(str(tmpk), str(_ICBQ_ANCHOR))
             gc.collect()
         stream = _icbq_advance(b, stream)                        # past the window's last block
+        _ICBQ_ST["on"] = False                                   # first window validated the paths
         _icbq_log["windows"].append({"chunk_start": chunk_start, "b": b, "wmin": wmin,
                                      "pairs": pairs, "seam": seam})
         af = staging_dir / f"inputs_after_{b}.pt"
