@@ -2565,3 +2565,81 @@ on is the part that does not hold at ternary.
 `--quant-optimizer schuropt` stays in the tree, defaulted OFF, with this result recorded against it.
 **SchurOpt (paper #6) is closed.** Along with SoftWater (#3, 13x), that retires both remaining
 "Strongly Adopt" Phase-3 entries except ICBQ (#10).
+
+---
+
+## 13aa. ICBQ seam refinement — a SMALL POSITIVE (+0.44 pp), and a name-aliasing bug that first
+## faked a 99.8% local win while destroying the model (2026-09-05)
+
+Third paper from the batch, and the first Phase-3 entry that did not fail. ICBQ (arXiv:2608.09595) is
+a pure SCHEDULE: partition depth into chunks of K, and at each chunk close re-optimise the TWO-BLOCK
+windows spanning the boundary, so each seam pair is refined twice (end of chunk c, start of c+1) and
+the student stream is re-rolled. The inner quantizer, the grid and TQ1_64 are untouched -- which is
+exactly why it does not rest on grid capacity the way 13y/13z's SchurOpt did.
+
+Implemented as `--icbq-chunk K` (default 0 = off). `K >= n_layers` reproduces the paper's "K = L"
+Sequential-CBQ baseline. Deliberate deviation: their window ends at pair (b, b+1) with b+1 unquantized
+and carried as a "provisional copy"; our sweep stages each finished layer and reverts it to meta, so
+the window is shifted one block left instead. Seam count and pairs-per-window (K+1) are unchanged.
+
+### Result (same harness, only the flag differs)
+
+| arm | agreement | mean KL | KL(conf>0.5) | %flips |
+|---|---|---|---|---|
+| control (icbq off) | 56.11% | 1.1988 | 1.0197 | 43.89% |
+| **ICBQ K=4** | **56.55%** | **1.1767** | **0.9959** | **43.45%** |
+
+38 pairs, 7 seam revisits, exactly as scheduled. All four metrics move the same way. Per-layer
+block-MSE improves ~6% on average (L16 -15.5%, L20 -5.9%, L24 +1.6%, L27 -6.6%, L31 -2.2%), and the
+seam's SECOND visit still finds -20.9% after the first visit's -9%, which is the paper's predicted
+extra contraction observed directly.
+
+**NOT yet established as a reliable win.** N=1 per arm. Over 1.99M positions the difference between
+these two MODELS is certain (binomial SE 0.035 pp), but block-AP has real run-to-run RNG -- L0..L3
+block-MSEs moved 0.3-1% between runs on layers ICBQ never touched. The noise floor for a
+skeleton A/B in this harness has never been measured; +0.44 pp may sit inside it. Cost to measure:
+one repeat control run (~2.4 h), which would calibrate EVERY future skeleton A/B here.
+
+### The bug that first reported 1.19%, and why three metrics endorsed it
+
+The first run scored **1.19% agreement / KL 10.2583**. Cause was mine and mundane:
+
+```
+if full in weight_map:      # "model.layers.12..." -> MISSES, always
+    ...load FP weights...
+else:
+    ...zeros...             # every param took this branch
+```
+
+This checkpoint indexes layers as `model.language_model.layers.N`, and the alias is applied INSIDE
+`load_tensor_from_shards`. A raw dict pre-check bypasses it, so **the FP teacher for all 38 pairs was
+an all-zero block** and every pair was trained toward a passthrough.
+
+What makes this worth recording is that THREE separate signals endorsed the broken model:
+
+* pair-MSE looked plausible (3.4e-03) -- a dead teacher is invisible to it;
+* per-layer block-MSE looked SPECTACULAR (L12 -99.8%, L16 -99.9%) -- because it is measured as
+  `FP_block(x) vs Q_block(x)` on the SAME stream, so when the stream degrades both sides degrade
+  together and the metric improves;
+* the run exited `rc=0` with `layers_recovered=32`.
+
+Only the end-to-end referee caught it. The real tell was in the activations: the residual stream
+stopped growing (h28 rms 0.209 vs FP 0.753, absmax 0.50 vs 4.25) because every block had been trained
+to contribute nothing.
+
+**Local reconstruction metrics cannot detect a corrupted stream** -- they are measured against a
+target computed FROM that stream. That is the same trap as 13y (better block-MSE, model destroyed)
+arriving by a completely different route, and it is now two for two.
+
+### Guards added (all verified passing before the real run)
+
+* a missing WEIGHT raises; only a tequila-folded bias may be zeroed;
+* per-pair `teacher ms vs input ms` logged, with a hard abort when equal (a passthrough teacher is
+  invisible to pair-MSE alone);
+* `_icbq_load_staged` raises if any live param is absent from the staged file;
+* `ICBQ_SELFTEST=1` (first window only, so ~free): re-roll must reproduce the sweep's stream
+  BIT-EXACTLY -- measured rel=0.000e+00 -- and deploy->stage->reload must round-trip exactly (0
+  mismatched params). The bit-exact re-roll is what isolated the fault to the teacher by elimination.
+
+With a live teacher the honest per-pair gain is **-5% to -9%**, not the fake run's -96% to -99.6%.
+That contrast is the cleanest evidence the fix took.
