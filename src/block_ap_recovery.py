@@ -979,6 +979,13 @@ def main():
                          "PRECONDITIONED FP model and skips recovery -- run block-AP on the output. "
                          "Expect a small effect: --col-scale already works this axis (S7: paired "
                          "dKL -0.00038, trained gains inside [0.994, 1.006]).")
+    ap.add_argument("--nap-trust", type=float, default=1.0,
+                    help="Trust-region weight on the NAP gain update: penalises mean(((1+g)/(1+g0) "
+                         "- 1)^2), i.e. RELATIVE movement of each channel gain. The local per-block "
+                         "MSE has no anchor holding the gains near 1, so at a full step budget they "
+                         "drift to whatever fits the calib set -- measured [0.875, 1.124] unbounded "
+                         "at 512 steps, vs [0.991, 1.009] at 16. That is a large self-inflicted drift "
+                         "in the FP model the referee still scores against. 0 = unbounded.")
     ap.add_argument("--nap-lr", type=float, default=1e-3,
                     help="LR for the NAP norm gains (they are ~2*hidden params per layer).")
     ap.add_argument("--icbq-chunk", type=int, default=0,
@@ -1556,6 +1563,12 @@ def main():
                     o = o[0] if isinstance(o, tuple) else o
                     loss = F.mse_loss(o.float(), fp_outs[idx].to(device).float())
                     run += loss.item()
+                    if args.nap_trust > 0:      # keep the update inside the restricted subspace
+                        pen = 0.0
+                        for _n, _p in nps.items():
+                            _r = (1.0 + _p.float()) / (1.0 + base[_n]).clamp_min(1e-6)
+                            pen = pen + (_r - 1.0).pow(2).mean()
+                        loss = loss + args.nap_trust * (pen / max(1, len(nps)))
                     opt.zero_grad(set_to_none=True); loss.backward()
                     torch.nn.utils.clip_grad_norm_(list(nps.values()), 1.0)
                     opt.param_groups[0]["lr"] = args.nap_lr * (
