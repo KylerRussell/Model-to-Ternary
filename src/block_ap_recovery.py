@@ -310,6 +310,15 @@ def revert_module_param_to_meta(module, param_name, shape):
 
 # ───────────────────────── ternary STE + per-linear reconstruction ─────────────────
 
+def _icbq_set_sub(root, dotted, mod):
+    """Replace root.<dotted> with mod (module-level twin of the qat branch's _set_sub)."""
+    *par, leaf = dotted.split(".")
+    p = root
+    for q in par:
+        p = getattr(p, q)
+    setattr(p, leaf, mod)
+
+
 def _blocks(W: torch.Tensor, block_size: int):
     """Row-major [n_blocks, block_size] view, matching quantizer.quantize_absmean.
     Requires in_features % block_size == 0 (true for every projection here)."""
@@ -962,6 +971,23 @@ def main():
                          "so bpw is unchanged. Converges by ~2 iters; 4 is ample. Gain scales with "
                          "Hessian anisotropy (measured on synthetic groups: 0.1%% isotropic, 16.9%% at "
                          "a realistic power-law condition ~4e3).")
+    ap.add_argument("--icbq-chunk", type=int, default=0,
+                    help="ICBQ (arXiv:2608.09595) interleaved cross-block seam refinement: chunk "
+                         "size K. 0 = off (validated sequential sweep). After every K quantized "
+                         "blocks, re-optimise the TWO-BLOCK windows spanning the chunk boundary, so "
+                         "each seam pair is refined twice (end of one chunk, start of the next) and "
+                         "the student stream is re-rolled across the window. Pure SCHEDULE -- the "
+                         "inner quantizer, the grid and the format are untouched, so bpw is "
+                         "unchanged. K >= n_layers gives the paper's Sequential-CBQ baseline (one "
+                         "window, no seam), which isolates the pair objective from the schedule. "
+                         "Paper reports monotone gains as K shrinks (their Table 3); K=4 default "
+                         "there. Costs roughly 2x(1+1/K) extra block-reconstruction passes.")
+    ap.add_argument("--icbq-epochs", type=int, default=0,
+                    help="Passes over the calib per ICBQ pair. 0 = reuse --qat-epochs.")
+    ap.add_argument("--icbq-lr", type=float, default=0.0,
+                    help="Latent LR for ICBQ pair refinement. 0 = reuse --qat-lr.")
+    ap.add_argument("--icbq-scale-lr", type=float, default=0.0,
+                    help="Scale LR for ICBQ pair refinement. 0 = reuse --qat-scale-lr.")
     ap.add_argument("--act-order", action="store_true",
                     help="GPTQ act-order: quantise high-Hessian-diagonal columns first, un-permuted at the "
                          "end (each column keeps its natural contiguous-block scale → grid-compliant, no "
@@ -1435,6 +1461,279 @@ def main():
     if _ml_qat:
         run_multilayer_qat()
     print("\n🚀 Step 2: per-linear ternary recovery (rotation-only model in, recovered out)")
+    # ────────────────── ICBQ: interleaved cross-block seam refinement ──────────────────
+    # arXiv:2608.09595 ("From Sweep to Seam"). A sequential block-wise sweep optimises each block
+    # once, so error introduced early is never revisited and compounds with depth. ICBQ partitions
+    # the depth axis into chunks of K blocks and, at each chunk close, re-optimises the TWO-BLOCK
+    # windows around the boundary. The last pair of chunk c is the first pair of chunk c+1, so every
+    # seam is refined twice and interior pairs once (their Lemma B.10). The inner quantizer is
+    # UNTOUCHED -- this is purely a schedule, which is why it does not rest on grid capacity the way
+    # 13y/13z's SchurOpt did.
+    #
+    # DELIBERATE DEVIATION. Their window (Eq. 8) runs to the pair (b, b+1) whose RIGHT block is not
+    # yet quantized and is carried as a "provisional copy". Our sweep stages each finished layer to
+    # safetensors and reverts its params to meta, so a provisional block would mean quantizing b+1
+    # twice and reconciling two staged copies. We shift the window one block left instead
+    # (wmin = chunk_start - 2, pairs up to (b-1, b)): the defining seam property is kept -- the
+    # boundary pair is optimised at the END of one chunk and again at the START of the next -- with
+    # every block in the window already quantized. Seam count and pairs-per-window (K+1) are
+    # unchanged. K >= NUM_HIDDEN_LAYERS reproduces the paper's "K = L" Sequential-CBQ baseline
+    # (one window, no seam), which is the arm that separates the pair objective from the schedule.
+    _ICBQ_K = max(0, int(getattr(args, "icbq_chunk", 0) or 0))
+    _ICBQ_EP = max(1, int(args.icbq_epochs if args.icbq_epochs > 0 else args.qat_epochs))
+    _ICBQ_LR = args.icbq_lr if args.icbq_lr > 0 else args.qat_lr
+    _ICBQ_SLR = args.icbq_scale_lr if args.icbq_scale_lr > 0 else args.qat_scale_lr
+    if _ICBQ_K and _SPILL:
+        print("⚠️  ICBQ needs the on-disk stream checkpoints; disabled under ACT_SPILL.", flush=True)
+        _ICBQ_K = 0
+    if _ICBQ_K and not args.qat:
+        print("⚠️  ICBQ refines QAT latents; --qat is required. Disabled.", flush=True)
+        _ICBQ_K = 0
+    if _ICBQ_K and PERM_MODE != "none":
+        # _icbq_load_fp reloads raw shard weights to rebuild the pair's teacher; under a channel
+        # permutation those no longer line up with the deployed (permuted) module, so the target
+        # would be wrong. Refuse rather than silently mis-target.
+        print(f"⚠️  ICBQ is incompatible with --perm-mode {PERM_MODE} (the FP teacher reload would "
+              "not match the permuted layer). Disabled.", flush=True)
+        _ICBQ_K = 0
+    if _ICBQ_K and start_layer > 0:
+        print("⚠️  ICBQ cannot resume mid-model (the seam schedule needs the whole sweep). "
+              "Disabled.", flush=True)
+        _ICBQ_K = 0
+    _icbq_log = {"K": _ICBQ_K, "epochs": _ICBQ_EP, "lr": _ICBQ_LR,
+                 "windows": [], "pairs": 0, "seam_visits": 0}
+    _icbq_seen = set()                        # pair indices already refined -> counts seam revisits
+    _ICBQ_ANCHOR = staging_dir / "icbq_anchor.pt"   # stream ENTERING the next window's first block
+
+    def _icbq_dev(li, pname):
+        """Honour the sweep's 2-GPU split. The sweep does layer.mlp.to("cuda:1") and registers
+        align-hooks on layer.mlp that move activations to cuda:1 and outputs back -- and it never
+        removes them, so the deployed MLP linears live on cuda:1 for the life of the process.
+        Reloading those params onto cuda:0 would leave the weights and the hook-moved activations
+        on different devices."""
+        if torch.cuda.device_count() >= 2 and "mlp" in pname \
+           and hasattr(model.model.layers[li], "mlp"):
+            return "cuda:1"
+        return device
+
+    def _icbq_load_staged(li):
+        """Re-materialise the QUANTIZED layer li from its staged safetensors (params sit on meta
+        after the sweep). The module structure is already the deployed one -- the sweep swapped each
+        target Linear for a plain ternary nn.Linear -- so names and shapes line up."""
+        lyr = model.model.layers[li]
+        with safe_open(str(staging_dir / f"layer_{li}.safetensors"),
+                       framework="pt", device="cpu") as f:
+            keys = set(f.keys())
+            for pname, _ in list(lyr.named_parameters()):
+                full = f"model.layers.{li}.{pname}"
+                if full in keys:
+                    assign_tensor_to_module(lyr, pname, f.get_tensor(full), _icbq_dev(li, pname))
+        return lyr
+
+    def _icbq_load_fp(li):
+        """Load the ORIGINAL fp weights of layer li over the same (deployed) module structure so the
+        pair's teacher target can be recomputed. A param absent from the shards is a deploy-time
+        addition (e.g. a tequila-folded bias) and is zeroed for the teacher pass."""
+        lyr = model.model.layers[li]
+        for pname, param in list(lyr.named_parameters()):
+            full = f"model.layers.{li}.{pname}"
+            dv = _icbq_dev(li, pname)
+            if full in weight_map:
+                assign_tensor_to_module(lyr, pname,
+                                        load_tensor_from_shards(model_path, weight_map, full), dv)
+            else:
+                assign_tensor_to_module(lyr, pname,
+                                        torch.zeros(param.shape, dtype=torch.bfloat16), dv)
+        return lyr
+
+    def _icbq_free(li):
+        lyr = model.model.layers[li]
+        for pname, param in list(lyr.named_parameters()):
+            if param.device.type != "meta":
+                revert_module_param_to_meta(lyr, pname, param.shape)
+
+    def _icbq_stage(li):
+        """Write layer li back to staging and revert it to meta (mirrors the sweep's epilogue)."""
+        lyr = model.model.layers[li]
+        sd = {}
+        for pname, param in list(lyr.named_parameters()):
+            sd[f"model.layers.{li}.{pname}"] = param.data.cpu().contiguous()
+            revert_module_param_to_meta(lyr, pname, param.shape)
+        lf = staging_dir / f"layer_{li}.safetensors"
+        tmp = staging_dir / f"layer_{li}.safetensors.tmp"
+        save_safetensors(sd, str(tmp))
+        os.replace(str(tmp), str(lf))
+        for k in sd:
+            staged_index[k] = lf
+        del sd
+        gc.collect()
+
+    def _icbq_kwargs(idx):
+        a = [x.to(device) if isinstance(x, torch.Tensor) else x for x in layer_kwargs[idx]["args"]]
+        kw = {}
+        for k, v in layer_kwargs[idx]["kwargs"].items():
+            kw[k] = (v.to(device) if isinstance(v, torch.Tensor)
+                     else tuple(t.to(device) for t in v) if isinstance(v, tuple) else v)
+        kw["use_cache"] = False
+        return a, kw
+
+    def _icbq_one(lyr, h, a, kw):
+        o = lyr(h, *a, **filter_kwargs(lyr, kw))
+        return o[0] if isinstance(o, tuple) else o
+
+    def _icbq_pair_forward(la, lb, h, idx):
+        """h -> block a -> block b, reusing the layer-0-captured kwargs (rotary/position state is
+        shared across blocks here, and filter_kwargs adapts per block type -- exactly what
+        run_layer_forward already relies on for every layer)."""
+        a, kw = _icbq_kwargs(idx)
+        return _icbq_one(lb, _icbq_one(la, h, a, kw), a, kw)
+
+    def _icbq_refine_pair(i, stream):
+        """One CBQ subproblem on the pair (i, i+1) against the FP teacher target computed from the
+        CURRENT student stream -- the same local-target convention the single-block sweep uses
+        (fp_outs = FP_block(student_input)), so this is a strict two-block extension of the
+        objective the sweep already minimises."""
+        # (1) teacher target: FP blocks i, i+1 on the current student stream
+        la, lb = _icbq_load_fp(i), _icbq_load_fp(i + 1)
+        tgt = new_stream()
+        with torch.no_grad():
+            for idx, h in enumerate(tqdm(stream, desc=f"   ICBQ ({i},{i+1}) FP target", leave=False)):
+                tgt.append(_icbq_pair_forward(la, lb, h.to(device), idx).cpu())
+        _icbq_free(i); _icbq_free(i + 1)
+        torch.cuda.empty_cache()
+
+        # (2) student: reload both quantized blocks and wrap every target Linear in an STE latent
+        #     initialised AT its current ternary solution (init_deq=W), so step 0 reproduces the
+        #     incoming model exactly and the refinement can only move off it on the pair objective.
+        la, lb = _icbq_load_staged(i), _icbq_load_staged(i + 1)
+        two_gpu = torch.cuda.device_count() >= 2
+        qmods, latent_params, scale_params = {}, [], []
+        for li, lyr in ((i, la), (i + 1, lb)):
+            for p in lyr.parameters():
+                p.requires_grad_(False)                          # norms/gates stay FP and frozen
+            tg = {n: m for n, m in lyr.named_modules()
+                  if isinstance(m, nn.Linear) and should_quantize(f"model.layers.{li}.{n}.weight")}
+            for name, module in tg.items():
+                dev_t = "cuda:1" if (two_gpu and "mlp" in name) else device
+                w = module.weight.data.to(dev_t, torch.float32)
+                b = module.bias.data.to(dev_t) if module.bias is not None else None
+                qm = _QATLinear(w, b, args.block_size, init_deq=w)
+                if args.qat_attn_only and "mlp" in name:         # same routing as the sweep
+                    for p in qm.parameters():
+                        p.requires_grad_(False)
+                else:
+                    latent_params.append(qm.latent); scale_params.append(qm.scale)
+                _icbq_set_sub(lyr, name, qm)
+                qmods[(li, name)] = qm
+
+        # (3) two-block reconstruction. Measure the ENTRY error first: the latents start exactly
+        # AT the incoming ternary solution, so this is the pair error of the model as the sweep left
+        # it. Without it "is this pair-MSE good?" is unanswerable -- the 13z lesson, where a first
+        # layer that was already 3 orders off read as a warm-up transient for two fix attempts.
+        with torch.no_grad():
+            _entry = sum(F.mse_loss(_icbq_pair_forward(la, lb, stream[j].to(device), j).float(),
+                                    tgt[j].to(device).float()).item()
+                         for j in range(len(stream))) / max(1, len(stream))
+        print(f"   ICBQ ({i},{i+1}) entry pair-MSE {_entry:.3e}", flush=True)
+        _icbq_log.setdefault("pair_mse", {})[f"{i},{i+1}"] = {"entry": _entry}
+        if latent_params:
+            opt = torch.optim.AdamW([{"params": latent_params, "lr": _ICBQ_LR},
+                                     {"params": scale_params, "lr": _ICBQ_SLR}])
+            allp = latent_params + scale_params
+            ntok = len(stream); nsteps = max(1, _ICBQ_EP * ntok); step = 0
+            for ep in range(_ICBQ_EP):
+                run_mse = 0.0
+                for idx in torch.randperm(ntok).tolist():
+                    o = _icbq_pair_forward(la, lb, stream[idx].to(device), idx)
+                    loss = F.mse_loss(o.float(), tgt[idx].to(o.device).float())
+                    run_mse += loss.item()
+                    opt.zero_grad(set_to_none=True); loss.backward()
+                    torch.nn.utils.clip_grad_norm_(allp, 1.0)
+                    mult = 0.05 + 0.95 * 0.5 * (1 + math.cos(math.pi * step / nsteps))
+                    opt.param_groups[0]["lr"] = _ICBQ_LR * mult
+                    opt.param_groups[1]["lr"] = _ICBQ_SLR * mult
+                    opt.step(); step += 1
+                    del o, loss
+                print(f"   ICBQ ({i},{i+1}) epoch {ep+1}/{_ICBQ_EP}  pair-MSE {run_mse/ntok:.3e}"
+                      f"  ({100.0*(run_mse/ntok - _entry)/max(_entry,1e-30):+.1f}% vs entry)",
+                      flush=True)
+                _icbq_log["pair_mse"][f"{i},{i+1}"][f"ep{ep+1}"] = run_mse / ntok
+            del opt, allp
+        del tgt
+
+        # (4) fold latents back to ternary and restage both blocks
+        for (li, name), qm in qmods.items():
+            deq, spars = qm.deploy()
+            lin = nn.Linear(qm.inp, qm.out, bias=qm.bias_t is not None).to(deq.device)
+            lin.weight.data = deq.to(torch.bfloat16)
+            if qm.bias_t is not None:
+                lin.bias.data = qm.bias_t.to(deq.device, torch.bfloat16)
+            _icbq_set_sub(model.model.layers[li], name, lin)
+            stats["layers"].setdefault(str(li), {}).setdefault(name, {})["sparsity"] = spars
+        del qmods, latent_params, scale_params
+        _icbq_stage(i); _icbq_stage(i + 1)
+        torch.cuda.empty_cache(); gc.collect()
+
+    def _icbq_advance(li, stream):
+        """Push the student stream one block forward through the (refined) quantized block li."""
+        lyr = _icbq_load_staged(li)
+        out = new_stream()
+        with torch.no_grad():
+            for idx, h in enumerate(tqdm(stream, desc=f"   ICBQ advance L{li}", leave=False)):
+                a, kw = _icbq_kwargs(idx)
+                out.append(_icbq_one(lyr, h.to(device), a, kw).cpu())
+        _icbq_free(li)
+        torch.cuda.empty_cache()
+        return out
+
+    def _icbq_close_chunk(b, chunk_start, cur_inputs):
+        """Chunk closed after block b. Refine every pair in the window and RE-ROLL the student
+        stream across it, so the next chunk starts from a coherent state (their §3.3). Returns the
+        stream entering block b+1."""
+        wmin = max(0, chunk_start - 2)
+        if b - wmin < 1:
+            return cur_inputs                                    # window holds no complete pair
+        # The window starts K+2 blocks behind the close, so the sweep's rolling checkpoint (which
+        # keeps only the newest) is long gone by then -- and simply retaining more does not scale:
+        # the K=L arm would need L+2 of them. ICBQ therefore carries its OWN anchor, written during
+        # the previous re-roll, which already computes the stream entering every block in the window.
+        if not _ICBQ_ANCHOR.exists():
+            print(f"⚠️  ICBQ: anchor {_ICBQ_ANCHOR.name} missing; skipping window [{wmin},{b}]",
+                  flush=True)
+            return cur_inputs
+        pairs = list(range(wmin, b))                             # (i, i+1) for i = wmin .. b-1
+        seam = [i for i in pairs if i in _icbq_seen]
+        print(f"\n🪡 ICBQ chunk close at L{b}: window [{wmin},{b}], {len(pairs)} pair(s), "
+              f"{len(seam)} seam revisit(s) {seam}", flush=True)
+        stream = torch.load(str(_ICBQ_ANCHOR))
+        nxt_wmin = max(0, (b + 1) - 2)          # where the NEXT window starts -> anchor to save
+        for i in pairs:
+            _icbq_refine_pair(i, stream)
+            if i in _icbq_seen:
+                _icbq_log["seam_visits"] += 1
+            _icbq_seen.add(i)
+            _icbq_log["pairs"] += 1
+            stream = _icbq_advance(i, stream)                    # advance past the LEFT block only
+            if i + 1 == nxt_wmin:                                # stream now ENTERS the next wmin
+                tmpk = staging_dir / "icbq_anchor.pt.tmp"
+                torch.save(stream, str(tmpk)); os.replace(str(tmpk), str(_ICBQ_ANCHOR))
+            gc.collect()
+        stream = _icbq_advance(b, stream)                        # past the window's last block
+        _icbq_log["windows"].append({"chunk_start": chunk_start, "b": b, "wmin": wmin,
+                                     "pairs": pairs, "seam": seam})
+        af = staging_dir / f"inputs_after_{b}.pt"
+        tmpa = staging_dir / f"inputs_after_{b}.pt.tmp"
+        torch.save(stream, str(tmpa)); os.replace(str(tmpa), str(af))
+        return stream
+
+    if _ICBQ_K:
+        # The window can reach back to chunk_start-2, so the stream entering block 0 must survive
+        # the whole sweep; the checkpoint retention below keeps the rest.
+        torch.save(layer_inputs, str(_ICBQ_ANCHOR))     # window 0 starts at block 0
+        _icbq_chunk_start = 0
+        print(f"🪡 ICBQ ON: chunk K={_ICBQ_K}, {_ICBQ_EP} epoch(s)/pair, lr={_ICBQ_LR:g} "
+              f"(seams: {max(0, -(-NUM_HIDDEN_LAYERS // _ICBQ_K) - 1)})", flush=True)
+
     for l in range(start_layer, NUM_HIDDEN_LAYERS):
         if _ml_qat:
             break
@@ -1787,6 +2086,10 @@ def main():
             if pcf.exists():
                 pcf.unlink()
 
+        if _ICBQ_K and (l + 1 - _icbq_chunk_start >= _ICBQ_K or l == NUM_HIDDEN_LAYERS - 1):
+            layer_inputs = _icbq_close_chunk(l, _icbq_chunk_start, layer_inputs)
+            _icbq_chunk_start = l + 1
+
     # ── Bonsai-parity: ternarize embed_tokens (MSE-RTN) + lm_head (GPTQ-Hessian) ─────
     # lm_head directly makes logits incl. EOS — MSE-RTN there miscalibrated the stop token and broke free-gen
     # (chat mode emitted EOS after ~4 tokens). GPTQ minimises the OUTPUT (logit) error using the final-hidden
@@ -1870,6 +2173,10 @@ def main():
 
     for p in staging_dir.glob("layer_*.safetensors"):
         p.unlink()
+    if _ICBQ_K:
+        stats["icbq"] = _icbq_log
+        if _ICBQ_ANCHOR.exists():
+            _ICBQ_ANCHOR.unlink()
     for p in staging_dir.glob("inputs_after_*.pt"):
         p.unlink()
     shutil.rmtree(staging_dir / "act_spill", ignore_errors=True)   # NVMe activation spill (belt-and-suspenders)
