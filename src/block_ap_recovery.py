@@ -971,6 +971,16 @@ def main():
                          "so bpw is unchanged. Converges by ~2 iters; 4 is ample. Gain scales with "
                          "Hessian anisotropy (measured on synthetic groups: 0.1%% isotropic, 16.9%% at "
                          "a realistic power-law condition ~4e3).")
+    ap.add_argument("--nap-epochs", type=int, default=0,
+                    help="NAP (arXiv:2608.03919) normalization-affine preconditioning: passes over "
+                         "the calib per layer. 0 = off. Freezes the backbone at its ternary dequant "
+                         "and tunes ONLY the norm gains so the FP model handed to block-AP is easier "
+                         "to quantize. Format-free (norm weights ship fp; bpw unchanged). Writes a "
+                         "PRECONDITIONED FP model and skips recovery -- run block-AP on the output. "
+                         "Expect a small effect: --col-scale already works this axis (S7: paired "
+                         "dKL -0.00038, trained gains inside [0.994, 1.006]).")
+    ap.add_argument("--nap-lr", type=float, default=1e-3,
+                    help="LR for the NAP norm gains (they are ~2*hidden params per layer).")
     ap.add_argument("--icbq-chunk", type=int, default=0,
                     help="ICBQ (arXiv:2608.09595) interleaved cross-block seam refinement: chunk "
                          "size K. 0 = off (validated sequential sweep). After every K quantized "
@@ -1461,6 +1471,132 @@ def main():
     if _ml_qat:
         run_multilayer_qat()
     print("\n🚀 Step 2: per-linear ternary recovery (rotation-only model in, recovered out)")
+    # ───────────────────── NAP: normalization-affine preconditioning ─────────────────────
+    # arXiv:2608.03919. Normalization affine parameters are a low-dimensional, high-leverage
+    # subspace: one scalar per channel is broadcast over every token, so a tiny parameter set can
+    # cancel the STRUCTURED channel-wise multiplicative component of quantization distortion
+    # (their Eq. 13-16, gamma* = gamma0/alpha_c). NAP-for-PTQ freezes the backbone and tunes ONLY
+    # those affines under the TARGET fake-quantization graph, on the full-precision model, BEFORE
+    # reconstruction -- so the model handed to block-AP is already easier to quantize.
+    #
+    # Format cost is zero: norm weights are never quantized (they ship fp in GGUF), so bpw and the
+    # TQ1_64 layout are untouched. ~2*hidden per layer = 0.33 MB at 27B.
+    #
+    # THREE THINGS TO KNOW ABOUT THIS ADAPTATION, all of which weaken the paper's premise here:
+    #  1. RMSNorm has no shift, so only the multiplicative component is correctable -- the paper
+    #     says so explicitly ("cannot compensate a general additive offset").
+    #  2. Our Phase-1 QuaRot FOLDS the RMSNorm affine into the following linear (stored w == 0, and
+    #     Qwen3_5RMSNorm is zero-centered so that means gain exactly 1). Re-introducing a trainable
+    #     diagonal is legal and format-free, but it lives in the ROTATED basis, where the paper's
+    #     per-channel alpha_c no longer has its original-basis meaning. Rotation exists precisely to
+    #     remove channel heterogeneity, which is the structure NAP feeds on.
+    #  3. We already measured this axis. `--col-scale` folds a trained per-input-channel scale into
+    #     the same norm gain (S7): real but TINY -- paired dKL -0.00038 +/- 0.00007, trained scales
+    #     inside [0.994, 1.006]. So expect a small effect, and treat a large one as suspect.
+    # What is genuinely untested is NAP's ordering claim: precondition BEFORE reconstruction rather
+    # than correct after it. That is what this implements.
+    _NAP_EP = max(0, int(getattr(args, "nap_epochs", 0) or 0))
+
+    def _nap_norm_params(lyr):
+        """Every normalization gain in the block. Includes linear_attn.norm and q/k norms, which
+        QuaRot does NOT fold (only the pre-linear block norms are folded), so some of these start
+        at their pretrained values rather than at 0."""
+        return {n: p for n, p in lyr.named_parameters()
+                if n.endswith("norm.weight") or "layernorm" in n}
+
+    def _nap_precondition(stream):
+        """Layer-sequential preconditioning on the FP stream. Per layer: take the FP block's output
+        as the target, freeze the backbone and swap every quantization target for its ON-GRID
+        ternary dequant (the exact grid block-AP will deploy), then train only the norm gains to
+        pull the fake-quantized block back onto the FP block. The FP weights are restored
+        afterwards -- only the norms are kept -- and the stream advances through the UPDATED FP
+        block, since the preconditioned model is what the next layer must see."""
+        moved = {}
+        for l in range(NUM_HIDDEN_LAYERS):
+            lyr = model.model.layers[l]
+            for pname, _ in list(lyr.named_parameters()):
+                assign_tensor_to_module(lyr, pname, load_tensor_from_shards(
+                    model_path, weight_map, f"model.layers.{l}.{pname}"), device)
+            for p in lyr.parameters():
+                p.requires_grad_(False)
+
+            # (1) FP target, with the layer's ORIGINAL norms
+            fp_outs = run_layer_forward(lyr, f"   NAP L{l} FP target", collect_outputs=True,
+                                        inputs=stream)
+
+            # (2) freeze the backbone at its ternary dequant; unfreeze only the norm gains
+            tgts = {n: m for n, m in lyr.named_modules()
+                    if isinstance(m, nn.Linear) and should_quantize(f"model.layers.{l}.{n}.weight")}
+            fp_w = {}
+            for n, m in tgts.items():
+                fp_w[n] = m.weight.data.detach().clone()
+                m.weight.data.copy_(_mse_rtn_ternary(m.weight.data.float(), args.block_size).to(m.weight.dtype))
+            nps = _nap_norm_params(lyr)
+            if not nps:
+                print(f"   NAP L{l}: no normalization params — skipped", flush=True)
+                stream = run_layer_forward(lyr, f"   NAP L{l} propagate", collect_outputs=True,
+                                           inputs=stream)
+                continue
+            for p in nps.values():
+                p.requires_grad_(True)
+            opt = torch.optim.AdamW(list(nps.values()), lr=args.nap_lr)
+            ntok = len(stream); nsteps = max(1, _NAP_EP * ntok); step = 0
+            base = {n: p.detach().float().clone() for n, p in nps.items()}
+            for ep in range(_NAP_EP):
+                run = 0.0
+                for idx in torch.randperm(ntok).tolist():
+                    a = [x.to(device) if isinstance(x, torch.Tensor) else x
+                         for x in layer_kwargs[idx]["args"]]
+                    kw = {}
+                    for k, v in layer_kwargs[idx]["kwargs"].items():
+                        kw[k] = (v.to(device) if isinstance(v, torch.Tensor)
+                                 else tuple(t.to(device) for t in v) if isinstance(v, tuple) else v)
+                    kw["use_cache"] = False
+                    o = lyr(stream[idx].to(device), *a, **filter_kwargs(lyr, kw))
+                    o = o[0] if isinstance(o, tuple) else o
+                    loss = F.mse_loss(o.float(), fp_outs[idx].to(device).float())
+                    run += loss.item()
+                    opt.zero_grad(set_to_none=True); loss.backward()
+                    torch.nn.utils.clip_grad_norm_(list(nps.values()), 1.0)
+                    opt.param_groups[0]["lr"] = args.nap_lr * (
+                        0.05 + 0.95 * 0.5 * (1 + math.cos(math.pi * step / nsteps)))
+                    opt.step(); step += 1
+                    del o, loss
+                print(f"   NAP L{l} epoch {ep+1}/{_NAP_EP}  fakequant block-MSE {run/ntok:.3e}",
+                      flush=True)
+
+            # (3) report the actual gain movement -- S7 measured this axis at [0.994, 1.006], so a
+            #     large excursion here means something is wrong, not that NAP found a big win.
+            gmin, gmax = 1e9, -1e9
+            for n, p in nps.items():
+                g = ((1.0 + p.detach().float()) / (1.0 + base[n])).clamp_min(1e-9)
+                gmin = min(gmin, g.min().item()); gmax = max(gmax, g.max().item())
+                disk = f"model.layers.{l}.{n}".replace("model.layers", "model.language_model.layers")
+                moved[disk] = p.detach().to(torch.bfloat16).cpu().clone()
+            print(f"   NAP L{l} effective gain ratio range [{gmin:.4f}, {gmax:.4f}] "
+                  f"over {len(nps)} norm tensor(s)", flush=True)
+
+            # (4) restore FP weights (only the norms are preconditioned) and advance the FP stream
+            for n, m in tgts.items():
+                m.weight.data.copy_(fp_w[n].to(m.weight.dtype))
+            del fp_w, fp_outs, opt, nps, base
+            for p in lyr.parameters():
+                p.requires_grad_(False)
+            stream = run_layer_forward(lyr, f"   NAP L{l} propagate", collect_outputs=True,
+                                       inputs=stream)
+            for pname, param in list(lyr.named_parameters()):
+                revert_module_param_to_meta(lyr, pname, param.shape)
+            torch.cuda.empty_cache(); gc.collect()
+        return moved
+
+    _nap_moved = {}
+    if _NAP_EP > 0:
+        print(f"\n🎚️  NAP preconditioning ON: {_NAP_EP} epoch(s)/layer, lr={args.nap_lr:g} "
+              f"— backbone frozen at its ternary dequant, norm gains only", flush=True)
+        _nap_moved = _nap_precondition(layer_inputs)
+        print(f"🎚️  NAP done: {len(_nap_moved)} norm tensor(s) preconditioned. Writing the FP model "
+              f"with updated norms and SKIPPING recovery (run block-AP on this output).", flush=True)
+
     # ────────────────── ICBQ: interleaved cross-block seam refinement ──────────────────
     # arXiv:2608.09595 ("From Sweep to Seam"). A sequential block-wise sweep optimises each block
     # once, so error introduced early is never revisited and compounds with depth. ICBQ partitions
@@ -1795,7 +1931,7 @@ def main():
               f"(seams: {max(0, -(-NUM_HIDDEN_LAYERS // _ICBQ_K) - 1)})", flush=True)
 
     for l in range(start_layer, NUM_HIDDEN_LAYERS):
-        if _ml_qat:
+        if _ml_qat or _NAP_EP > 0:      # NAP writes a preconditioned FP model; recovery runs after
             break
         print(f"\n⚡ Recovering layer {l + 1}/{NUM_HIDDEN_LAYERS}...")
         layer = model.model.layers[l]
@@ -2155,7 +2291,8 @@ def main():
     # (chat mode emitted EOS after ~4 tokens). GPTQ minimises the OUTPUT (logit) error using the final-hidden
     # Hessian, preserving EOS calibration far better. embed stays RTN (input lookup, low leverage, gen coherent).
     override_tensors = {}
-    if getattr(args, "quant_embed_head", False):
+    override_tensors.update(_nap_moved)                 # preconditioned norm gains -> saved model
+    if getattr(args, "quant_embed_head", False) and _NAP_EP == 0:
         lmhead_H = None
         try:                                                    # final-hidden Hessian for GPTQ lm_head
             li = layer_inputs if ('layer_inputs' in dir() and layer_inputs) else None
