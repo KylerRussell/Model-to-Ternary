@@ -979,7 +979,7 @@ def main():
                          "PRECONDITIONED FP model and skips recovery -- run block-AP on the output. "
                          "Expect a small effect: --col-scale already works this axis (S7: paired "
                          "dKL -0.00038, trained gains inside [0.994, 1.006]).")
-    ap.add_argument("--nap-trust", type=float, default=1.0,
+    ap.add_argument("--nap-trust", type=float, default=0.0,
                     help="Trust-region weight on the NAP gain update: penalises mean(((1+g)/(1+g0) "
                          "- 1)^2), i.e. RELATIVE movement of each channel gain. The local per-block "
                          "MSE has no anchor holding the gains near 1, so at a full step budget they "
@@ -1527,17 +1527,49 @@ def main():
             for p in lyr.parameters():
                 p.requires_grad_(False)
 
-            # (1) FP target, with the layer's ORIGINAL norms
-            fp_outs = run_layer_forward(lyr, f"   NAP L{l} FP target", collect_outputs=True,
-                                        inputs=stream)
-
-            # (2) freeze the backbone at its ternary dequant; unfreeze only the norm gains
+            # (1) FP target with the layer's ORIGINAL norms, and -- on the SAME pass -- the input
+            #     Gram of every quantization target, so the fake-quant below can be the graph we
+            #     actually ship rather than a cheaper stand-in.
             tgts = {n: m for n, m in lyr.named_modules()
                     if isinstance(m, nn.Linear) and should_quantize(f"model.layers.{l}.{n}.weight")}
+            gg = {n: None for n in tgts}
+            def _mk_nap_g(nm):
+                def h(mod, inp, out):
+                    X = inp[0].detach().reshape(-1, inp[0].shape[-1]).to(torch.float32)
+                    g = gg[nm]
+                    if g is None:
+                        gg[nm] = g = [torch.zeros(X.shape[1], X.shape[1], device=X.device,
+                                                  dtype=torch.float32), 0]
+                    g[0].addmm_(X.t(), X); g[1] += X.shape[0]; del X
+                return h
+            _gh = [m.register_forward_hook(_mk_nap_g(n)) for n, m in tgts.items()]
+            fp_outs = run_layer_forward(lyr, f"   NAP L{l} FP target", collect_outputs=True,
+                                        inputs=stream)
+            for h in _gh:
+                h.remove()
+
+            # (2) freeze the backbone at its ternary solution under the TARGET graph. NAP's premise
+            #     is preconditioning "under the target fake-quantization graph" -- so this must be
+            #     the GPTQ fit block-AP will actually deploy, not a cheaper RTN stand-in. RTN's error
+            #     is ~34x GPTQ+QAT's at L0 (2.4e-3 vs 7e-5), so preconditioning against it corrects
+            #     an error the shipped model does not have, and asks the gains for corrections
+            #     (measured +/-12%) far larger than this axis's real optimum (S7: +/-0.6%).
             fp_w = {}
             for n, m in tgts.items():
                 fp_w[n] = m.weight.data.detach().clone()
-                m.weight.data.copy_(_mse_rtn_ternary(m.weight.data.float(), args.block_size).to(m.weight.dtype))
+                g = gg.get(n)
+                W32 = m.weight.data.float()
+                if g is not None and g[1] > 0:
+                    try:
+                        q = _ternary_fit(W32, g[0], args.block_size, act_order=ACTORDER)
+                    except Exception as e:
+                        print(f"   NAP L{l} {n}: GPTQ fit failed ({type(e).__name__}); RTN", flush=True)
+                        q = _mse_rtn_ternary(W32, args.block_size)
+                else:
+                    q = _mse_rtn_ternary(W32, args.block_size)
+                m.weight.data.copy_(q.to(m.weight.dtype))
+                del q, W32
+            del gg
             nps = _nap_norm_params(lyr)
             if not nps:
                 print(f"   NAP L{l}: no normalization params — skipped", flush=True)
