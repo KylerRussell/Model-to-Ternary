@@ -2643,3 +2643,67 @@ arriving by a completely different route, and it is now two for two.
 
 With a live teacher the honest per-pair gain is **-5% to -9%**, not the fake run's -96% to -99.6%.
 That contrast is the cleanest evidence the fix took.
+
+---
+
+## 13ab. NAP preconditioning — NEGATIVE (-2.20 pp), and the reason generalises: preconditioning is
+## incompatible with a TEACHER-MATCHING pipeline (2026-09-05)
+
+NAP (arXiv:2608.03919) identifies normalization affine parameters as a low-dimensional high-leverage
+subspace and, for PTQ, freezes the backbone and tunes ONLY those affines under the target
+fake-quantization graph on the FP model, "proactively boosting quantization friendliness before
+downstream reconstruction". Implemented as `--nap-epochs` (writes a preconditioned FP model, skips
+recovery); format-free, since norm weights ship fp in GGUF.
+
+### Result (identical block-AP recipe on the preconditioned model)
+
+| arm | agreement | mean KL | KL(conf>0.5) | %flips |
+|---|---|---|---|---|
+| control | 56.11% | 1.1988 | 1.0197 | 43.89% |
+| ICBQ K=4 | 56.55% | 1.1767 | 0.9959 | 43.45% |
+| **NAP precondition** | **53.91%** | **1.2763** | **1.1089** | **46.09%** |
+
+-2.20 pp and +0.078 KL — 5x ICBQ's effect, so comfortably outside any plausible noise floor.
+
+It also made the model measurably HARDER to quantize, growing with depth (each arm's block-MSE
+against its OWN FP model, so this is a fair read of quantization friendliness — the exact quantity
+NAP claims to improve): L12 +3.2%, L20 +25.4%, L28 +32.5%, L31 +24.3%.
+
+### Why — and this is the part that generalises
+
+**Our pipeline matches a TEACHER; NAP's evaluates a TASK.** Block-AP's target, assignment training,
+E2E distillation and the eval2k referee all measure agreement with the ORIGINAL FP model. NAP's whole
+mechanism is to MOVE the FP model. In a task-accuracy setting that is free — you may move the FP model
+anywhere that scores better. Here the FP model *is* the objective, so every bit of movement is a debt
+the quantization gain has to repay. It did not.
+
+**The composition is strictly lossy.** NAP tunes the norms so that `Q(W; g_new) ~= FP(g_old)`. Block-AP
+then reconstructs the preconditioned model against `FP(g_new)` — it re-anchors to the shifted model.
+So NAP's compensation is DISCARDED by the next stage while its drift is KEPT: worst of both.
+
+**The ordering question is now answered, and the answer is the opposite of the paper's.** `--col-scale`
+(S7) applies the SAME correction — a per-input-channel gain folded into the same RMSNorm — but AFTER
+reconstruction, and it is a small positive (paired dKL -0.00038, kept in the 27B recipe). NAP applies
+it BEFORE and costs -2.20 pp. For a teacher-matching pipeline, correct after; do not precondition.
+
+### Diagnostics worth keeping
+
+* **The movement concentrates 10-20x on exactly the norms QuaRot zeroed.** Mean |d(1+w)|:
+  `post_attention_layernorm` 0.0357 and `input_layernorm` 0.0280 (both folded by QuaRot, so they
+  start at gain exactly 1.0) versus `k_norm` 0.0038, `q_norm` 0.0033, `linear_attn.norm` 0.0015
+  (all keep pretrained values). Uniform Adam drift would move every type by the same ABSOLUTE amount,
+  so this is gradient-driven — a real interaction between our Phase 1 and this method.
+* **Magnitude disagreed with prior evidence by 5x and that was the true warning.** NAP's own optimum
+  wants median 3% gain changes; col-scale measured ~0.6% on the same axis. I first blamed the
+  fake-quant graph (RTN instead of the GPTQ graph we ship — a real bug, fixed: L0 fakequant block-MSE
+  2.393e-03 -> 8.567e-05) but correcting it did NOT shrink the band, which is what redirected the
+  diagnosis to the objective rather than the quantizer.
+* **A mean-based trust region does not bound a min/max-reported band.** `--nap-trust` penalises mean
+  squared relative movement; the reported extremes are tails. It restrained the bulk and looked like
+  it worked on 3 sampled layers, while 25 of 32 were outside +/-2%. Kept, defaulted OFF.
+
+### Process note
+
+I twice concluded from a prefix of the sweep — 3 layers of a 32-layer band, and L0/L1 of the SchurOpt
+smoke in 13z. Both times the full sweep contradicted it. Read the whole pass before concluding; these
+probes cost 40 minutes, not 4 hours, so there is no excuse for sampling.
