@@ -809,6 +809,50 @@ def _gptq_ternary(W_fp, H, block_size, percdamp=0.01, act_order=False, refit_ite
     return Q
 
 
+@torch.no_grad()
+def _quasar_refit(latent, h, block_size, grid, base_scale=None):
+    """QUASAR (arXiv:2608.13966) loss-aware reconstruction, symmetric-ternary case.
+
+    Saliency h is the diagonal-Fisher proxy Adam already maintains as its second moment v_t, so this
+    is free of extra state. For each candidate clipping factor f in `grid` the codes are fixed by
+    q = round(clip(w / (f*amax))), and the dequantizer is then the saliency-weighted least-squares
+    optimum -- Eq. 4 with the zero-point dropped, which is the symmetric solution the paper notes:
+
+        s* = sum_i h_i q_i w_i / sum_i h_i q_i^2
+
+    The candidate minimising sum_i h_i (s* q_i - w_i)^2 wins. One positive scale per (row, block), so
+    the grid stays {-s, 0, +s} and TQ1_64 / bpw are untouched.
+
+    NOTE this is the same closed form 13y grafted onto GPTQ and destroyed the model with. The
+    difference that matters: GPTQ propagates each column's rounding residual forward, so its scale is
+    not a free local choice; a QAT loop has no such error feedback, which is where QUASAR puts it."""
+    flat, _ = _blocks(latent, block_size)
+    fh, _ = _blocks(h, block_size)
+    # The paper's candidates are f*amax with f in (0,1], because at 2-4 bits the optimal clip sits
+    # near the max. AT TERNARY IT DOES NOT: with three levels the MSE-optimal scale is ~0.5*amax
+    # (TWN's 0.7*mean|w|), i.e. BELOW their whole grid, so f*amax never reaches the useful region --
+    # measured, it lost to the plain MSE scale on QUASAR's OWN weighted objective. Candidates are
+    # therefore centred on the INCUMBENT scale. f=1.0 is the incumbent, so the search can never
+    # return something worse than the scale it replaces.
+    base = (base_scale.unsqueeze(1) if base_scale is not None
+            else _block_scale(flat).unsqueeze(1)).clamp_min(1e-8)
+    best_s = None; best_e = None
+    for f in grid:
+        sc = (float(f) * base).clamp_min(1e-8)
+        q = _tern_round((flat / sc).clamp(-1, 1))
+        num = (fh * q * flat).sum(dim=1)
+        den = (fh * q * q).sum(dim=1).clamp_min(1e-12)
+        st = (num / den).clamp_min(1e-8)                       # weighted-LS optimum for these codes
+        err = (fh * (st.unsqueeze(1) * q - flat) ** 2).sum(dim=1)
+        if best_s is None:
+            best_s, best_e = st, err
+        else:
+            take = err < best_e
+            best_s = torch.where(take, st, best_s)
+            best_e = torch.where(take, err, best_e)
+    return best_s
+
+
 def _cdquant_refine(Q, W_fp, H, block_size, sweeps=4):
     """CDQuant (greedy/Jacobi coordinate descent): refine the ternary ASSIGNMENTS to further reduce the
     SAME on-grid output error (Q−W_fp)H(Q−W_fp)ᵀ that GPTQ targets — a stronger local search than GPTQ's
@@ -1025,6 +1069,18 @@ def main():
                          "so bpw is unchanged. Converges by ~2 iters; 4 is ample. Gain scales with "
                          "Hessian anisotropy (measured on synthetic groups: 0.1%% isotropic, 16.9%% at "
                          "a realistic power-law condition ~4e3).")
+    ap.add_argument("--qat-quasar", type=int, default=0,
+                    help="QUASAR (arXiv:2608.13966) loss-aware reconstruction inside block QAT: every "
+                         "N steps, refit each block's scale by saliency-weighted least squares over a "
+                         "small clipping-range search, using Adam's second moment as the diagonal-"
+                         "Fisher saliency (no extra state). 0 = off. Format-safe: still one positive "
+                         "scale per (row, block). REPLACES the learned scale with a fitted one, which "
+                         "is the method's intent (fit, do not learn).")
+    ap.add_argument("--quasar-grid", default="0.7,0.8,0.9,1.0,1.1,1.2,1.3",
+                    help="QUASAR clipping-range candidates, as multipliers of the INCUMBENT block "
+                         "scale (not of amax as in the paper -- at ternary the optimum is ~0.5*amax, "
+                         "below their whole f in (0,1] grid). f=1.0 keeps the incumbent, so the "
+                         "search cannot return a worse scale than it replaces.")
     ap.add_argument("--qat-catq", action="store_true",
                     help="CAT-Q soft ternarization (ScaleQ-1.58, arXiv:2608.01078) instead of the STE "
                          "round during block QAT: a differentiable tanh pair annealed from ~identity "
@@ -2193,6 +2249,12 @@ def main():
                     latent_params.append(q.latent); scale_params.append(q.scale)
             adaround_mods = [q for q in trainable.values() if isinstance(q, _AdaRoundLinear)]
             catq_mods = [q for q in trainable.values() if isinstance(q, _CATQLinear)]
+            quasar_every = max(0, int(getattr(args, "qat_quasar", 0) or 0))
+            _quasar_grid = [float(x) for x in str(args.quasar_grid).split(",") if x.strip()]
+            _quasar_hits = 0
+            if quasar_every:
+                print(f"   L{l} QUASAR scale refit every {quasar_every} steps over "
+                      f"{len(_quasar_grid)} clipping candidates", flush=True)
             if catq_mods:
                 print(f"   L{l} CAT-Q soft ternarization on {len(catq_mods)} linears "
                       f"(s={args.catq_sharpness:g}, t annealed 0->1)", flush=True)
@@ -2223,6 +2285,18 @@ def main():
                     else:
                         loss = F.mse_loss(o_f, tgt)
                     mse_item = loss.item()
+                    if quasar_every and step > 0 and step % quasar_every == 0:
+                        for _qm in trainable.values():          # scale is FIT, not learned
+                            if not hasattr(_qm, "scale"):
+                                continue
+                            _st = opt.state.get(_qm.latent, {})
+                            _h = _st.get("exp_avg_sq")
+                            if _h is None:
+                                continue
+                            _qm.scale.data.copy_(_quasar_refit(
+                                _qm.latent.data, _h, args.block_size, _quasar_grid,
+                                base_scale=_qm.scale.data))
+                            _quasar_hits += 1
                     if catq_mods:                                # CAT-Q: anneal t 0 -> 1
                         for q in catq_mods:
                             q.t = (step + 1) / nsteps
@@ -2239,7 +2313,8 @@ def main():
                     opt.param_groups[0]["lr"] = args.qat_lr * mult
                     opt.param_groups[1]["lr"] = args.qat_scale_lr * mult
                     opt.step(); step += 1; run_mse += mse_item; del out, o, loss
-                print(f"   L{l} QAT epoch {ep+1}/{args.qat_epochs}  mean block-MSE {run_mse/ntok:.3e}", flush=True)
+                print(f"   L{l} QAT epoch {ep+1}/{args.qat_epochs}  mean block-MSE {run_mse/ntok:.3e}"
+                      + (f"  [quasar refits {_quasar_hits}]" if quasar_every else ""), flush=True)
             for name, qm in qmods.items():                       # fold latent -> deployed ternary nn.Linear
                 deq, spars = qm.deploy()
                 if args.qat_keep_best and name in gptq_gram:      # ≥GPTQ floor: revert if the polish lost ground
