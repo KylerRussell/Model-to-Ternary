@@ -435,9 +435,10 @@ class _CATQLinear(nn.Module):
     round(W/alpha).clamp(-1,1), whose zero-region boundary sits at exactly 0.5, and as t -> inf the
     tanh pair converges to that same assignment. So t=1 deploy() is bit-comparable to the STE path
     and the only new freedom is the annealed path taken to get there, plus mu."""
-    def __init__(self, weight, bias, block_size, init_deq=None, sharpness=20.0):
+    def __init__(self, weight, bias, block_size, init_deq=None, sharpness=20.0, mu_cap=0.25):
         super().__init__()
         self.bs = block_size
+        self.mu_cap = float(mu_cap)
         self.out, self.inp = weight.shape
         self.s = float(sharpness)
         self.t = 1e-3                                   # set per-step by the QAT loop
@@ -456,7 +457,12 @@ class _CATQLinear(nn.Module):
     def _what(self):
         flat, shp = _blocks(self.latent, self.bs)
         a = self.alpha.clamp_min(1e-8).unsqueeze(1)
-        return (flat - self.mu.unsqueeze(1)) / a, a, shp
+        # mu is CLAMPED to a fraction of the scale. Unconstrained it runs away: measured mean
+        # sparsity 0.4568 -> 0.4142 with some blocks at EXACTLY 0.0, i.e. the shifted W_hat never
+        # lands inside +/-delta so the block loses its zero level and degenerates to {-a, +a} --
+        # still format-legal, but binary, throwing away a third of the representable states.
+        mu = self.mu.unsqueeze(1).clamp(-self.mu_cap * a, self.mu_cap * a)
+        return (flat - mu) / a, a, shp
 
     def forward(self, x):
         wh, a, (out, inp) = self._what()
@@ -1095,6 +1101,11 @@ def main():
                          "0.0 at t=1). What it still changes is the GRADIENT -- the true tanh "
                          "derivative instead of STE's straight-through mask -- which is the mechanism "
                          "under test, and keeps this a single-variable comparison to the control.")
+    ap.add_argument("--catq-mu-cap", type=float, default=0.25,
+                    help="Clamp |mu| <= cap*alpha for CAT-Q's learnable redistribution mean. "
+                         "Unconstrained (cap=inf) it runs away and blocks lose their zero level "
+                         "entirely (measured min sparsity 0.0000 vs the control's 0.4473), "
+                         "degenerating ternary to binary.")
     ap.add_argument("--catq-sharpness", type=float, default=20.0,
                     help="CAT-Q sharpness s. t*s runs from ~0 to s over the QAT steps; larger = harder "
                          "final transition.")
@@ -2191,7 +2202,7 @@ def main():
                 if args.qat_catq and not frz:                     # CAT-Q soft ternarization
                     qm = _CATQLinear(w, b, args.block_size,
                                      init_deq=(_idq.to(dev_t) if _idq is not None else None),
-                                     sharpness=args.catq_sharpness)
+                                     sharpness=args.catq_sharpness, mu_cap=args.catq_mu_cap)
                 elif args.qat_adaround and not frz and _idq is not None:   # A2: AdaRound on the POLISHED linears
                     qm = _AdaRoundLinear(w, b, args.block_size).to(dev_t)
                 else:                                             # STE latent (or frozen GPTQ skeleton)
