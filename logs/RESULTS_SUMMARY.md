@@ -2707,3 +2707,52 @@ it BEFORE and costs -2.20 pp. For a teacher-matching pipeline, correct after; do
 I twice concluded from a prefix of the sweep — 3 layers of a 32-layer band, and L0/L1 of the SchurOpt
 smoke in 13z. Both times the full sweep contradicted it. Read the whole pass before concluding; these
 probes cost 40 minutes, not 4 hours, so there is no excuse for sampling.
+
+---
+
+## 13ac. THE NOISE FLOOR — and it RETRACTS 13aa's ICBQ positive (2026-09-06)
+
+Every paper A/B in this harness has been N=1 per arm, and the only surviving positive (ICBQ, +0.44 pp)
+sat at a magnitude nobody had shown was resolvable. block-AP has NO global seed — the QAT loop's
+`torch.randperm` draws from the unseeded global RNG — so re-running the byte-identical config on the
+identical calibration data samples exactly the variance in question. Two repeats + the banked control:
+
+| run | agreement | mean KL |
+|---|---|---|
+| ctl run 1 (banked) | 56.11% | 1.1988 |
+| repeat r2 | **56.63%** | **1.1718** |
+| repeat r3 | 56.08% | 1.1985 |
+| **mean ± SD** | **56.273% ± 0.309 pp** | **1.1897 ± 0.0155** |
+
+Empirical spread 0.55 pp. **3-SD resolution limit: 0.93 pp agreement / 0.0465 KL.**
+
+### What this does to the two results
+
+| arm | agreement | vs control mean | KL | vs control mean | verdict |
+|---|---|---|---|---|---|
+| ICBQ K=4 | 56.55% | **+0.89 SD** | 1.1767 | **-0.84 SD** | **WASH** |
+| NAP precondition | 53.91% | **-7.64 SD** | 1.2763 | **+5.59 SD** | **REAL (negative)** |
+
+**13aa's ICBQ positive is RETRACTED.** The +0.44 pp is inside the noise floor, and the null repeat r2
+moved FURTHER (+0.52 pp, KL -0.0270) than ICBQ did (+0.44 pp, KL -0.0221) — a run that changed nothing
+but the random seed beat the treated arm. ICBQ is a wash, not a win. The implementation is still
+correct (bit-exact re-roll, 38 pairs / 7 seam revisits, all guards passing); it simply buys nothing
+measurable at this scale. Do not spend GPU on K=2 / K=L variants.
+
+NAP's negative is unaffected: -7.6 SD, and independently corroborated by the friendliness metric
+moving the wrong way with depth (L20 +25.4%, L28 +32.5%, L31 +24.3%).
+
+### A caution about the SD itself
+
+n=3 is a crude SD, and the three runs are not evenly spread: ctl1 and r3 land almost on top of each
+other (56.11 vs 56.08; KL 1.1988 vs 1.1985 — 0.03 pp and 0.0003 apart) while r2 sits away from both on
+BOTH metrics. So run-to-run variance behaves like ONE latent factor — the QAT permutation trajectory —
+rather than independent per-metric noise, and it may be occasional-excursion rather than Gaussian. The
+honest operating rule is the empirical spread, not a t-test on n=3.
+
+### Operating rule going forward
+
+**A single-run skeleton A/B in this harness cannot resolve anything below ~0.9 pp agreement / ~0.05 KL.**
+Screen with N=1 for LARGE effects only; anything smaller needs seeds before it is claimed. This is
+retroactive: it is why 13y's -50.5 pp, 13z's NaN and 13ab's -2.20 pp were always safe to call, and why
+13aa's +0.44 pp never was. Cost of the calibration: 4.7 h, once, for every future A/B here.
