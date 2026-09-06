@@ -421,6 +421,60 @@ class _QATLinear(nn.Module):
         return _deploy_ternary(self.latent.data, self.scale.data.clamp_min(1e-8), self.bs)
 
 
+class _CATQLinear(nn.Module):
+    """CAT-Q soft ternarization (ScaleQ-1.58, arXiv:2608.01078 Eq. 2), as an alternative to the STE
+    round. Replaces the hard round with a differentiable tanh pair that starts near the identity and
+    anneals to hard ternary as the normalised calibration time-step t goes 0 -> 1:
+
+        T = [tanh(t*s*(W_hat - D)) + tanh(t*s*(W_hat + D))] / (2 tanh(t*s)),   W_hat = (W - mu)/alpha
+
+    mu is a REDISTRIBUTION term only and is dropped at reconstruction, so the deployed weight stays
+    alpha * {-1,0,+1} per block -- TQ1_64-exact, bpw unchanged (the TWN property the paper keeps).
+
+    With mu = 0 and D = 0.5 this is a strict GENERALISATION of our existing grid: _tern_round is
+    round(W/alpha).clamp(-1,1), whose zero-region boundary sits at exactly 0.5, and as t -> inf the
+    tanh pair converges to that same assignment. So t=1 deploy() is bit-comparable to the STE path
+    and the only new freedom is the annealed path taken to get there, plus mu."""
+    def __init__(self, weight, bias, block_size, init_deq=None, sharpness=20.0):
+        super().__init__()
+        self.bs = block_size
+        self.out, self.inp = weight.shape
+        self.s = float(sharpness)
+        self.t = 1e-3                                   # set per-step by the QAT loop
+        src = init_deq if init_deq is not None else weight
+        self.latent = nn.Parameter(src.detach().to(torch.float32))
+        flat, _ = _blocks(self.latent.data, block_size)
+        if init_deq is not None:
+            a0 = flat.abs().amax(dim=1).clamp_min(1e-8)  # GPTQ level == the deployed scale
+        else:
+            a0 = _block_scale(flat).clamp_min(1e-8)
+        self.alpha = nn.Parameter(a0)
+        self.mu = nn.Parameter(torch.zeros_like(a0))     # redistribution, dropped at reconstruction
+        self.register_buffer("delta", torch.full_like(a0, 0.5))   # our round threshold, in W_hat units
+        self.register_buffer("bias_t", None if bias is None else bias.detach().clone())
+
+    def _what(self):
+        flat, shp = _blocks(self.latent, self.bs)
+        a = self.alpha.clamp_min(1e-8).unsqueeze(1)
+        return (flat - self.mu.unsqueeze(1)) / a, a, shp
+
+    def forward(self, x):
+        wh, a, (out, inp) = self._what()
+        ts = max(self.t, 1e-3) * self.s
+        d = self.delta.unsqueeze(1)
+        T = (torch.tanh(ts * (wh - d)) + torch.tanh(ts * (wh + d))) / (2.0 * math.tanh(ts))
+        w = (T * a).reshape(out, inp).to(x.dtype)
+        return F.linear(x, w, self.bias_t.to(x.dtype) if self.bias_t is not None else None)
+
+    @torch.no_grad()
+    def deploy(self):
+        wh, a, (out, inp) = self._what()
+        d = self.delta.unsqueeze(1)
+        q = (wh > d).to(wh.dtype) - (wh < -d).to(wh.dtype)      # the t -> inf limit of the tanh pair
+        deq = (q * a).reshape(out, inp)
+        return deq, (q == 0).float().mean().item()
+
+
 _AR_GAMMA, _AR_ZETA = -0.1, 1.1                                       # AdaRound rectified-sigmoid stretch
 
 
@@ -971,6 +1025,23 @@ def main():
                          "so bpw is unchanged. Converges by ~2 iters; 4 is ample. Gain scales with "
                          "Hessian anisotropy (measured on synthetic groups: 0.1%% isotropic, 16.9%% at "
                          "a realistic power-law condition ~4e3).")
+    ap.add_argument("--qat-catq", action="store_true",
+                    help="CAT-Q soft ternarization (ScaleQ-1.58, arXiv:2608.01078) instead of the STE "
+                         "round during block QAT: a differentiable tanh pair annealed from ~identity "
+                         "to hard ternary over the QAT steps, plus a learnable per-block "
+                         "redistribution mean that is DROPPED at reconstruction. Format-safe -- the "
+                         "deployed weight is still alpha*{-1,0,+1} per block, so bpw is unchanged. "
+                         "NOTE the other half of that paper, AYOT calibration, is ALREADY in this "
+                         "pipeline: our calib is 50%% CoT-bearing (build_chat_calib replay mix). "
+                         "INIT INTERACTION: the paper's 'starts at the identity' property assumes an "
+                         "FP latent. With --qat-gptq-init the latent starts ON the grid, so the soft "
+                         "phase barely moves the forward VALUE (measured rel err 9.6e-03 at t=0.01, "
+                         "0.0 at t=1). What it still changes is the GRADIENT -- the true tanh "
+                         "derivative instead of STE's straight-through mask -- which is the mechanism "
+                         "under test, and keeps this a single-variable comparison to the control.")
+    ap.add_argument("--catq-sharpness", type=float, default=20.0,
+                    help="CAT-Q sharpness s. t*s runs from ~0 to s over the QAT steps; larger = harder "
+                         "final transition.")
     ap.add_argument("--nap-epochs", type=int, default=0,
                     help="NAP (arXiv:2608.03919) normalization-affine preconditioning: passes over "
                          "the calib per layer. 0 = off. Freezes the backbone at its ternary dequant "
@@ -2061,7 +2132,11 @@ def main():
                 b = module.bias.data.to(dev_t) if module.bias is not None else None
                 _idq = gptq_deq.get(name)
                 frz = _route_frozen(name)
-                if args.qat_adaround and not frz and _idq is not None:   # A2: AdaRound on the POLISHED linears
+                if args.qat_catq and not frz:                     # CAT-Q soft ternarization
+                    qm = _CATQLinear(w, b, args.block_size,
+                                     init_deq=(_idq.to(dev_t) if _idq is not None else None),
+                                     sharpness=args.catq_sharpness)
+                elif args.qat_adaround and not frz and _idq is not None:   # A2: AdaRound on the POLISHED linears
                     qm = _AdaRoundLinear(w, b, args.block_size).to(dev_t)
                 else:                                             # STE latent (or frozen GPTQ skeleton)
                     qm = _QATLinear(w, b, args.block_size, init_deq=(_idq.to(dev_t) if _idq is not None else None))
@@ -2111,9 +2186,16 @@ def main():
             for q in trainable.values():
                 if isinstance(q, _AdaRoundLinear):
                     latent_params.append(q.V)
+                elif isinstance(q, _CATQLinear):
+                    latent_params.append(q.latent)
+                    scale_params.append(q.alpha); scale_params.append(q.mu)
                 else:
                     latent_params.append(q.latent); scale_params.append(q.scale)
             adaround_mods = [q for q in trainable.values() if isinstance(q, _AdaRoundLinear)]
+            catq_mods = [q for q in trainable.values() if isinstance(q, _CATQLinear)]
+            if catq_mods:
+                print(f"   L{l} CAT-Q soft ternarization on {len(catq_mods)} linears "
+                      f"(s={args.catq_sharpness:g}, t annealed 0->1)", flush=True)
             sal_l = saliency_cache.get(l) if saliency_cache is not None else None    # A4: [hidden] channel weights
             if l == start_layer:
                 print(f"   [mem] post-swap cuda:0={torch.cuda.memory_allocated(0)/1e9:.1f}GB"
@@ -2141,6 +2223,9 @@ def main():
                     else:
                         loss = F.mse_loss(o_f, tgt)
                     mse_item = loss.item()
+                    if catq_mods:                                # CAT-Q: anneal t 0 -> 1
+                        for q in catq_mods:
+                            q.t = (step + 1) / nsteps
                     if adaround_mods:                            # A2: annealed rounding regulariser
                         b_now = max(2.0, 20.0 - 18.0 * (step / nsteps))
                         reg = 0.0
