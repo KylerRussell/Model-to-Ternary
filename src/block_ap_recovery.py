@@ -456,7 +456,11 @@ class _CATQLinear(nn.Module):
 
     def _what(self):
         flat, shp = _blocks(self.latent, self.bs)
-        a = self.alpha.clamp_min(1e-8).unsqueeze(1)
+        # LSQ gradient scaling on alpha, matching _QATLinear. Without it alpha takes ~sqrt(bs)=8x
+        # the effective step and shrinks until the zero region |W-mu| < 0.5*alpha closes: measured
+        # min sparsity 0.0000 with 22 linears under 1% sparse, i.e. ternary degenerating to binary.
+        # This -- not mu -- was the runaway; clamping mu alone changed nothing (0.4142 -> 0.4162).
+        a = _grad_scale(self.alpha.clamp_min(1e-8), 1.0 / math.sqrt(self.bs)).unsqueeze(1)
         # mu is CLAMPED to a fraction of the scale. Unconstrained it runs away: measured mean
         # sparsity 0.4568 -> 0.4142 with some blocks at EXACTLY 0.0, i.e. the shifted W_hat never
         # lands inside +/-delta so the block loses its zero level and degenerates to {-a, +a} --
@@ -1101,6 +1105,14 @@ def main():
                          "0.0 at t=1). What it still changes is the GRADIENT -- the true tanh "
                          "derivative instead of STE's straight-through mask -- which is the mechanism "
                          "under test, and keeps this a single-variable comparison to the control.")
+    ap.add_argument("--catq-freeze-alpha", action="store_true",
+                    help="Hold CAT-Q's alpha at the GPTQ per-block level instead of learning it. "
+                         "alpha enters TWICE -- inside the tanh via (W-mu)/alpha and again in the "
+                         "output T*alpha -- and the tanh path contributes -ts*W/alpha^2*sech^2, which "
+                         "blows up as alpha shrinks: measured |grad| 1.2e+00 vs the STE control's "
+                         "scale at 1.6e-07, a 7.7e6 gap that LSQ's 1/sqrt(bs) damping cannot close. "
+                         "Freezing it makes the soft-vs-hard forward the ONLY difference from the "
+                         "control, which is the actual mechanism under test.")
     ap.add_argument("--catq-mu-cap", type=float, default=0.25,
                     help="Clamp |mu| <= cap*alpha for CAT-Q's learnable redistribution mean. "
                          "Unconstrained (cap=inf) it runs away and blocks lose their zero level "
@@ -2255,7 +2267,11 @@ def main():
                     latent_params.append(q.V)
                 elif isinstance(q, _CATQLinear):
                     latent_params.append(q.latent)
-                    scale_params.append(q.alpha); scale_params.append(q.mu)
+                    if args.catq_freeze_alpha:
+                        q.alpha.requires_grad_(False)
+                    else:
+                        scale_params.append(q.alpha)
+                    scale_params.append(q.mu)
                 else:
                     latent_params.append(q.latent); scale_params.append(q.scale)
             adaround_mods = [q for q in trainable.values() if isinstance(q, _AdaRoundLinear)]
