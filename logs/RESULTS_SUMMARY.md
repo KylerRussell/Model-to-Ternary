@@ -2756,3 +2756,93 @@ honest operating rule is the empirical spread, not a t-test on n=3.
 Screen with N=1 for LARGE effects only; anything smaller needs seeds before it is claimed. This is
 retroactive: it is why 13y's -50.5 pp, 13z's NaN and 13ab's -2.20 pp were always safe to call, and why
 13aa's +0.44 pp never was. Cost of the calibration: 4.7 h, once, for every future A/B here.
+
+---
+
+## 13ad. CAT-Q is a WASH, QUASAR is a large NEGATIVE — and the batch's structural finding
+## (2026-09-07)
+
+Both screened against the measured noise floor (13ac: control n=3 = 56.273 +/- 0.309 %,
+KL 1.1897 +/- 0.0155; 3-SD limit 0.93 pp).
+
+| arm | agreement | vs control | mean KL | vs control | verdict |
+|---|---|---|---|---|---|
+| CAT-Q, alpha learned (v1) | 53.72% | -8.26 SD | 1.3833 | +12.49 SD | MY BUG, not the method |
+| **CAT-Q, alpha frozen (v3)** | **56.51%** | **+0.77 SD** | **1.1954** | **+0.37 SD** | **WASH** |
+| QUASAR self-inconsistent (v1) | 2.24% | — | 9.1156 | — | MY BUG |
+| **QUASAR self-consistent (v2)** | **45.97%** | **-33.3 SD** | **1.8395** | **+41.9 SD** | **REAL NEGATIVE** |
+
+### CAT-Q (ScaleQ-1.58 Eq. 2) — neutral once its scale is stabilised
+
+Verified format-exact first: `deploy()` is BIT-IDENTICAL to `_deploy_ternary` (mu=0, D=0.5 makes it a
+strict generalisation of our grid), and the forward anneals to it (rel err 9.6e-03 at t=0.01 -> 0.0
+at t=1). Two confounded runs preceded the real answer, both mine:
+
+* **v1: the zero region collapsed** — mean sparsity 0.4568 -> 0.4142 with blocks at EXACTLY 0.0000,
+  i.e. ternary degenerating to BINARY. I blamed the learnable redistribution mean mu and clamped it.
+* **v2: the clamp changed nothing** (0.4142 -> 0.4162, still min 0.0000). The region is
+  `|W-mu| < 0.5*alpha`, so it also closes when ALPHA shrinks — and alpha enters CAT-Q TWICE, inside
+  the tanh via (W-mu)/alpha and again in the output T*alpha. The tanh path contributes
+  `-ts*W/alpha^2*sech^2`, which blows up as alpha shrinks. Measured |grad|: CAT-Q alpha **1.2e+00**
+  vs the STE control's scale **1.6e-07** — a **7.7e6** gap that LSQ's 1/sqrt(bs) damping cannot close.
+* **v3, alpha frozen at the GPTQ level**, making the soft-vs-hard forward the ONLY variable: **WASH**.
+
+So CAT-Q's mechanism is neutral at ternary, and its learnable parameterisation is unstable here. The
+other half of that paper, AYOT, was already in this pipeline (13ae).
+
+### QUASAR — improves its OWN objective and destroys the model
+
+`--qat-quasar N` refits each block scale every N steps by saliency-weighted least squares over a
+clipping search, with Adam's second moment as the diagonal-Fisher saliency. Two ternary adaptations
+were needed before it could even run correctly:
+
+1. **The clipping grid.** The paper searches f*amax with f in (0,1] because at 2-4 bits the optimal
+   clip sits near the max. At ternary the optimum is ~0.5*amax — BELOW their entire grid — so the
+   search never reached the useful region and LOST to the plain MSE scale on QUASAR's own weighted
+   objective (1.433e-01 vs 1.250e-01). Caught by unit test, before any GPU. Candidates re-centred on
+   the incumbent scale with f=1.0 included, so the refit can never return something worse.
+2. **Self-consistency.** QUASAR fits (s,z) for FIXED codes q because its format stores codes and
+   dequantizer separately. TQ1_64 has ONE scale doing both jobs, so writing the free WLS optimum back
+   re-derives codes DIFFERENT from the q it was fit for. Measured: the scale escaped its own [0.7,1.3]
+   search to **0.26-2.56x**, ran systematically small, and the zero region collapsed (sparsity 0.4568
+   -> 0.2326) — **2.24% agreement**. Fixed by alternating codes <-> scale to a fixed point.
+
+With both fixed it still costs **-10.3 pp**. And the reason it matters:
+
+**QUASAR IMPROVES THE LOCAL BLOCK OBJECTIVE AT DEPTH WHILE LOSING 10.3 pp END TO END** — L8 -10.9%,
+L20 -14.9%, L31 -10.7%. That is 13y's exact pattern (better reconstruction, worse model) reached by a
+completely different route, and it is now the **fourth** instance: 13y's grid refit, ICBQ's zeroed
+teacher, NAP's inverse friendliness, and now this.
+
+Mechanism: our block QAT already learns the scale by gradient on the TRUE block-output MSE. QUASAR
+replaces that with a fit to a weight-space PROXY (saliency-weighted reconstruction error). Swapping a
+directly-optimised parameter for a proxy-fitted one is a downgrade, however good the proxy looks on
+its own terms. QUASAR's argument is about a QAT LOSS FLOOR over long training; our block QAT is 4
+epochs at tiny LR from a GPTQ init, where the weights barely move, so the floor it targets is not the
+binding constraint. Its proper home is the ~28 h assignment stage — untested, and not obviously worth
+the day given two negatives at block scope.
+
+### THE BATCH'S STRUCTURAL FINDING
+
+Four methods now fail because **the paper assumes a richer parameterisation than ternary provides**:
+
+| method | assumes | ternary reality |
+|---|---|---|
+| SchurQuant (13y/13z) | a continuous suffix that absorbs chunk error | suffix is ternarised too |
+| NAP (13ab) | tunable normalization affines | QuaRot FOLDS them away (stored w == 0) |
+| CAT-Q (13ad) | a stably learnable scale inside the soft map | alpha is ill-conditioned, 7.7e6 grad gap |
+| QUASAR (13ad) | codes and dequantizer stored separately | ONE scale does both jobs |
+
+This is predictive, and it is the cheapest screen we have: before implementing, ask what the method
+needs to vary that TQ1_64 does not give it. Three of these four were diagnosable on paper or by unit
+test; only NAP needed a GPU run to see.
+
+### Second-order lesson: local metrics have never once caught a failure here
+
+pair-MSE, block-MSE and `rc=0` all endorsed the model whose residual stream had collapsed (13aa);
+block-MSE improved while SchurOpt's refit destroyed the model (13y); NAP's friendliness metric was the
+only local signal that pointed the right way, and QUASAR's pointed the WRONG way at three of four
+depths. What HAS caught every failure: the end-to-end referee, and cheap **structural invariants of
+the format** — the sparsity histogram (found both CAT-Q's and QUASAR's zero-region collapse), the
+activation-norm probe (found the collapsed stream), and a gradient-magnitude comparison (found
+CAT-Q's ill-conditioned alpha). None of those are the training loss.
