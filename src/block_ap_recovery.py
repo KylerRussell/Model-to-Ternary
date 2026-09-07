@@ -849,10 +849,23 @@ def _quasar_refit(latent, h, block_size, grid, base_scale=None):
     best_s = None; best_e = None
     for f in grid:
         sc = (float(f) * base).clamp_min(1e-8)
-        q = _tern_round((flat / sc).clamp(-1, 1))
-        num = (fh * q * flat).sum(dim=1)
-        den = (fh * q * q).sum(dim=1).clamp_min(1e-12)
-        st = (num / den).clamp_min(1e-8)                       # weighted-LS optimum for these codes
+        # SELF-CONSISTENCY. QUASAR fits (s,z) for FIXED codes q, because its format stores codes and
+        # dequantizer separately. TQ1_64 has ONE scale doing both jobs, so writing the free WLS
+        # optimum back silently re-derives codes DIFFERENT from the q it was fit for -- measured, the
+        # returned scale escaped the [0.7,1.3] search to 0.26-2.36x and ran systematically small,
+        # shrinking the zero region |w| < 0.5*s until sparsity fell 0.4568 -> 0.2326 and the skeleton
+        # scored 2.24%. Alternate codes <-> scale to a fixed point instead, so the scale we deploy is
+        # the scale its own codes were fit for.
+        st = sc.squeeze(1)
+        for _ in range(4):
+            q = _tern_round((flat / st.unsqueeze(1)).clamp(-1, 1))
+            num = (fh * q * flat).sum(dim=1)
+            den = (fh * q * q).sum(dim=1)
+            nxt = torch.where(den > 1e-30, num / den.clamp_min(1e-30), st).clamp_min(1e-8)
+            if torch.allclose(nxt, st, rtol=1e-4):
+                st = nxt; break
+            st = nxt
+        q = _tern_round((flat / st.unsqueeze(1)).clamp(-1, 1))   # codes AT the deployed scale
         err = (fh * (st.unsqueeze(1) * q - flat) ** 2).sum(dim=1)
         if best_s is None:
             best_s, best_e = st, err
