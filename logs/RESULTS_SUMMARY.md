@@ -2846,3 +2846,47 @@ depths. What HAS caught every failure: the end-to-end referee, and cheap **struc
 the format** — the sparsity histogram (found both CAT-Q's and QUASAR's zero-region collapse), the
 activation-norm probe (found the collapsed stream), and a gradient-magnitude comparison (found
 CAT-Q's ill-conditioned alpha). None of those are the training loss.
+
+---
+
+## 13ae. SQuaT — NULL BY CONSTRUCTION for a weight-only pipeline (2026-09-07)
+
+Last of the 13. Resolved on paper, and the paper argument is STRONGER than a run would be.
+
+SQuaT (arXiv:2608.10709) removes the "unattainable residual" in QAT+KD by projecting teacher features
+onto the STUDENT'S quantization lattice: Pi_phiS,l(z) is defined (their Eq. 6) by "the student's
+forward quantization path at layer l", and Eq. 7 matches the student's "actual (already quantized)
+student output" against Pi_phiS(f_T). Eq. 1-2 build that lattice by quantizing x -- "either weights
+or activations" -- to a b-bit uniform grid.
+
+**That lattice is the student's FEATURE/ACTIVATION grid. We are weight-only.** There is no activation
+quantizer anywhere in this repo (grep: no act_quant / quantize_act / activation-quant path); student
+features are bf16. So Pi_phiS is the identity and Eq. 7 collapses EXACTLY to plain feature MSE --
+which is verbatim what our `feature_loss()` already computes:
+
+    return F.mse_loss(student_h.float(), teacher_h.float())
+
+SQuaT would reduce to the baseline it exists to beat. The residual it eliminates is CREATED by the
+student's activation quantizer; weight-only quantization never incurs it. Running it would mean
+either mislabelling plain feature-KD as SQuaT, or inventing an activation quantizer we would never
+ship -- measuring a model that does not exist.
+
+This is the batch's structural screen (13ad) applied one more time, and the fifth hit: **ask what the
+method needs to vary that TQ1_64 does not give it.** SQuaT needs a feature lattice; we have none.
+
+### Two facts that complete the picture
+
+* **`--feat-weight` is off for a MEMORY bug, not a quality result.** The hidden teacher cache is ~34 GB
+  and every DDP rank `torch.load`s the whole thing (2x34 GB > 60 GB RAM -> swap-death + DDP socket
+  timeout). Recorded at the time as "dropped (unvalidated anyway; 4B baselines used feat=0)". So
+  feature distillation has never actually been evaluated in this pipeline.
+* **We already do feature distillation where it matters most.** block-AP's entire objective IS
+  hidden-state MSE against the FP block, applied at all 32 layers. SQuaT's family is well represented
+  here already; `--feat-weight` only adds it to the E2E logit-KD stage on top.
+
+### The one honest adjacent experiment (NOT run; cost decision)
+
+Does feature-KD help at the E2E stage at all? That is SQuaT's own baseline, genuinely untested here.
+If it does not help, no SQuaT variant could have anything to improve on. Cost is a different class
+from this batch's screens: a memory-safe (mmap / streamed / single-rank) cache loader, then an E2E
+PAIR at ~6 h each (~12 h) versus 2.4 h for a skeleton screen. Left for an explicit budget decision.
