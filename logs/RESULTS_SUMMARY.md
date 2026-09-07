@@ -2890,3 +2890,55 @@ Does feature-KD help at the E2E stage at all? That is SQuaT's own baseline, genu
 If it does not help, no SQuaT variant could have anything to improve on. Cost is a different class
 from this batch's screens: a memory-safe (mmap / streamed / single-rank) cache loader, then an E2E
 PAIR at ~6 h each (~12 h) versus 2.4 h for a skeleton screen. Left for an explicit budget decision.
+
+---
+
+## 13af. E2E feature distillation — a WASH, which closes SQuaT's family (2026-09-07)
+
+13ae showed SQuaT is null by construction here (it needs a student FEATURE lattice; we are
+weight-only). That left the prior question, open in this repo since §1 and never answered: **does
+feature-KD at the E2E stage help at all?** If not, no SQuaT variant could have anything to improve on.
+
+Design: ONE teacher cache built with hidden states, used by BOTH arms, so `--feat-weight` is the only
+difference. Both start from the banked control skeleton. seq stays 2560; `--max-samples 1000` keeps
+the hidden cache at 14 GB instead of the 82 GB the full 6244-seq calib would need at that length.
+
+| arm | agreement | mean KL | KL(conf>0.5) | %flips | held-out KL |
+|---|---|---|---|---|---|
+| E2E feat=0 | 70.89% | 0.6262 | 0.4429 | 29.11% | 0.3497 |
+| E2E feat=1.0 | 70.50% | **0.6259** | 0.4485 | 29.50% | 0.3569 |
+
+**-0.39 pp agreement, and mean KL identical to 3 decimal places (0.6262 vs 0.6259).** Inside the
+noise floor. Feature-KD at the E2E stage buys nothing.
+
+The striking part is HOW little it changed given how much it changed the trajectory. The feature term
+carried 41-59% of the KL's weight throughout (logged `w*feat/KL` = 0.411 -> 0.588) and made training
+KL **1.5-1.9x worse** at matched steps (step 210: 0.5709 vs 0.9897; step 310: 0.5353 vs 0.9243). It
+substantially redirected the optimisation and the final model landed in the same place.
+
+Two reasons this is unsurprising in hindsight, both already true of our pipeline:
+* **E2E-QP trains only SCALES** (`assign-moved=0.000%` in both arms), so any extra loss term has
+  limited leverage — the code's own log says so.
+* **block-AP's objective ALREADY IS hidden-state MSE**, applied at every one of the 32 layers. The
+  features are matched structurally before E2E ever runs; adding a final-hidden MSE on top is
+  redundant with work already done.
+
+### Instrumentation note
+
+`hidden_state_loss`'s docstring said "watch the printed feat vs KL magnitudes" — nothing had ever
+printed them, so the weight would have been a pure guess. Added the log first. It immediately
+corrected my own estimate: I predicted `w*feat/KL ~ 0.008` from an assumed ~10% hidden discrepancy,
+but the measured feature MSE is **0.3337**, giving 0.411 — a 50x error. Guessing from that estimate
+would have set the weight ~40x too high and produced a "feature-KD destroys the model" result that
+was purely my hyperparameter. That is the same failure that cost runs on CAT-Q's alpha and NAP's gain
+range; this time the instrumentation came first and cost nothing.
+
+### Scope
+
+One weight (1.0), one run per arm, and the E2E stage's own noise floor is unmeasured (13ac measured
+the SKELETON's, SD 0.309 pp). A smaller weight might be neutral-to-positive rather than neutral, but
+with KL identical to 0.0003 and the trajectory evidence above, there is no signal to chase.
+
+**Side result worth recording:** both E2E arms took the skeleton from 56.27% to ~70.7% agreement
+(KL 1.19 -> 0.626). E2E remains by far the largest lever in this pipeline — bigger than every paper
+method in this batch combined, all of which were washes or negatives.

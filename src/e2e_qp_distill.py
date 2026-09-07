@@ -2858,6 +2858,7 @@ def train(args):
     except Exception:                                           # not per-rank anonymous RSS → survives the memguard
         cache = torch.load(args.teacher_cache)
     feat_w = getattr(args, "feat_weight", 0.0)
+    _FEATMAG = {"kl": 0.0, "feat": 0.0, "n": 0}      # so the weight can be checked, not guessed
     if feat_w > 0 and "hidden" not in cache:
         raise SystemExit("--feat-weight > 0 needs teacher hidden states; regenerate the teacher "
                          "cache with --cache-hidden (delete the old one first).")
@@ -3516,7 +3517,13 @@ def train(args):
                     # it would bypass the gradient all-reduce.)
                     sh = out.hidden_states[-1]
                     th = cache["hidden"][bi].unsqueeze(0).to(sh.device)
-                    loss = loss + feat_w * hidden_state_loss(sh, th)
+                    _fl = hidden_state_loss(sh, th)
+                    # The docstring says "watch the printed feat vs KL magnitudes" but nothing ever
+                    # printed them. Without this the weight is a guess, and a guessed weight is how
+                    # CAT-Q's alpha and NAP's gain range each cost a run.
+                    _FEATMAG["kl"] = float(loss.detach()); _FEATMAG["feat"] = float(_fl.detach())
+                    _FEATMAG["n"] += 1
+                    loss = loss + feat_w * _fl
             if _grad_release:
                 # latents step DURING backward, so their lr must already reflect this step's schedule+TALR
                 _f = lr_frac(opt_step)
@@ -3699,8 +3706,13 @@ def train(args):
                         for a, s in zip(avg_scales, scales):
                             a.mul_(ema_decay).add_(s.detach(), alpha=1 - ema_decay)
             if opt_step % args.log_every == 0 or opt_step == 1:
+                _fm = ""
+                if _FEATMAG["n"]:
+                    _r = feat_w * _FEATMAG["feat"] / max(_FEATMAG["kl"], 1e-12)
+                    _fm = (f"  feat={_FEATMAG['feat']:.4f} (w*feat/KL={_r:.3f}"
+                           + ("  <- FEAT DOMINATES" if _r > 1.0 else "") + ")")
                 log(f"   step {opt_step}/{args.steps}  KL={kl:.4f}  ema={ema:.4f}  "
-                    f"best={best_kl:.4f}  lr={args.lr*lr_frac(opt_step):.2e}")
+                    f"best={best_kl:.4f}  lr={args.lr*lr_frac(opt_step):.2e}{_fm}")
             if args.ckpt_every and opt_step % args.ckpt_every == 0:
                 save_export(f"checkpoint saved at step {opt_step}")
                 torch.cuda.empty_cache()
