@@ -24,6 +24,94 @@ prompts at once. Any single unseeded run is therefore uninterpretable, and 13v's
 sequence" conclusion came from the 0.3125 outlier. SEED now makes a run reproducible; report a MEAN
 OVER SEEDS (and its spread) before comparing two models."""
 import os, re, json, zlib, torch
+from transformers import LogitsProcessor
+
+
+class DRYLogitsProcessor(LogitsProcessor):
+    """DRY (Don't Repeat Yourself) suffix-continuation penalty — arXiv:2608.22761, and the sampler
+    shipped in llama.cpp / ExLlamaV2 / text-generation-webui.
+
+    Unlike a flat repetition penalty (which penalises tokens uniformly wherever they occurred and
+    wrecks code/LaTeX/structured text), DRY penalises ONLY the tokens that would EXTEND a repeat.
+    For the current context s, find the longest suffix s[n-L:n] that also occurred earlier ending at
+    j; the token s[j+1] that followed it is the one about to continue the loop, and it is penalised by
+
+        multiplier * base ** (L - allowed_length)      for L >= allowed_length
+
+    so the penalty grows exponentially with how much context is already repeating.
+
+    Longest-suffix matching is the Z-algorithm on the reversed context: for reversed r, Z[i] is the
+    longest common prefix of r and r[i:], which is exactly the longest common suffix of s[:n-i] and
+    s[:n]. The continuation token is then s[n-i]. O(n) per step.
+
+    WHY THIS ONE FIRST (13ag): PLAER = 0.400, so only ~40% of our loops hold an extractable answer.
+    DRY is the only candidate whose value does NOT scale with PLAER -- it suppresses verbatim
+    continuation whether or not an answer was ever derived.
+
+    Deviation from llama.cpp, recorded: sequence breakers are applied by capping the match length at
+    the distance to the most recent breaker token, rather than by llama.cpp's per-restart bookkeeping.
+    Same intent (do not let a match run across a structural boundary), simpler implementation."""
+
+    CAP = 1e4          # an absolute ban; keeps the exponential from overflowing on long loops
+
+    def __init__(self, multiplier, base, allowed_length, breaker_ids, penalty_last_n=0):
+        self.mult = float(multiplier); self.base = float(base)
+        self.allowed = int(allowed_length); self.breakers = set(int(b) for b in breaker_ids)
+        self.last_n = int(penalty_last_n)          # 0 = whole context
+
+    @staticmethod
+    def _z(r):
+        n = len(r); z = [0] * n
+        if n:
+            z[0] = n
+        l = rgt = 0
+        for i in range(1, n):
+            zi = 0
+            if i < rgt:
+                zi = min(rgt - i, z[i - l])
+            while i + zi < n and r[zi] == r[i + zi]:
+                zi += 1
+            z[i] = zi
+            if i + zi > rgt:
+                l, rgt = i, i + zi
+        return z
+
+    def __call__(self, input_ids, scores):
+        if self.mult <= 0:
+            return scores
+        for b in range(input_ids.shape[0]):
+            s = input_ids[b].tolist()
+            if self.last_n > 0:
+                s = s[-self.last_n:]
+            n = len(s)
+            if n < self.allowed + 1:
+                continue
+            cap = n                                  # do not let a match cross a sequence breaker
+            for k in range(n - 1, -1, -1):
+                if s[k] in self.breakers:
+                    cap = n - 1 - k
+                    break
+            if cap < self.allowed:
+                continue
+            z = self._z(s[::-1])
+            pen = {}
+            for i in range(1, n):
+                L = min(z[i], cap)
+                if L >= self.allowed:
+                    tok = s[n - i]
+                    e = L - self.allowed
+                    # CLAMP. A real loop repeats for hundreds of tokens, so base**e overflows a
+                    # Python float (1.75**1100 -> OverflowError, which killed the first run; the
+                    # unit test had only gone to a 32-token repeat). Past ~1e4 the distinction is
+                    # meaningless anyway: subtracting 1e4 from a logit is already an absolute ban
+                    # on that token after softmax.
+                    p = self.CAP if e > 64 else min(self.mult * (self.base ** e), self.CAP)
+                    if p > pen.get(tok, 0.0):
+                        pen[tok] = p
+            for tok, p in pen.items():
+                scores[b, tok] -= p
+        return scores
+
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from e2e_qp_distill import build_student, BLOCK_SIZE
 from gen_reasoning_traces import PROMPTS as REASON_PROMPTS
@@ -129,6 +217,25 @@ think_lens = []
 # CRITICAL: <|im_end|>=248046 is the turn-end, but config.eos_token_id is None → generate never stops and
 # fills the budget by repeating <|im_end|> (a FAKE loop). Pass eos explicitly so generation stops correctly.
 gen_kw = dict(max_new_tokens=MAXNEW, pad_token_id=tok.eos_token_id, eos_token_id=EOS)
+# DRY sampler (13ag). OFF by default (DRY_MULT=0) so every previously recorded Gate B number stays
+# reproducible bit-for-bit. Defaults below are llama.cpp's when enabled.
+_DRY_MULT = float(os.environ.get("DRY_MULT", "0"))
+if _DRY_MULT > 0:
+    from transformers import LogitsProcessorList
+    _brk = []
+    for _t in ("\n", ":", '"', "*", ".", ","):          # llama.cpp's default sequence breakers
+        try:
+            _ids = tok.encode(_t, add_special_tokens=False)
+            if len(_ids) == 1:
+                _brk.append(_ids[0])
+        except Exception:
+            pass
+    _dry = DRYLogitsProcessor(_DRY_MULT, float(os.environ.get("DRY_BASE", "1.75")),
+                              int(os.environ.get("DRY_ALLOWED", "2")), _brk,
+                              int(os.environ.get("DRY_LAST_N", "0")))
+    gen_kw["logits_processor"] = LogitsProcessorList([_dry])
+    print(f"DRY ON: mult={_DRY_MULT} base={os.environ.get('DRY_BASE','1.75')} "
+          f"allowed={os.environ.get('DRY_ALLOWED','2')} breakers={len(_brk)}", flush=True)
 if TEMP > 0:
     gen_kw.update(do_sample=True, temperature=TEMP, top_p=0.95, top_k=20)
 else:
@@ -199,6 +306,10 @@ if think_lens:
           f"(watch for COLLAPSE = premature closing)")
 print("=" * 60)
 if os.environ.get("GATE_OUT"):
+    res["dry_mult"] = _DRY_MULT
+    if _DRY_MULT > 0:
+        res["dry_base"] = float(os.environ.get("DRY_BASE", "1.75"))
+        res["dry_allowed"] = int(os.environ.get("DRY_ALLOWED", "2"))
     json.dump(res, open(os.environ["GATE_OUT"], "w"), indent=1)
     print("wrote", os.environ["GATE_OUT"])
 if SAMPLES is not None:
