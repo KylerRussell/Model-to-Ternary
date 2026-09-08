@@ -20,11 +20,17 @@ Usage: ./.venv/bin/python src/plaer_analyze.py output_sweep/plaer_samples.json
 import json, re, sys, zlib
 from collections import Counter
 
-BOXED = re.compile(r"\\boxed\s*\{([^{}]{1,120})\}")
-FINALISH = re.compile(
-    r"(?:the\s+)?(?:final\s+)?answer\s*(?:is|:)\s*([^\n.;]{1,80})"
-    r"|(?:so|thus|therefore|hence)[, ]+(?:the\s+)?(?:answer\s+is\s+)?([-+]?\d[\d,./^ ]{0,20})\b",
-    re.I)
+# Detector v2. v1 looked only for \boxed{} and "the answer is" and scored PLAER 0.120 -- but
+# \boxed appears in ZERO of 48 real rollouts, and v1 fired on only 30.4% of the SUCCESSFUL ones,
+# so it was under-sensitive and the 0.120 was an artifact. Always calibrate an answer detector
+# against the rollouts that worked before trusting it on the ones that failed. v2 matches the forms
+# this model actually emits ("Common knowledge: Paris", "*Response:* ...") and fires on 69.6% of
+# successful rollouts, giving PLAER 0.400.
+ANSWER = re.compile(
+    r"(?:answer|response|conclusion|result)\s*(?:is|:)\s*\**\s*([A-Za-z0-9][^\n.;*]{0,60})"
+    r"|common knowledge\s*:\s*([^\n.;*]{1,60})"
+    r"|\*(?:draft|response|final)[^:]*:\*\s*([^\n]{1,80})"
+    r"|\\boxed\s*\{([^{}]{1,80})\}", re.I)
 
 
 def loop_onset(text, n=5, times=3):
@@ -54,9 +60,7 @@ def loop_onset(text, n=5, times=3):
 
 
 def has_answer(seg):
-    if BOXED.search(seg):
-        return True
-    m = FINALISH.search(seg)
+    m = ANSWER.search(seg)
     return bool(m and any(g and g.strip() for g in m.groups()))
 
 

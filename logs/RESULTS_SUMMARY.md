@@ -2942,3 +2942,74 @@ with KL identical to 0.0003 and the trajectory evidence above, there is no signa
 **Side result worth recording:** both E2E arms took the skeleton from 56.27% to ~70.7% agreement
 (KL 1.19 -> 0.626). E2E remains by far the largest lever in this pipeline — bigger than every paper
 method in this batch combined, all of which were washes or negatives.
+
+---
+
+## 13ag. PLAER — Gate B is MIXED (0.40), and the report's marker list is wrong for our model
+## (2026-09-08)
+
+The deep-research report's most useful contribution was not a method but a FALSIFIER. Gate B's
+numbers (commit 0.4583, loop 0.5208, comp 3.4253 on the OPSA model, N=48 seed 0) are produced by two
+pathologies needing OPPOSITE fixes: COMMITMENT failure (answer derived, model cannot stop -> fixable
+at decoding time, 0 bpw) vs PATH-FINDING failure (no answer ever derived -> needs better weights).
+PLAER separates them: of looped rollouts, what fraction already held an answer BEFORE loop onset?
+
+**PLAER = 0.400 (10/25). MIXED.** Decoding-time control can address roughly the commitment share,
+so size any expected Gate B gain by ~0.4, NOT by a paper's headline. The report asserted commitment
+failure outright; that is only 40% right.
+
+### The first answer was wrong, and how it was caught
+
+Detector v1 (`\boxed{}` + "the answer is") gave **PLAER 0.120**, which would have said PATH-FINDING
+dominates and killed the whole decoding branch. It was an artifact: **`\boxed` appears in ZERO of 48
+rollouts**, and v1 fired on only **30.4%** of the SUCCESSFUL (non-looped) rollouts. An answer
+detector that cannot find answers in traces that worked cannot be trusted on traces that failed.
+Detector v2 matches the forms this model actually emits ("Common knowledge: Paris", "*Response:* …"),
+fires on **69.6%** of successful rollouts, and gives 0.400.
+
+**Rule: calibrate any detector on the positive class before applying it to the negative class.**
+
+### What the traces actually show
+
+Loop onset is EARLY — median 192 words, 7/25 inside 100 words, some at 8-13 — so a large share of
+loops begin before any derivation could finish. That contradicts the report's model ("derives the
+answer within 300-600 tokens, then loops verifying"). Two representative failures:
+
+* *LCM of 1-6* (comp 4.17, never closed, onset@13w): the model loops **re-reading the prompt** —
+  "Wait, let me re-read carefully" / "reading the prompt again" — and hallucinates a different
+  question ("discretely divisible"). It never derives 60. No answer exists to commit.
+* *Capital of France* (comp 2.35, onset@192w): knows "Common knowledge: Paris" immediately, then
+  loops **polishing** — "Paris, also known as The Hague or London? No, Paris is correct" / "Wait, I
+  should keep it simple". Genuine commitment failure. **804 tokens for "What is the capital of
+  France?"**
+
+Both are stuck in a meta-cognitive loop inside a rigid `Thinking Process:` / `*Draft:*` /
+`*Refinement:*` / `*Final Polish:*` scaffold. The template itself looks like part of the attractor.
+
+### The report's marker list is WRONG for this model (mean occurrences/rollout)
+
+| marker | looped | non-looped | |
+|---|---|---|---|
+| "actually" | 6.7 | 2.0 | **3.4x enriched** |
+| "Wait" | 5.8 | 2.4 | **2.4x enriched** |
+| "re-read / read again" | 0.5 | 0.0 | looped-only |
+| "Alternatively" | 0.1 | 0.0 | ~absent |
+| **"However"** | **0.1** | **0.4** | **ANTI-correlated** |
+
+The report's Candidate 3 penalises ~50 curated markers including "Alternatively" and "However".
+Applied blindly here it would penalise a token that appears **4x more often in HEALTHY generations**
+and one that barely occurs. Any marker-penalty arm must use THIS list (Wait, actually, re-read),
+measured on our own traces.
+
+### Consequences for the report's roadmap
+
+* **Candidate 2 (DRY)** is the best first test: already native in `llama.cpp`, 0 bpw, and it
+  suppresses verbatim continuation regardless of whether an answer exists — the only candidate whose
+  value does not scale with PLAER.
+* **Candidate 1 (loop rescue)** needs an answer to extract, so discount its claimed -30..-45 pp by
+  ~0.4.
+* **Candidate 3 (marker penalty)** only with the corrected list above.
+* **Methodological guard:** Gate B's bars come from the FP teacher (commit .75 / loop .25 /
+  comp 2.40). A sampler change must be applied to the TEACHER too, or the comparison is unmatched.
+  And given the measured 0.396 loop-rate swing on an UNCHANGED model, arms must be seeded and run
+  one at a time — the report's advice to stack three interventions at once would confound attribution.
