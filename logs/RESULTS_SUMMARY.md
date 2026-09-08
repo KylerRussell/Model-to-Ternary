@@ -3072,3 +3072,15 @@ The FP teacher with the SAME sampler (3 paired seeds, queued). Gate B's bars (co
 comp 2.40) were measured on the teacher WITHOUT DRY, and ternary+DRY now loops at 0.1319 — BETTER than
 the teacher's no-DRY 0.25. Scoring a DRY'd student against a non-DRY'd teacher is not like-for-like;
 if DRY ships in the inference config it applies to both and the bar moves with it.
+
+### 13ah-i. Two harness gotchas worth not rediscovering
+
+* **`loop_gate.py` ternarises whatever you give it.** It defaults to `build_student()`, so pointing it
+  at an FP model silently RTN-ternarises it with no recovery. A first "FP teacher" arm scored
+  **commit 0.0000 / trunc 0.9792 / comp 1.3507** against the recorded reference of .75/.25/2.40 —
+  the log line `replaced 249 linears with packed TernaryScaleLinear` is the tell. **`MODEL_KIND=fp`
+  is REQUIRED** for any FP-side measurement; that is how the original reference was produced.
+* **Never gate a chained run on `pgrep -f`.** Zombie (`<defunct>`) processes match it forever in this
+  container — a teacher run chained on `while pgrep -f "dry_ab.sh"` waited on two dead shells and
+  idled the GPU **~6.5 h**. Gate on the completion ARTIFACT the driver writes (`.dry_done`). Same
+  family as the recurring `pkill -f` exit-144 problem, which matches this session's own shell.
