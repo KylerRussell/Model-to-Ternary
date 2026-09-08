@@ -158,8 +158,16 @@ with torch.no_grad():
             looped = (cr > TAU) or ng
             loops += looped
             if SAMPLES is not None:
+                # FULL text, not txt[:800]. 800 chars is ~200 tokens and the answer, when it exists,
+                # lands at 300-600 tokens -- so the old cap truncated away exactly the evidence
+                # needed to tell COMMITMENT failure (answer present, model won't stop) from
+                # PATH-FINDING failure (no answer ever derived). Those need opposite fixes:
+                # decoding-time control vs better weights. Generation is ~2.3h; analysis of the
+                # dump is free, so save everything and analyse offline.
                 sample_rows.append({"prompt": chunk[j], "comp_ratio": round(cr, 2), "ngram": ng,
-                                    "n_tok": len(gen_ids), "text": txt[:800]})
+                                    "n_tok": len(gen_ids), "looped": bool(looped),
+                                    "emitted_close": bool(emitted_close), "emitted_eos": bool(emitted_eos),
+                                    "text": txt})
             # truncated / no-commit: hit budget with no stop token
             no_stop = not (emitted_eos or (THINK and emitted_close and
                            len(gen_ids) - gen_ids.index(THINK_CLOSE) > 2))
