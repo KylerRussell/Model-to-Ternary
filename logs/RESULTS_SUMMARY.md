@@ -3013,3 +3013,62 @@ measured on our own traces.
   comp 2.40). A sampler change must be applied to the TEACHER too, or the comparison is unmatched.
   And given the measured 0.396 loop-rate swing on an UNCHANGED model, arms must be seeded and run
   one at a time — the report's advice to stack three interventions at once would confound attribution.
+
+---
+
+## 13ah. DRY passes 2 of 3 Gate B bars — and proves the commit failure is INDEPENDENT of looping
+## (2026-09-08)
+
+First decoding-time intervention, chosen because PLAER=0.400 (13ag) meant it was the only candidate
+whose value does not scale with PLAER. Implemented as a `LogitsProcessor` in the existing HF gate
+(Z-algorithm longest-suffix match, penalty `mult*base**(L-allowed)`, llama.cpp's sequence breakers),
+default OFF so every prior Gate B number stays reproducible — verified: `dry=off seed=0` reproduces
+the earlier run exactly.
+
+**Paired by seed** (same prompts, same base RNG), 3 seeds x N=48. Pairing matters: an UNCHANGED model
+swung loop_rate 0.396 across reruns (13w), and the paired loop deltas here agree to +/-0.043.
+
+| metric | DRY off | DRY on | delta | bar | seeds passing |
+|---|---|---|---|---|---|
+| **loop_rate** | 0.5625 | **0.1319** | **-0.4306 +/- 0.0434** | <=0.30 | **3/3 PASS** |
+| **mean_comp_ratio** | 3.7637 | **2.6194** | **-1.1443 +/- 0.4668** | <=3.1 | **3/3 PASS** |
+| commit_rate | 0.4444 | 0.4931 | +0.0486 +/- 0.1185 | >=0.68 | **0/3** |
+
+**Gate B overall: still 0/3 seeds.** Two bars solved decisively, one untouched — the commit delta's SD
+is 2.4x its mean, i.e. indistinguishable from zero.
+
+### The finding that matters more than the pass/fail
+
+| arm | loop | trunc | trunc but NOT looping | mean_think_len |
+|---|---|---|---|---|
+| DRY off | 0.5625 | 0.4722 | -0.09 (truncation ~ fully explained by looping) | 855 |
+| DRY on | 0.1319 | 0.3819 | **+0.2500** | **928** |
+
+**DRY converted "looping until budget" into "rambling until budget."** A quarter of rollouts now run
+to the 2048-token cap without repeating AND without emitting a stop token, and mean think length went
+UP (855 -> 928). Removing 76% of the looping moved commit by +0.049.
+
+**So the commit failure is NOT caused by looping.** It is an independent pathology: the model does not
+emit `</think>`. Every model of this failure we have been carrying — including the research report's
+("derives the answer, loops verifying until the budget is gone, so break the loop and it commits") —
+is wrong on this point. Break the loop and it does not commit; it produces non-repetitive verbosity
+instead.
+
+### Consequences
+
+* **Candidate 1 (loop rescue) is now nearly pointless**: with DRY applied only 13% of rollouts loop,
+  and PLAER says ~40% of those hold an answer, so its ceiling is ~5 pp of commit — against a 19 pp gap.
+* **The target is the stop-token decision itself.** And we already built the tool: §8e records a
+  post-hoc `</think>`-row lm_head calibration (`run_thinkcal.sh` + `fold_think_scale.py`) that scales
+  `scale[row*40:(row+1)*40]`, leaving assignments untouched — on-grid, TQ2_0-exact, **0 bpw**. It was
+  built and NOT applied because at the time "FINAL is already at FP-parity commit, so the smallest c
+  reaching parity is c=1.0". That premise no longer holds: with DRY the model is at commit 0.4931
+  against a 0.68 bar, and the blocker is precisely the `</think>` decision that tool targets.
+* DRY should be adopted regardless — it is 0 bpw, native in llama.cpp, and passes two bars.
+
+### Still pending
+
+The FP teacher with the SAME sampler (3 paired seeds, queued). Gate B's bars (commit .75 / loop .25 /
+comp 2.40) were measured on the teacher WITHOUT DRY, and ternary+DRY now loops at 0.1319 — BETTER than
+the teacher's no-DRY 0.25. Scoring a DRY'd student against a non-DRY'd teacher is not like-for-like;
+if DRY ships in the inference config it applies to both and the bar moves with it.
