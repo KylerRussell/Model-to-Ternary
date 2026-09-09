@@ -3245,3 +3245,38 @@ Stock DRY stays. The commit deficit is closed by the `</think>`-row gain (13aj),
 argument of a single `local` BEFORE assigning any of them, so `${c}` is unbound. It was chained with
 output to `/dev/null`, so it failed silently and idled the GPU ~25 min. **Chained drivers must keep
 their logs**; the earlier zombie-pgrep stall (13ah-i) was invisible for the same reason.
+
+---
+
+## 13al. c=1.20 confirmed on 3 seeds (+0.097 commit) — and TWO seed-0 claims retracted (2026-09-09)
+
+13aj's sweep was seed 0 only. Repeating c=1.20 on 3 paired seeds:
+
+| c=1.20 vs c=1.0, paired | delta | per-seed |
+|---|---|---|
+| **commit_rate** | **+0.0972 +/- 0.0120** | +0.083, +0.104, +0.104 |
+| loop_rate | +0.0069 +/- 0.0524 | -0.042, +0.062, 0.000 |
+| mean_comp_ratio | -0.0877 +/- 0.0430 | -0.136, -0.072, -0.054 |
+| mean_think_len | -182 +/- 72 | — |
+
+### Retractions
+
+* **The `</think>`-row gain does NOT reduce looping.** 13aj reported loop 0.1042 -> 0.0625 at c=1.20;
+  paired over 3 seeds the effect is **+0.0069 +/- 0.0524**, i.e. nothing. That was seed-0 noise. The
+  cleaner (and correct) division of labour: **DRY owns looping, the row gain owns commitment.**
+* **"c=1.25 is essentially at teacher parity (commit gap 0.028)" is NOT established.** Seed 0 only.
+  Absolute commit_rate has **SD 0.103** across seeds (c=1.0: 0.5417 / 0.3750 / 0.5625), so a
+  single-seed 0.6667 is consistent with anything from ~0.57 to ~0.77. c=1.25/1.30/1.40 remain
+  seed-0 provisional.
+
+### What IS established
+
+`c=1.20` buys **+0.097 +/- 0.012 commit**, 3/3 seeds, SD one eighth of the effect. It moves mean
+commit **0.4931 -> 0.5903**. Real, reproducible, and still **short of the 0.68 bar**.
+
+### The measurement lesson, again
+
+Gate B's ABSOLUTE rates are far noisier (commit SD 0.103) than its PAIRED deltas (SD 0.012 for the
+same quantity). Every claim of the form "this configuration passes the bar" needs multiple seeds;
+claims of the form "this change helps by X" survive on paired seeds. 13w established this for
+loop_rate and it was re-learned here for commit_rate — the same trap, one metric over.
