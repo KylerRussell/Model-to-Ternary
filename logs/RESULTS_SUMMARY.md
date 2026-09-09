@@ -3084,3 +3084,65 @@ if DRY ships in the inference config it applies to both and the bar moves with i
   container — a teacher run chained on `while pgrep -f "dry_ab.sh"` waited on two dead shells and
   idled the GPU **~6.5 h**. Gate on the completion ARTIFACT the driver writes (`.dry_done`). Same
   family as the recurring `pkill -f` exit-144 problem, which matches this session's own shell.
+
+---
+
+## 13ai. The matched-teacher arm QUALIFIES 13ah: DRY closes the loop gap, but "narrows" the commit
+## gap mainly by DEGRADING the reference (2026-09-09)
+
+Gate B's bars (commit .75 / loop .25 / comp 2.40) were measured on the FP teacher WITHOUT DRY. Since
+ternary+DRY reached loop 0.1319 — better than that no-DRY teacher — the comparison was no longer
+like-for-like, so the teacher was re-run with the SAME sampler, 3 paired seeds, N=48.
+(`MODEL_KIND=fp` is required; see 13ah-i.)
+
+| metric | teacher no-DRY | teacher +DRY | ternary no-DRY | ternary +DRY |
+|---|---|---|---|---|
+| loop_rate | 0.1806 | 0.0486 | 0.5625 | 0.1319 |
+| commit_rate | 0.8056 | **0.6944** | 0.4444 | 0.4931 |
+| mean_comp_ratio | 2.3823 | 2.3520 | 3.7637 | 2.6194 |
+
+### DRY has a real, reproducible COMMIT COST
+
+**Teacher commit falls -0.1111 +/- 0.0241 under DRY** (per-seed -0.125, -0.083, -0.125; 3/3 negative,
+SD one fifth of the effect), and trunc_rate rises by exactly +0.1111 — DRY converts commits into
+truncations. On a model with almost no looping to fix, only the cost is visible.
+
+Mechanism, and it is not subtle: **committing means restating.** "Therefore the answer is 60" repeats
+tokens the trace already contains, and DRY penalises precisely the continuations that extend earlier
+context. It taxes conclusion-writing along with degenerate looping.
+
+### What this does to 13ah's framing
+
+Both framings are defensible and they disagree, so both are recorded:
+
+* **Against the project's established ABSOLUTE bars** (the deploy gate): ternary+DRY passes loop and
+  comp, fails commit — 13ah's result stands as stated.
+* **Against a LIKE-FOR-LIKE teacher at the same sampler**: the teacher improves too, so the bars move
+  to <=0.0486 / >=0.6944 / <=2.3520 and ternary+DRY **fails all three** (gaps 0.083 / 0.201 / 0.267).
+
+Gap closure is the honest measure of what DRY bought:
+
+| gap (student - teacher) | no-DRY | with DRY | closed |
+|---|---|---|---|
+| loop_rate | 0.3819 | 0.0833 | **78%** |
+| mean_comp_ratio | 1.3814 | 0.2674 | **81%** |
+| commit_rate | -0.3611 | -0.2014 | 44% — but see below |
+
+**The commit "improvement" is mostly an artifact.** The student gained +0.049 while the teacher LOST
+0.111, so most of that 44% is the reference falling, not the model rising. Reporting it as a gain
+would be wrong.
+
+### Consequences
+
+1. **DRY is a genuine win on looping and compression** — 78-81% of those gaps closed, at 0 bpw. Adopt.
+2. **Stock DRY settings are mistuned for our binding constraint.** We used llama.cpp defaults
+   (mult 0.8, base 1.75, allowed 2). Commit is the metric we cannot afford to lose, and DRY costs
+   ~0.11 of it. A gentler configuration (lower multiplier, larger allowed_length) should keep most of
+   the loop benefit at less commit cost — worth a sweep.
+3. **The commit deficit is now unambiguous and isolated**: -0.201 against a like-for-like reference,
+   untouched by removing 76% of the looping (13ah). The `</think>`-row sweep now running targets
+   exactly this, and it is the right next lever.
+
+**Process note:** this arm was nearly skipped as a formality, and it inverted a headline conclusion.
+Measuring the reference under the same intervention as the treatment is not bookkeeping — DRY moved
+the reference by more than the treatment moved the model on the metric that matters.
