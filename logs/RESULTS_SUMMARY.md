@@ -3146,3 +3146,66 @@ would be wrong.
 **Process note:** this arm was nearly skipped as a formality, and it inverted a headline conclusion.
 Measuring the reference under the same intervention as the treatment is not bookkeeping — DRY moved
 the reference by more than the treatment moved the model on the metric that matters.
+
+---
+
+## 13aj. `</think>`-row gain: c=1.20 closes most of the remaining gap — and c=1.40 FAKE-PASSES the
+## whole of Gate B (2026-09-09)
+
+13ah isolated the blocker to the stop-token decision; `fold_think_scale.py` / `THINK_ROW_SCALE`
+(built in S8e, shelved because commit was at FP parity then) targets exactly that. Swept at the new
+operating point (DRY on), seed 0, N=48. Format: multiplies the per-block scales of lm_head row 248069
+— assignments untouched, on-grid, TQ2_0-exact, **0 bpw**.
+
+| c | commit | loop | comp | **think_len** | n_closed |
+|---|---|---|---|---|---|
+| 1.00 | 0.5417 | 0.1042 | 2.5568 | 999 | 27 |
+| 1.05 | 0.5417 | 0.1042 | 2.5403 | 948 | 28 |
+| 1.10 | 0.5833 | 0.0833 | 2.5158 | 917 | 30 |
+| **1.20** | **0.6250** | 0.0625 | 2.4205 | **737** | 32 |
+| 1.40 | **0.8958** | 0.0417 | 1.9396 | **224** | 45 |
+| *teacher +DRY* | *0.6944* | *0.0486* | *2.3520* | *586* | *33.3* |
+| *teacher no-DRY* | *0.8056* | *0.1806* | *2.3823* | *648* | *38.7* |
+
+### c=1.40 PASSES EVERY GATE B BAR AND IS WORTHLESS
+
+commit 0.8958 (bar >=0.68 — beats even the no-DRY teacher), loop 0.0417 (bar <=0.30), comp 1.9396
+(bar <=3.1), truncation zero. **All three bars pass.** And think_len is **224** against the teacher's
+586-648: the model has stopped reasoning and answers immediately. Compression falls BELOW the
+teacher's for the same reason — there is no trace left to repeat.
+
+**Gate B cannot see this.** Every metric it scores says PASS while the model has been lobotomised.
+The only exposure is think_len measured against the TEACHER's, which is why it was logged and the
+acceptance rule fixed in advance ("smallest c reaching the bar without collapsing think_len"), and
+why `run_thinkcal.sh`'s own docstring warns of premature closing. **Add think_len to Gate B**: a
+model whose think_len is far below the teacher's must fail regardless of the other three.
+
+### c=1.20 is the honest result, and it is a large one
+
+The student over-thinks by ~54% at c=1.0 (999 vs the teacher's 648). Rising c does not cause
+premature closing at first — it CORRECTS that bias, pulling think_len toward the teacher. At c=1.20,
+737 is still above the teacher's 586-648, so it has not collapsed.
+
+Gap to the like-for-like teacher (both with DRY):
+
+| gap | DRY only | DRY + c=1.20 | closed |
+|---|---|---|---|
+| commit_rate | 0.2014 | **0.0694** | 66% |
+| loop_rate | 0.0833 | **0.0139** | 83% |
+| mean_comp_ratio | 0.2674 | **0.0685** | 74% |
+
+Two 0-bpw decoding/format-safe changes take the ternary model from failing Gate B on every
+like-for-like metric to within 0.07 of the FP teacher on all three.
+
+### One nuance not to lose
+
+At c=1.20 the student closes 32/48 vs the teacher's 33.3/48 — nearly matched — yet commit is 0.6250
+vs 0.6944. It CLOSES about as often but some closes carry no valid answer. That is a different defect
+from failing to stop, and it is what the residual 0.07 consists of.
+
+### Pending
+
+* c=1.25 / 1.30 to bracket where think_len crosses the teacher's floor.
+* c=1.20 on 3 paired seeds before it is claimed (seed-0 scan only so far).
+* DRY strength sweep (13ai): stock settings cost the teacher 0.111 commit, and commit is the binding
+  constraint, so a gentler DRY may give some of that back.
