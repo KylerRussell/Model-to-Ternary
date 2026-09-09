@@ -3209,3 +3209,39 @@ from failing to stop, and it is what the residual 0.07 consists of.
 * c=1.20 on 3 paired seeds before it is claimed (seed-0 scan only so far).
 * DRY strength sweep (13ai): stock settings cost the teacher 0.111 commit, and commit is the binding
   constraint, so a gentler DRY may give some of that back.
+
+---
+
+## 13ak. DRY tuning: my "gentler DRY" hypothesis is FALSIFIED — stock settings are already best
+## (2026-09-09)
+
+13ai measured a reproducible commit COST from DRY on the FP teacher (-0.111 +/- 0.024) and reasoned
+that, since committing means restating and DRY penalises continuations that extend earlier context, a
+gentler configuration should keep the loop benefit at less commit cost. Swept on the student, seed 0:
+
+| mult | allowed | commit | loop | comp | trunc |
+|---|---|---|---|---|---|
+| **0.8** | **2** (stock) | **0.5417** | **0.1042** | **2.5568** | **0.3542** |
+| 0.4 | 2 | 0.3750 | 0.3958 | 3.0739 | 0.4792 |
+| 0.8 | 4 | 0.4167 | 0.3542 | 2.9555 | 0.4792 |
+| 0.8 | 8 | 0.3750 | 0.6250 | 3.2459 | 0.5625 |
+| 0.3 | 4 | 0.4583 | 0.5000 | 3.1176 | 0.5208 |
+
+**Every gentler setting is worse on BOTH metrics.** Stock llama.cpp (mult 0.8, allowed 2) wins
+outright. The hypothesis is dead.
+
+**Why it was wrong.** The teacher and the student have opposite dominant terms. On the TEACHER there
+is almost no looping, so only DRY's restatement tax is visible and it reads as a pure cost. On the
+STUDENT, looping *causes* truncation, and truncation *prevents* commitment — so suppressing loops
+raises commit by more than the restatement tax lowers it. Weakening DRY gives back the loop
+suppression and commit falls with it. Generalising the teacher's cost to the student was the error:
+**a cost measured on the reference does not transfer to a model whose failure mode is different.**
+
+Stock DRY stays. The commit deficit is closed by the `</think>`-row gain (13aj), not by detuning DRY.
+
+### Harness note (third of this kind)
+
+`tc_confirm.sh` died instantly on `local c=$1 s=$2 O=...${c}...` — under `set -u`, bash expands every
+argument of a single `local` BEFORE assigning any of them, so `${c}` is unbound. It was chained with
+output to `/dev/null`, so it failed silently and idled the GPU ~25 min. **Chained drivers must keep
+their logs**; the earlier zombie-pgrep stall (13ah-i) was invisible for the same reason.
