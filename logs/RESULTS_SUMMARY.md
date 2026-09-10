@@ -3412,3 +3412,25 @@ accuracy.
 * **Harness:** `loop_gate` ternarises whatever it is given — `MODEL_KIND=fp` is REQUIRED for FP arms.
   Gate chained runs on the completion ARTIFACT, never `pgrep -f` (zombies match forever; cost 6.5 h).
   Never redirect a chained driver to `/dev/null` (a silent `set -u` abort cost 25 min).
+
+### 13am-i. CORRECTION to 13am's framing: the 4B is a KNOWN-catastrophic testbed
+
+13am reported the ternary student at 7.1% acc|closed vs the FP teacher's 93.3% and framed it as a
+capability loss "at 1.78 bpw". That overstates it as a property of the APPROACH. §2 already recorded:
+
+| | ternary vs FP (MMLU-Pro) | relative |
+|---|---|---|
+| **4B** | 18.2 vs 47.7 | **-62%** |
+| **27B (unoptimised)** | 50.3 vs 61.7 | **-18%** |
+
+with the standing conclusion "27B absorbs ternary ~3.4x better ... **4B = mechanism testbed only**".
+The 4B is also the worst case for the head pathology specifically: embed+head is **24.0%** of the 4B
+against **9.2%** of the 27B (13x's cost table).
+
+So the correct statement is: **the 4B testbed has lost multi-step arithmetic (7.1% vs 93.3%)**, on a
+model already known to lose 62% relative MMLU where the 27B target loses 18%. The measurement stands;
+the extrapolation to the 27B does not. Everything else in 13am is unaffected — commit_rate still never
+checked correctness, and c=1.40 still passes every Gate B bar at 2.2% accuracy.
+
+**This has not been measured on the 27B.** Doing so is a prerequisite for any claim about the
+approach's viability, and for sizing the research question below.
