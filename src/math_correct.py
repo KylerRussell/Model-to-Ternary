@@ -98,6 +98,11 @@ def main():
                 print(f"THINK_ROW_SCALE={TRS} applied", flush=True)
                 break
 
+    if os.environ.get("DENSE_INFER", "0") == "1" and os.environ.get("MODEL_KIND", "tern") != "fp":
+        from densify import densify, densify_selftest   # AFTER the TRS edit above -- densify
+        densify_selftest(st)                            # snapshots scales, so order matters
+        densify(st)
+
     gen = dict(max_new_tokens=MAXNEW, pad_token_id=tok.eos_token_id)
     gen.update(do_sample=True, temperature=TEMP, top_p=0.95, top_k=20) if TEMP > 0 \
         else gen.update(do_sample=False)
@@ -139,7 +144,14 @@ def main():
                 closed += 1
                 tlens.append(g.index(THINK_CLOSE))
             rows.append({"gold": gt, "pred": pr, "ok": bool(ok), "n_tok": len(g),
-                         "closed": THINK_CLOSE in g})
+                         "closed": THINK_CLOSE in g,
+                         # Exact token ids, not just decoded text. Any sequence-level accumulation
+                         # metric (ExAccErr, first-divergence position) must teacher-force the
+                         # student's OWN token sequence, and decode -> re-encode is not guaranteed
+                         # round-trip safe. Prompt ids are stored un-padded (left padding stripped
+                         # via the attention mask) so the context can be rebuilt exactly.
+                         "prompt_ids": enc["input_ids"][j][enc["attention_mask"][j].bool()].tolist(),
+                         "gen_ids": g, "text": txt})
         print(f"   {min(i+BATCH,N_PROB)}/{N_PROB}  acc={correct/min(i+BATCH,N_PROB):.3f}", flush=True)
 
     res = {"model": E2E, "n": N_PROB, "seed": SEED, "temp": TEMP, "think_row_scale": TRS,

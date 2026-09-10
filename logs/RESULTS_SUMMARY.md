@@ -3434,3 +3434,137 @@ checked correctness, and c=1.40 still passes every Gate B bar at 2.2% accuracy.
 
 **This has not been measured on the 27B.** Doing so is a prerequisite for any claim about the
 approach's viability, and for sizing the research question below.
+
+### 13an. STAGE 0: the exposure-bias / error-accumulation hypothesis is FALSIFIED on the 4B
+
+Motivation. The deep-research report (research_prompts/reasoning_capability_prompt.md's answer)
+attributed the 70%-agreement-vs-7%-arithmetic gap to exposure bias -- compounding error along the
+student's own trajectory -- citing Arora et al. (arXiv:2204.01171), and made that mechanism the
+premise of its three top training candidates (DASD mixed-policy distillation, CausalOPD
+first-wrong-step supervision, "Silver Bullet" restart-from-first-error SFT). Before funding any of
+them, measure the mechanism. Cost: ~5 GPU-h (both cards) against ~28 h for one assignment campaign.
+
+**Method** (`src/exaccerr.py`). ONE model pair -- FP teacher vs the c=1.30 ternary student -- held
+fixed across every arm; the only thing that varies is WHICH MODEL GENERATED the tokens being
+teacher-forced. Student-visited states give the regret R, teacher-visited states give the oracle
+error epsilon, and the difference is the exposure-bias term. Per generated position: KL(p_FP||p_stu),
+argmax disagreement, FP-confident disagreement, and the FP teacher's own next-token entropy H_t.
+
+**Determinism first.** All three arms reproduced their 13am `mc_*` baselines EXACTLY -- teacher 18/48
+think_len 970, c1.30 2/48 think_len 596.6071428571429, c1.40 1/48 think_len 331 -- so the per-rollout
+`ok` labels genuinely belong to the traces analysed. `math_correct.py` now stores `prompt_ids` /
+`gen_ids` / `text` (exact ids: decode->re-encode is not round-trip safe).
+
+**Result, restricted to the reasoning span** (positions before `</think>`; every rollout runs to the
+full 2048 budget, so including trailing/looping text -- which is repetitive and therefore EASY to
+predict -- drags the late deciles down for reasons unrelated to the chain):
+
+| reasoning span | teacher (epsilon) | c1.30 (R) | c1.40 |
+|---|---|---|---|
+| mean KL(fp\|\|tern) | **0.6037** | **0.6923** | 0.7399 (full-budget) |
+| KL first->last decile | **1.132x (RISING)** | **0.877x (FALLING)** | 1.176x |
+| FP next-token entropy | 0.281 -> 0.470 | **0.794 -> 1.138** | 0.464 -> 1.055 |
+| entropy first->last | 1.671x | 1.433x | 2.274x |
+| pearson(d_t, H_t) | **+0.5394** | **+0.5395** | +0.5694 |
+
+**%ExAccErr = +14.7%** (span-restricted; +13.5% full-budget). Real, but small.
+
+**All three pre-registered falsifiers came back against the hypothesis.** The prediction was: KL grows
+on student traces, stays flat on teacher traces. What happened is the reverse -- the STUDENT declines
+(0.877x) and the TEACHER rises (1.132x) -- and the teacher's rise tracks its own entropy rise
+(1.671x). pearson(d_t,H_t) is +0.539 in EVERY arm: roughly a third of per-position KL variance is
+just local uncertainty, exactly as the overthinking-marker paper reports (rho=0.92 on its own
+measure). **Divergence along a reasoning chain does not compound here.**
+
+**Nor does the metric predict WHICH rollouts are right.** AUC of mean_kl separating correct from
+wrong|closed rollouts, within a checkpoint:
+
+| arm | n+ | n- | AUC(mean_kl) |
+|---|---|---|---|
+| teacher | 18 | 1 | 0.444 |
+| c1.30 | 2 | 26 | 0.135 (wrong direction) |
+| c1.40 | 1 | 45 | 0.978 (right direction) |
+| **pooled student** | **3** | **71** | **0.526 = chance** |
+
+The two student arms give OPPOSITE answers, each on 1-2 rollouts. Between arms the ordering is right
+(0.5663 < 0.6429 < 0.7399 vs acc|closed 0.9333 > 0.0714 > 0.0217) but that is n=3 and says only
+"teacher beats student", which the accuracies already said; `teacher_endorse_rate` does not even
+order correctly (c1.40 0.7008 > c1.30 0.6560 while being less accurate).
+
+**What survives, and it is sharper than the hypothesis it replaces.** At student-visited states the
+FP teacher's entropy is **0.794 nats in the FIRST decile against 0.281 on its own trajectories** --
+2.8x -- and stays 2.4-3x elevated throughout. The student is in genuinely more ambiguous territory
+*immediately*, not progressively. `first_conf_flip` for the student sits at position **0.27**: there
+is no localizable "first vulnerable step" to restart from. **The damage is done at token zero.**
+
+**Consequence for the report's candidates.** DASD, CausalOPD and Silver Bullet all require a locatable
+first wrong step to restart from. If divergence begins at position 0, "restart from the first error"
+degenerates into ordinary SFT, and the mechanism justifying all three is not the one operating here.
+Do not fund them on this premise.
+
+**Scope of the claim.** What is falsified is specifically: *error accumulation along the chain, as
+measured by KL-to-teacher at visited states, does not increase.* That test is well powered (48
+rollouts x ~2000 positions per arm). The correctness-prediction test is NOT (n+=3, as flagged before
+running it) -- "no signal detected" there, not "proven absent". A form of semantic compounding
+invisible to token-level KL is not excluded.
+
+**Caveats.** (1) `teacher_endorse_rate` (90.89% teacher vs 65.60% student) is partly confounded by
+DRY_MULT=0.8, which pushes tokens off the argmax and fires far more on the looping student -- treat it
+as an upper bound on the model's own divergence. The entropy and profile results are clean (FP entropy
+at visited states is unaffected by the student's sampler). (2) Only 15/48 teacher rollouts close
+`</think>` within 2048, so its span profile is dominated by unclosed rollouts.
+
+**Incidental:** c1.40 has one rollout that emits `</think>` as its FIRST token and 4 with think spans
+under 10 tokens (median 262). That is 13aj's collapse mechanism made concrete -- the row gain grows
+strong enough to close the block immediately.
+
+### 13an-i. Generation was 4x slower than it needed to be (`src/densify.py`)
+
+`TernaryScaleLinear.forward` is `w = self.dequant().to(x.dtype); F.linear(x, w, ...)` -- it rebuilds
+the dense weight from packed 2-bit codes on EVERY forward, i.e. once per layer per token, 2048 times
+per chain, for a weight that never changes. The GEMV is memory-bound, so this roughly triples its
+traffic. Measured cost: the ternary student takes **143 min** for 48 GSM8K problems while the bf16 FP
+teacher takes **60 min** on the SAME problems despite generating 40% MORE tokens per chain.
+
+`densify()` calls `dequant()` once per module and swaps in a plain `nn.Linear`. Not an approximation
+and not a re-quantization -- the exact tensor `forward` would have built, in the dtype it would have
+cast to, hoisted out of the loop. Asserted bit-identical (`tol=0`) by `densify_selftest`. Opt-in via
+`DENSE_INFER=1`; costs ~6.5 GB resident (packed ~1.5 GB -> dense ~8 GB). **INFERENCE ONLY** -- no
+gradient reaches `scale` afterwards. **Apply THINK_ROW_SCALE BEFORE densifying** or the edit is
+silently discarded. Note it helps GENERATION only: teacher-forced analysis already calls dequant once
+per forward, not per token.
+
+**GGUF was investigated as an alternative and rejected.** `src/tq164.py` is a SPEC ("the ggml/CUDA
+kernels must reproduce `decode_row` bit-for-bit") -- the kernels do not exist; `convert_hf_to_gguf_
+patched.py` supports only stock TQ1_0/TQ2_0, not TQ1_64; there is no llama.cpp checkout and no .gguf
+on this box; and the host is AVX-only (no AVX2/FMA), so CPU inference would likely be slower than the
+GPU path. Exporting to stock TQ2_0 instead is possible but fatal for this measurement: TQ2_0 (per-256
+block, fp16 d) is a different model numerically from TQ1_64 (per-64 group, uint8 sub-scale + fp16
+super), and generating in one stack while analysing in another is the class of bug that produced the
+zeroed FP teacher.
+
+**Also free and previously wasted:** GPU1 sat at 0% for the entire 2.4 h c1.30 run. `math_correct.py`
+hardcodes `cuda:0`, but `CUDA_VISIBLE_DEVICES` remaps it, so `output_sweep/arm.sh` pins one arm per
+card with no code change. Three arms went from ~5 h serial to ~2.7 h.
+
+### 13an-ii. SESSION STATUS update: what 13an changes about "what to do next"
+
+Section C above listed three next actions. 13an settles the third and reshapes the others.
+
+1. **Fix Gate B before optimising against it again** -- UNCHANGED and still the top item.
+   `commit_rate` must require a CORRECT answer on a scorable subset, and `think_len` vs the teacher's
+   must be a guard. 13an's incidental finding (c1.40 emitting `</think>` as its first token) is a
+   fresh demonstration that the gate is gameable.
+2. **Re-measure capability at a larger MAXNEW** -- now better motivated, not less. 13an shows only
+   15/48 teacher rollouts close within 2048, and the median teacher think_len is the budget itself.
+   `DENSE_INFER=1` (13an-i) makes this materially cheaper than it was.
+3. **"The gap to close is 70% agreement vs 7% arithmetic"** -- still true, but the mechanism named in
+   the research report is NOT the one operating. Error accumulation along the chain is falsified;
+   the student is off-trajectory from the FIRST decile, in states where the teacher's own entropy is
+   2.8x higher. Any candidate whose rationale is "compounding error" or "restart from the first wrong
+   step" should be re-screened against that before it costs GPU time.
+
+**New standing note.** The screen that predicted 5/6 failures last batch was "does the method assume a
+richer parameterisation than TQ1_64 provides". 13an adds a second screen of the same kind, for
+training-side proposals: **does the method assume a localizable first error?** Ours is at position
+0.27 -- there is nothing to localize. Both screens are answerable on paper, before any GPU time.
