@@ -3340,3 +3340,75 @@ agreement ~70%, Gate A 78.50% PASS, and GSM8K free-generation accuracy ~2-4%.
   the teacher's multi-step arithmetic. That gap is where the remaining work is — not in the sampler.
 * **Re-run the accuracy check at a larger MAXNEW** before quoting absolute numbers: at 2048 even the
   teacher truncates 69% of the time.
+
+---
+
+# ===== SESSION STATUS (2026-09-05 → 09-10): where the project actually stands =====
+
+Two campaigns ran back to back. Read this before planning the next one.
+
+## A. The 13-paper batch — 13/13 resolved, ZERO resolvable improvements
+
+| outcome | methods |
+|---|---|
+| confirmed win (earlier batch) | OPSA — but see the retraction in §13am |
+| already implemented here | AYOT (independently derived as `build_chat_calib`; calib is 50.0% `<think>`-bearing) |
+| wash (inside noise) | ICBQ (+0.89 SD), CAT-Q (+0.77 SD, once its alpha is frozen) |
+| real negative | NAP (-7.6 SD), QUASAR (-33 SD), SchurQuant (diverged) |
+| rejected on analysis | SoftWater, ECASQ, FlashQuant, ExTernD, SQuaT (null by construction) |
+| parked (need custom GEMV) | LCD, AWSRC |
+
+**The transferable output is a predictive screen, not a method.** Five failures shared one cause:
+*the paper assumes a richer parameterisation than ternary provides* — SchurQuant's continuous suffix,
+NAP's unfolded affines, CAT-Q's stably-learnable scale, QUASAR's separate code/dequantizer, SQuaT's
+feature lattice. **Four of five were diagnosable on paper or by unit test.** Ask that question first.
+
+**Noise floor (§13ac):** skeleton A/B SD **0.309 pp**; a single run resolves ~0.93 pp and nothing
+finer. This retracted ICBQ's apparent +0.44 pp win — a null repeat moved further.
+
+## B. The Gate B campaign — real behavioural gains, then a hard stop
+
+Adopted, both **0 bpw** and format-safe:
+* **DRY sampler** — loop -0.4306 +/- 0.0434, comp -1.1443, 3/3 seeds. Closes 78%/81% of the loop and
+  compression gaps to the FP teacher. Stock llama.cpp settings are optimal (§13ak falsified my own
+  "gentler DRY" hypothesis).
+* **`</think>`-row gain c=1.20** — commit +0.0972 +/- 0.0120, 3/3 seeds. On-grid, TQ2_0-exact.
+
+**Then §13am stopped the line.** Scored GSM8K under the identical decoding config:
+
+| | acc \| closed |
+|---|---|
+| FP teacher | **0.9333** |
+| ternary student (c=1.30, 28/48 closed) | **0.0714** |
+
+The ternary 4B retains ~70% teacher-forced agreement and **~7% of the teacher's multi-step
+arithmetic**. That is a CAPABILITY loss no sampler can fix. And `commit_rate` never checked
+correctness, so every commit gain in this program — OPSA's +0.083, DRY's, the row gain's +0.097 —
+measured the rate of *confidently-wrong completions*. c=1.40 passes **every** Gate B bar at 2.2%
+accuracy.
+
+## C. What to do next, in order
+
+1. **Fix the gate before optimising against it again.** `commit_rate` must require a CORRECT answer on
+   a scorable subset, or always be reported beside `acc|closed`. Add `think_len` vs the teacher's as a
+   guard (§13aj). Until then Gate B is gameable and has been gamed.
+2. **Re-measure capability at a larger MAXNEW.** At 2048 even the teacher truncates 69% of the time,
+   so the absolute accuracies above are floors, not capability figures.
+3. **The remaining work is upstream, not in decoding.** The gap to close is 70% teacher-forced
+   agreement vs ~7% free-generation arithmetic. E2E is still the largest lever ever measured here
+   (skeleton 56.27% -> ~70.7%, §13af) — larger than every paper method in the batch combined.
+4. Do NOT spend further GPU on sampler variants, ICBQ chunk sizes, or CAT-Q/QUASAR follow-ups.
+
+## D. Method notes that cost real time this session
+
+* **Local metrics have never once caught a failure here.** block-MSE endorsed a collapsed residual
+  stream, improved while SchurOpt destroyed the model, and pointed the WRONG way for QUASAR. What
+  caught every failure: the end-to-end referee, and cheap format invariants — sparsity histograms,
+  activation-norm probes, gradient-magnitude comparisons.
+* **Calibrate a detector on the positive class first.** PLAER read 0.120 (path-finding) from a
+  detector that fired on only 30% of SUCCESSFUL rollouts; recalibrated it read 0.400 (mixed).
+* **Absolute gate rates are ~9x noisier than paired deltas** (commit SD 0.103 vs 0.012). "Helps by X"
+  survives on pairing; "passes the bar" needs seeds.
+* **Harness:** `loop_gate` ternarises whatever it is given — `MODEL_KIND=fp` is REQUIRED for FP arms.
+  Gate chained runs on the completion ARTIFACT, never `pgrep -f` (zombies match forever; cost 6.5 h).
+  Never redirect a chained driver to `/dev/null` (a silent `set -u` abort cost 25 min).
