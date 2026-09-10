@@ -3280,3 +3280,63 @@ Gate B's ABSOLUTE rates are far noisier (commit SD 0.103) than its PAIRED deltas
 same quantity). Every claim of the form "this configuration passes the bar" needs multiple seeds;
 claims of the form "this change helps by X" survive on paired seeds. 13w established this for
 loop_rate and it was re-learned here for commit_rate — the same trap, one metric over.
+
+---
+
+## 13am. THE GATE IS MEASURING THE WRONG THING — GSM8K accuracy is ~0 while Gate B improves
+## (2026-09-10)
+
+Gate B scores commit / loop / compression and **never checks whether the committed answer is
+correct**. 13aj showed c=1.40 passing every bar with think_len collapsed to 224; think_len is only a
+proxy, so GSM8K was scored under the IDENTICAL decoding config (same harness, same DRY processor,
+same THINK_ROW_SCALE, same template/temp/seed), N=48, MAXNEW=2048.
+
+| arm | accuracy | closed | **acc \| closed** | think_len |
+|---|---|---|---|---|
+| **teacher (FP)** | 0.3750 | 15/48 | **0.9333** | 970 |
+| student c=1.00 | 0.0000 | 4/48 | 0.0000 | 584 |
+| student c=1.25 | 0.0208 | 17/48 | 0.0588 | 707 |
+| student c=1.30 | 0.0417 | 28/48 | 0.0714 | 597 |
+| student c=1.40 | 0.0208 | **46/48** | **0.0217** | 331 |
+
+### 1. The teacher's low overall score is a BUDGET artifact; its reasoning is intact
+
+**acc|closed 0.9333 vs acc|truncated 0.1212.** When the FP model finishes it is 93% correct; when
+truncated, 12%. So overall accuracy at MAXNEW=2048 mostly measures *whether it finished*, and
+**closing is the dominant term in correctness** — which is why commit_rate looked like the right
+thing to optimise.
+
+### 2. The student's reasoning is GONE, and that is not a budget artifact
+
+At c=1.30 the student closes 28/48 — a well-powered sample — and is right **7.1%** of the time. The
+same model at full precision is right **93.3%**. This is a CAPABILITY loss at 1.78 bpw, not a
+behavioural one, and **no decoding-time intervention can recover it.**
+
+### 3. Raising c is SAFE but empty
+
+acc|closed across c: 0.0000 -> 0.0588 -> 0.0714 -> 0.0217. Flat within noise up to c=1.30, so the
+row gain does NOT trade correctness for closure — that answers the c=1.25 vs c=1.30 question this run
+was built for. But it is flat because there is almost nothing to trade. **c=1.40 is the exception and
+the proof of the trap: it closes 46/48 and scores acc|closed 0.0217 — it converts nearly every
+rollout into a confidently-wrong completion, and PASSES EVERY GATE B BAR while doing it.**
+
+### 4. What this retracts
+
+Gate B's `commit_rate` counts a close plus a non-empty, non-looping answer. It never asked whether the
+answer was right. **Every commit gain in this program has been measured without that check** — OPSA's
++0.083, DRY's, the row gain's +0.097. Those are increases in the rate of *confidently-wrong
+completions*. They are not wrong as measurements; they are wrong as evidence of quality.
+
+Confirmed alongside the repo's standing warning that teacher-forced metrics are blind here: eval2k
+agreement ~70%, Gate A 78.50% PASS, and GSM8K free-generation accuracy ~2-4%.
+
+### 5. Consequences
+
+* **Add a correctness term to the gate.** `commit_rate` should require a CORRECT answer on a scorable
+  subset, or be reported alongside `acc|closed`. As it stands the gate is gameable, and c=1.40 games it.
+* **DRY and c=1.20 remain adopted** — 0 bpw, and they genuinely fix looping/compression/commit
+  behaviour. They just do not, and cannot, restore capability.
+* **The real question is upstream**: a 4B at 1.78 bpw retains 70% teacher-forced agreement and ~7% of
+  the teacher's multi-step arithmetic. That gap is where the remaining work is — not in the sampler.
+* **Re-run the accuracy check at a larger MAXNEW** before quoting absolute numbers: at 2048 even the
+  teacher truncates 69% of the time.
