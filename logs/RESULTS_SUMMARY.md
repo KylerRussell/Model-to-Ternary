@@ -3610,3 +3610,158 @@ at t=0 every arm sees the same prompt through the same FP model, so H_0 and d_0 
 arms. They did, to three decimals (0.150 / 2.096) -- which is why the surprisal gap could be trusted
 enough to be worth decoding, and why the harness was never a suspect. Build the invariant into the
 probe.
+
+### 13ao. The OUTPUT HEAD is not the fault location — tested to the upper bound, negative
+
+Hypothesis: ternarizing `lm_head` is what destroyed multi-step arithmetic. The 4B is the worst case
+for it (embed+head = **24.0%** of the 4B vs **9.2%** of the 27B), so if it is ever visible it is
+visible here. Tested by post-hoc module swap (`src/head_swap.py`), bf16 arm FIRST as the UPPER BOUND:
+int4 is strictly worse than bf16, so a null there kills the hypothesis for one arm instead of two.
+
+**The right denominator is the teacher-solvable subset.** The FP teacher solves 18/48; the ternary
+baseline's entire 2/48 sits on problems **the teacher itself fails** — lucky guesses, not recovered
+reasoning. So the honest baseline is **0/18**, and 13am's "7.1% acc|closed" overstates capability.
+
+| arm | bpw | Gate A | /48 | **teacher-solvable** | solved set |
+|---|---|---|---|---|---|
+| ternary baseline | 1.7812 | 70.21% | 2/48 | **0/18** | {37, 40} |
+| int4+g64 head | +12.7% | 71.10% | 2/48 | 2/18 | {1, 18} |
+| bf16 head | *not deployable* | 71.69% | 4/48 | 3/18 | {1, 16, 22, 42} |
+| **bf16 head + bf16 embed** | *not deployable* | 72.12% | 2/48 | **0/18** | {31, 40} |
+| FP teacher | — | — | 18/48 | 18/18 | — |
+
+**The full upper bound recovers NOTHING (0/18, McNemar p=1.000).** That is what makes this conclusive
+rather than merely underpowered: the 0 -> 2 -> 3 ladder looked monotone in head quality, but restoring
+STRICTLY MORE of the model returned it to 0. A real effect cannot reverse when given more information,
+so the ladder was noise — as was the near-disjoint solved-set reshuffle ({37,40} -> {1,16,22,42}).
+Every arm's hits cluster on problems the teacher fails.
+
+On Gate A, un-ternarizing all 24% that is embed+head recovers **1.91 pp of a 29.79 pp deficit (~6%)**,
+paired t=-4.88 — real, well-measured, and far too small to matter. Head error 54% (ternary) -> 10%
+(int4) -> 0% (bf16) maps to agreement 70.21 -> 71.10 -> 71.69: strongly sub-linear, low ceiling.
+
+**Do not spend bpw on the head.** This independently confirms the research report's argument from
+arXiv:2410.13857 — our activations are already bf16, so the dominant arithmetic-precision failure mode
+is already mitigated and head bits buy perplexity, not reasoning. **The damage is in the BODY.**
+
+Method notes: the basis guard in `swap_head` is load-bearing, not ceremony — the student's head has
+median per-row cosine **0.8554** to the rotated FP model and **-0.0012** to the unrotated one
+(orthogonal). Sourcing the wrong basis would load cleanly and emit noise, exactly the shape of the
+zeroed-teacher incident. `apply_think_gain` also fixed a latent no-op: the old inline loop silently
+skipped THINK_ROW_SCALE whenever the head was not a TernaryScaleLinear.
+
+### 13ap. LOOPING: solved on the Gate B harness, residual on GSM8K, and worth nothing
+
+At the current operating point (c=1.30), from the loop_gate run embedded in every trace capture:
+
+| metric | bar | student | FP teacher |
+|---|---|---|---|
+| loop_rate | <=0.30 | **6.2% (3/48)** | **6.2% (3/48)** |
+| commit_rate | >=0.68 | **77.1%** | 66.7% |
+| comp_ratio | <=3.1 | **2.26** | — |
+
+**All three Gate B bars pass, and the student matches the FP teacher EXACTLY on looping**, with lower
+truncation (10.4% vs 33.3%) and higher commit. Against the historical best (loop 0.5625 / commit
+0.4250 / comp 3.8287) the whole gap is closed.
+
+On GSM8K — longer and harder — residual looping remains, padding trimmed (see 13ap-i):
+
+| arm | loop% | paired McNemar vs baseline |
+|---|---|---|
+| FP teacher | **2.1%** (1/48) | 12 fixed, **0 newly broken**, p=0.0005 |
+| ternary baseline | **27.1%** (13/48) | — |
+| int4 head | 10.4% | 11 fixed, 3 broken, p=0.057 |
+| bf16 head | 16.7% | 11 fixed, 6 broken, p=0.332 |
+| bf16 head+embed | 8.3% | 12 fixed, 3 broken, p=0.035 |
+
+So "solved" is specific to the Gate B prompt set; GSM8K still shows **13x the teacher's loop rate**.
+Only the teacher comparison is clean (one-directional, 0 newly broken). The head arms LOOK helpful but
+are non-monotone (bf16 head worse than both int4 and bf16+embed) with 3-6 rollouts NEWLY broken each —
+the same reshuffling signature that proved to be noise on accuracy. Do not bank it.
+
+**The conclusion that matters: fixing looping bought ZERO accuracy.** The config that passes every
+Gate B bar scores 0/18 on teacher-solvable problems. Looping and capability are separate axes and we
+have now closed one while the other did not move.
+
+### 13ap-i. MEASUREMENT TRAP: `n_tok` is the PADDED length
+
+Batched generation pads finished sequences to the batch max with `<|im_end|>` — up to **1512 trailing
+tokens on a single rollout**, 74% of its length. Padding is maximally compressible and trivially trips
+any n-gram detector, so loop metrics computed on untrimmed text are garbage:
+
+| measured on | FP teacher loop% | comp mean |
+|---|---|---|
+| untrimmed (WRONG) | 31.2% | 5.04 |
+| **trailing EOS trimmed** | **2.1%** | **2.73** |
+
+The untrimmed numbers have the FP TEACHER failing its own compression bar. **Trim trailing EOS before
+computing anything from a `*_rows.json` dump.** Checked whether this contaminated 13an/13an-iii: think
+spans reaching into padding = **0/48** in both arms (closed rollouts close `</think>` BEFORE EOS;
+unclosed ones ran to budget without padding). **The R-eps result stands.**
+
+### 13ap-ii. DRY is CURBED — do not enable it for now
+
+DRY stays implemented and stays **OFF by default** (`DRY_MULT=0` in both `loop_gate.py` and
+`math_correct.py`); only the gitignored drivers passed 0.8. Do not pass it in new work. Rationale:
+
+* **It buys no capability.** 13am/13ao: the DRY+c=1.30 config scores 0/18 on teacher-solvable GSM8K.
+  Everything DRY fixes is behavioural.
+* **It confounds measurement.** `teacher_endorse_rate` (90.89% teacher vs 65.60% student, 13an) is
+  inflated by DRY pushing tokens off the argmax, and DRY fires far more on the looping student — so
+  that gap is an UPPER BOUND on the model's own divergence, not a clean reading.
+* Gate B is gameable and has been gamed (13aj: c=1.40 passes every bar at 2.2% accuracy), so a
+  sampler that improves Gate B metrics is exactly the kind of change that can look like progress and
+  not be. Re-enable only with a correctness-scored gate.
+
+### 13ap-iii. Two large, fixable inefficiencies found while measuring
+
+**1. Every `math_correct.py` run does TWO full 48-prompt generation sweeps.** `loop_gate.py` builds a
+student AND runs its entire gate at MODULE level, so `from loop_gate import DRYLogitsProcessor`
+executes all of it and throws the result away. Roughly **half of every GSM8K hour this project has
+spent** went to a discarded loop_gate run. (Silver lining: those discarded runs are what supplied
+13ap's Gate B numbers.) **Fixing it requires RE-BASELINING** — `math_correct` seeds the RNG before the
+import, and loop_gate then consumes RNG for 48 sampled generations, so every existing result's sample
+stream includes it.
+
+**2. `TernaryScaleLinear.forward` rebuilds the dense weight on EVERY forward** — once per layer per
+token, for a weight that never changes (13an-i). `src/densify.py` hoists it out; weights and GEMM
+outputs verified bit-identical on GPU at every shape tested including (16384, 4096).
+
+Together these are ~8x on generation: a 143-min arm is ~18 min of real work. That is the only reason a
+properly powered version of any of these questions (N_PROB ~200, multi-seed) is affordable.
+
+**A self-test must not be observable in the thing it tests.** The first `DENSE_INFER` validation came
+back 0/8 identical token sequences despite bit-identical weights — because `densify_selftest` drew its
+probe inputs from the GLOBAL RNG, shifting the sampling stream. Signature: all 8 diverging at tokens
+4-18, identical lengths, identical correctness labels. Fixed with a private generator; revalidation
+was still in flight at commit time and its result is NOT yet recorded.
+
+### 13ap-iv. SESSION STATUS update (2026-09-11): what is settled and what is open
+
+**Settled by measurement this session:**
+1. Error accumulation along the chain is NOT the mechanism (13an, 13an-iii). The R-eps gap SHRINKS
+   with position (+0.133 -> -0.030) and crosses zero at decile 8.
+2. There is no localizable first wrong step (`first_conf_flip` at position 0.27), which removes the
+   rationale for DASD, CausalOPD and Silver Bullet — three of the research report's five candidates.
+3. The output head is NOT the fault location (13ao). The bf16 head+embed upper bound recovers 0/18.
+4. Looping is solved on the Gate B harness and matches the FP teacher exactly (13ap) — and bought
+   zero accuracy.
+
+**The open question is unchanged and now better posed:** ~70% teacher-forced agreement coexists with
+**0/18** on the problems the teacher can actually solve. The divergence is distributed evenly across
+the chain, is not concentrated in the head or the embedding, does not compound, and has no
+localizable onset. **The damage is in the body, spread out.** No mechanism hypothesis currently
+justifies a 28 h campaign.
+
+**Two screens now exist, both answerable on paper before any GPU time:**
+* does the method assume a richer parameterisation than TQ1_64 provides? (predicted 5/6 failures)
+* does the method assume a localizable first error? (13an — ours is at position 0.27)
+
+**Next actions, in order:**
+1. **Fix Gate B to require correctness**, and report `acc|closed` beside every commit number. It is
+   gameable, has been gamed, and 13ao shows the baseline's hits are on problems the teacher fails.
+2. **Land the ~8x speedup** (13ap-iii) and re-baseline. This is the prerequisite for everything else:
+   at N_PROB=48 the student is right 0-4 times, so nothing below a large effect is resolvable.
+3. **Measure the 27B.** 13am-i flagged this as the real prerequisite and it has still never been done;
+   the 4B is a known-catastrophic testbed (-62% rel MMLU vs the 27B's -18%).
+4. Do NOT spend further GPU on samplers, head bpw, or candidates premised on error accumulation.

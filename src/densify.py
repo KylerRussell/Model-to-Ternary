@@ -65,9 +65,15 @@ def densify_selftest(model, n_test=3, tol=0):
     reproduced and the run must not proceed."""
     targets = [(n, m) for n, m in model.named_modules() if _is_tsl(m)][:n_test]
     assert targets, "no TernaryScaleLinear modules found — wrong model kind?"
+    # Draw the probe inputs from a PRIVATE generator. Using the global one consumes RNG and shifts
+    # the sampling stream, which silently changed every generated token downstream: the first
+    # DENSE_INFER validation diverged from the packed baseline at tokens 4-18 on 8/8 problems even
+    # though the weights and GEMM outputs are bit-identical at every shape. A self-test must not be
+    # observable in the thing it is testing.
+    gen = torch.Generator(device="cpu").manual_seed(1234)
     for name, m in targets:
         dev = m.scale.device
-        x = torch.randn(4, m.in_features, device=dev, dtype=torch.bfloat16)
+        x = torch.randn(4, m.in_features, generator=gen, dtype=torch.bfloat16).to(dev)
         ref = m(x)
         w = m.dequant().to(torch.bfloat16).contiguous()
         got = torch.nn.functional.linear(x, w, m.bias.to(torch.bfloat16)
