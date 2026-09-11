@@ -92,7 +92,7 @@ def analyse(prompt_ids, gen_ids):
     lf = fp(full.to(FP_DEV)).logits[0]                     # [L, V] bf16
     lt = st(full.to(T_DEV)).logits[0]
     lo, hi = P - 1, P + G - 1                              # positions predicting gen[0..G-1]
-    d, flip, conf, agree, ent = [], [], [], [], []
+    d, flip, conf, agree, ent, surp = [], [], [], [], [], []
     for a in range(lo, hi, CHUNK):
         b = min(a + CHUNK, hi)
         cf = lf[a:b].float().to(T_DEV)
@@ -106,6 +106,8 @@ def analyse(prompt_ids, gen_ids):
         # function of H_t, a KL profile says nothing about accumulation and everything about where
         # the hard choices sit in a chain -- so measure H_t here rather than argue about it later.
         ent.append((-(pf * lpf).sum(-1)).cpu())
+        emitted_c = torch.tensor(gen_ids[a - lo:b - lo], device=T_DEV)
+        surp.append((-lpf.gather(1, emitted_c.unsqueeze(1)).squeeze(1)).cpu())
         af, at = cf.argmax(-1), ct.argmax(-1)
         d.append(kl.cpu())
         fl = (af != at)
@@ -116,7 +118,8 @@ def analyse(prompt_ids, gen_ids):
         agree.append((af == emitted).cpu())
         del cf, ct, pf, lpf, kl
     del lf, lt
-    return (torch.cat(d), torch.cat(flip), torch.cat(conf), torch.cat(agree), torch.cat(ent))
+    return (torch.cat(d), torch.cat(flip), torch.cat(conf), torch.cat(agree), torch.cat(ent),
+            torch.cat(surp))
 
 
 def first_true(t):
@@ -129,6 +132,9 @@ prof_sum, prof_n = [0.0] * NBIN, [0] * NBIN                # over the whole 2048
 tprof_sum, tprof_n = [0.0] * NBIN, [0] * NBIN             # over the REASONING SPAN only
 eprof_sum = [0.0] * NBIN
 dh_x, dh_y = [], []                                        # pooled (d_t, H_t) for the correlation
+EARLY = int(os.environ.get("EARLY", "128"))
+e_kl, e_ent, e_surp = [0.0]*EARLY, [0.0]*EARLY, [0.0]*EARLY
+e_n = [0]*EARLY
 
 
 def _accum(vals, ent_vals, ssum, snum, esum=None):
@@ -147,8 +153,10 @@ for i, r in enumerate(rows):
     g = r["gen_ids"]
     if len(g) < 8:
         continue
-    d, flip, conf, agree, ent = analyse(r["prompt_ids"], g)
+    d, flip, conf, agree, ent, surp = analyse(r["prompt_ids"], g)
     G = len(d)
+    for t in range(min(EARLY, G)):
+        e_kl[t] += float(d[t]); e_ent[t] += float(ent[t]); e_surp[t] += float(surp[t]); e_n[t] += 1
     idx = (torch.arange(G, dtype=torch.float32) * NBIN / G).long().clamp(max=NBIN - 1)
     _accum(d, ent, prof_sum, prof_n)
     # EVERY rollout here runs to the full MAXNEW budget, but the chain ends at </think> (teacher
@@ -156,9 +164,15 @@ for i, r in enumerate(rows):
     # repetitive and therefore EASY to predict -- averaging it into the late deciles pushes KL down
     # for reasons that have nothing to do with the reasoning chain. Accumulation is a claim about
     # the chain, so it has to be measured over the chain.
+    # Drop the stock preamble before profiling. Both arms open with near-deterministic template
+    # text -- the teacher "Here's a thinking process that leads to the solution:", the student
+    # "Thinking Process:" -- and the two differ in CONTENT and LENGTH, so decile 1 otherwise
+    # compares different amounts of boilerplate rather than different reasoning. The R-eps gap is
+    # largest exactly at decile 1, so the headline claim has to survive removing it.
     close = g.index(THINK_CLOSE) if THINK_CLOSE in g else G
-    if close >= NBIN:
-        _accum(d[:close], ent[:close], tprof_sum, tprof_n, eprof_sum)
+    skip = int(os.environ.get("SKIP_PREFIX", "0"))
+    if close - skip >= NBIN:
+        _accum(d[skip:close], ent[skip:close], tprof_sum, tprof_n, eprof_sum)
     step = max(1, G // 256)                                # subsample for the pooled correlation
     dh_x.extend(d[::step].tolist())
     dh_y.extend(ent[::step].tolist())
@@ -182,7 +196,10 @@ eprof = [eprof_sum[b] / max(tprof_n[b], 1) for b in range(NBIN)]
 xs, ys = torch.tensor(dh_x), torch.tensor(dh_y)
 xs = xs - xs.mean(); ys = ys - ys.mean()
 rho = float((xs * ys).sum() / (xs.norm() * ys.norm()).clamp_min(1e-9))
-agg = {"rows": ROWS, "model": E2E, "fp": FP_DIR, "trs": TRS, "n": len(out),
+early = {k: [v[t]/max(e_n[t],1) for t in range(EARLY)]
+         for k, v in (("kl", e_kl), ("entropy", e_ent), ("surprisal", e_surp))}
+agg = {"early": early, "early_n": e_n,
+       "rows": ROWS, "model": E2E, "fp": FP_DIR, "trs": TRS, "n": len(out),
        "mean_kl": sum(o["mean_kl"] for o in out) / max(len(out), 1),
        "mean_kl_think": sum(o["kl_think_span"] for o in out) / max(len(out), 1),
        "profile_full": prof, "profile_think": tprof, "profile_entropy_think": eprof,
@@ -201,6 +218,11 @@ print(f"    first->last decile ratio: {tprof[-1]/max(tprof[0],1e-9):.3f}x")
 print(f"  FP next-token ENTROPY over the same span (nats):")
 print("    " + "  ".join(f"{p:.3f}" for p in eprof))
 print(f"    first->last decile ratio: {eprof[-1]/max(eprof[0],1e-9):.3f}x")
+print(f"  EARLY absolute positions (t=0 must MATCH across arms -- same prompt, same FP model):")
+for k in ("kl", "entropy", "surprisal"):
+    v = early[k]
+    pts = [0, 1, 2, 4, 8, 16, 32, 64, 127]
+    print(f"    {k:10s} " + "  ".join(f"t{t}={v[t]:.3f}" for t in pts if t < EARLY))
 print(f"  pearson(d_t, H_t) pooled over positions       : {rho:+.4f}"
       f"   <- if this is high, the KL profile IS an entropy profile")
 ok = [o for o in out if o["ok"]]

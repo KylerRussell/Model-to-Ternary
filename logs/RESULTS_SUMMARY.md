@@ -3568,3 +3568,45 @@ Section C above listed three next actions. 13an settles the third and reshapes t
 richer parameterisation than TQ1_64 provides". 13an adds a second screen of the same kind, for
 training-side proposals: **does the method assume a localizable first error?** Ours is at position
 0.27 -- there is nothing to localize. Both screens are answerable on paper, before any GPU time.
+
+### 13an-iii. The R-eps GAP: the clean statistic, plus a retraction
+
+13an used each arm's KL profile separately. The right statistic is the **gap** between them: exposure
+bias predicts the excess R-eps WIDENS with position. Measured on the reasoning span, per decile:
+
+| decile | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 |
+|---|---|---|---|---|---|---|---|---|---|---|
+| teacher (eps) | 0.577 | 0.568 | 0.563 | 0.598 | 0.651 | 0.615 | 0.645 | 0.648 | 0.642 | 0.653 |
+| student (R) | 0.710 | 0.730 | 0.718 | 0.708 | 0.687 | 0.671 | 0.675 | 0.632 | 0.628 | 0.623 |
+| **GAP R-eps** | **+0.133** | +0.162 | +0.154 | +0.110 | +0.036 | +0.055 | +0.030 | -0.015 | -0.014 | **-0.030** |
+
+**The excess shrinks monotonically and crosses zero at decile 8.** By the end of a chain the student
+at its OWN states is closer to the teacher than the teacher is at its own states. Accumulation
+predicts the exact opposite. This gap also cancels the entropy trend to first order (both arms share
+it), so it is the statistic to quote, not either profile alone.
+
+**Robustness to the preamble confound** (`SKIP_PREFIX=32`, below): gap decile1 **+0.146** ->
+decile10 **-0.031**, student first->last **0.830x**. Stripping boilerplate makes the conclusion
+STRONGER, not weaker.
+
+**RETRACTION.** An absolute-early-position probe (EARLY=128) showed KL 2.096 nats and FP surprisal
+4.881 at t=0 -- at an IDENTICAL context, since every arm shares the prompt -- and I was about to
+report the student's first-token distribution as severely wrong. Decoding the tokens killed it:
+
+| | first emitted token | continuation |
+|---|---|---|
+| teacher | `'Here'` **46/48** | "Here's a thinking process that leads to the solution:" |
+| student | `'Thinking'` **47/48** | "Thinking Process:" |
+
+It is a **stock-preamble style flip**, not a reasoning error; both open the same numbered list. This
+also explains the wildly oscillating early entropies (0.001-0.06 at many positions): positions 0-30
+are near-deterministic template text. **The absolute-early-position probe is contaminated by
+boilerplate and does not isolate reasoning** -- use the decile gap instead. (Incidental: student
+rollout 1 reads `'Thinking Process:\n\nThinking Process:\n\n1. **Analyze'` -- the loop pathology
+firing at token 4.)
+
+**Method note worth keeping.** The probe carried a built-in correctness check that paid for itself:
+at t=0 every arm sees the same prompt through the same FP model, so H_0 and d_0 MUST agree across
+arms. They did, to three decimals (0.150 / 2.096) -- which is why the surprisal gap could be trusted
+enough to be worth decoding, and why the harness was never a suspect. Build the invariant into the
+probe.
