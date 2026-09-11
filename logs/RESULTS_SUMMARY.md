@@ -3871,3 +3871,68 @@ because the original comparison was confounded. Any 4B-vs-27B claim of ours need
 GROUP=64 is "the scale granularity the model is trained at". Re-deriving per-64 scales from a
 g256-trained on-grid model is safe (assignments do not move, granularity only gets finer) but it is an
 UNVERIFIED assumption sitting in the export path. Check before exporting.
+
+### 13as. RE-BASELINE under the fixed gate, DRY OFF — the first gate verdict that means anything
+
+Harness: refactored loop_gate (13aq-i, regression-clean), DENSE_INFER validated 8/8 token-identical
+against the packed path, DRY **off** (13ap-ii), scored subset of 24 GSM8K problems, seed 0.
+**These numbers are NOT comparable to any pre-13aq result** — removing the discarded loop_gate sweep
+changed the RNG stream. That is what re-baselining means.
+
+| | **teacher (FP)** | **base c=1.30** | **base c=1.00** |
+|---|---|---|---|
+| loop_rate (<=0.30) | 12.5% PASS | 45.8% FAIL | 52.1% FAIL |
+| trunc_rate | 20.8% | 18.8% | 52.1% |
+| commit_rate (>=0.68) | 79.2% PASS | 66.7% FAIL | 45.8% FAIL |
+| comp_ratio (<=3.1) | 2.37 PASS | 3.00 PASS | 3.43 FAIL |
+| **commit_correct_rate (>=0.20)** | **50.0% PASS** | **0.0% FAIL** | **0.0% FAIL** |
+| think_len/teacher (>=0.75) | — | **0.631 FAIL** | *(skipped — see 13as-i)* |
+| scored accuracy | **58.3% (14/24)** | 4.2% (1/24) | 4.2% (1/24) |
+| scored closed_rate | 50.0% | 41.7% | **0.0%** |
+| **VERDICT** | **PASS** | **FAIL** | **FAIL** |
+
+**1. The new bar worked on its first real use.** `commit_correct_rate` is **0.0%** for both ternary
+arms against the teacher's 50.0% — zero correct commits out of 24. Every commit number this project
+has optimised against (OPSA +0.083, DRY's, the row gain's +0.097) was measuring a quantity that is
+empty once correctness is required.
+
+**2. The collapse guard FIRED, automatically, for the first time.** base130 think_len/teacher = 0.631
+(594 vs 940). That is 13aj's failure mode — the one that let c=1.40 pass every behavioural bar at 2.2%
+accuracy — caught by the gate instead of by hand afterwards.
+
+**3. The c=1.00 control produced the sharpest finding: `closed_rate 0.0%` on the scored subset.** With
+neither DRY nor the `</think>` row gain, the model closes the think block on **none** of 24 GSM8K
+problems within 2048 tokens. The row gain is not a commit-rate tweak — it is load-bearing for the
+model closing AT ALL on hard prompts. (Its trunc_rate is 52.1%, vs 18.8% at c=1.30.)
+
+**4. What DRY was actually worth, now measurable both ways.** On base130, removing it moves loop
+6.2% -> **45.8%** and comp 2.26 -> 3.00. Large, real, behavioural. And under the fixed gate BOTH
+configurations score **zero** correct commits. DRY bought behaviour, not capability — 13ap-ii asserted
+this; this measures it.
+
+**5. Teacher accuracy is 58.3% here vs 37.5% at N=48 WITH DRY (13am).** Different subset (24 vs 48)
+and different sampler, so not a clean comparison — but it is a hint that DRY was costing the TEACHER
+accuracy too, which would independently support curbing it. Worth a paired test if DRY is ever
+reconsidered.
+
+### 13as-i. A HOLE IN MY OWN GATE, found by the run that exercised it
+
+The `think_len/teacher` check was appended only `if stl is not None`, so an arm with **zero closers
+silently dropped the collapse guard** — exactly what base100 did. It still FAILED on three other bars,
+so there was no false pass, but **a check that disappears in the worst case is not a check**, and the
+worst case is precisely when a guard matters.
+
+Fixed by enforcing an invariant: **the number of evaluated checks must not depend on model
+behaviour.** Concretely:
+* `scored_closed_rate >= CLOSED_FLOOR` (0.10) is now ALWAYS present when `N_SCORE>0`. An arm that
+  never closes cannot be assessed for premature closing, so this is the check that covers that case.
+* When `think_len` is undefined (zero closers) the gate PRINTS an explicit `N/A ... undefined - zero
+  closers (failure carried by scored_closed_rate)` line rather than omitting it. Nothing vanishes.
+* Verified by a standalone replication test: a zero-closer arm still faces >=2 scored checks and
+  cannot reduce its own check count by behaving worse; `N_SCORE=0` still forces `UNSCORED`.
+
+**Also added:** `SCORE_ROWS` dumps per-problem scored results (gold/pred/ok/closed/committed/
+think_len). Without them 13ao's teacher-solvable denominator cannot be applied offline, and raw
+accuracy overstates capability — every ternary "hit" checked so far has landed on a problem the FP
+teacher itself fails. **The single 1/24 in both arms above should be treated as unverified** until
+re-run with row dumps.

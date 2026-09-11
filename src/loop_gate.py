@@ -238,7 +238,8 @@ if __name__ == "__main__":
     # the loop/comp/trunc/commit numbers above are computed over exactly the same rollouts as before.
     N_SCORE = int(os.environ.get("N_SCORE", "24"))
     SCORE_MAXNEW = int(os.environ.get("SCORE_MAXNEW", "2048"))   # GSM8K needs room to close
-    sc = {"n": 0, "correct": 0, "closed": 0, "commit": 0, "commit_correct": 0, "think_lens": []}
+    sc = {"n": 0, "correct": 0, "closed": 0, "commit": 0, "commit_correct": 0, "think_lens": [],
+          "rows": []}
     if N_SCORE > 0:
         from datasets import load_dataset
         from answer_score import gold, pred, same
@@ -270,6 +271,13 @@ if __name__ == "__main__":
                 sc["commit"] += committed; sc["commit_correct"] += (committed and ok)
                 if closed:
                     sc["think_lens"].append(g.index(THINK_CLOSE))
+                # per-problem rows: without these the teacher-solvable denominator (13ao) cannot be
+                # applied, and raw accuracy overstates capability because the ternary model's hits
+                # have historically landed on problems the FP teacher itself fails.
+                sc["rows"].append({"gold": gold(r["answer"]), "pred": pred(txt), "ok": bool(ok),
+                                   "closed": bool(closed), "committed": committed,
+                                   "n_tok": len(g),
+                                   "think_len": g.index(THINK_CLOSE) if closed else None})
             print(f"  scored {sc['n']}/{N_SCORE}  correct={sc['correct']} "
                   f"commit_correct={sc['commit_correct']}", flush=True)
 
@@ -315,16 +323,26 @@ if __name__ == "__main__":
     CORRECT_BAR = float(os.environ.get("CORRECT_BAR", "0.20"))
     TEACHER_TL = float(os.environ.get("TEACHER_THINK_LEN", "0") or 0)
     THINK_FLOOR = float(os.environ.get("THINK_FLOOR", "0.75"))
+    CLOSED_FLOOR = float(os.environ.get("CLOSED_FLOOR", "0.10"))
     checks = [("loop_rate", loops / n, "<=", LOOP_BAR),
               ("commit_rate", commits / n, ">=", COMMIT_BAR),
               ("comp_ratio", mean_cr, "<=", COMP_BAR)]
     if sn:
         checks.append(("commit_correct_rate", sc["commit_correct"] / sn, ">=", CORRECT_BAR))
+        # An arm that NEVER closes cannot be assessed for premature closing, so this check is what
+        # covers that case, and it is always present.
+        checks.append(("scored_closed_rate", sc["closed"] / sn, ">=", CLOSED_FLOOR))
         # think_len guard (13aj): c=1.40 passed every behavioural bar while think_len COLLAPSED to
         # 224 against the teacher's 586-648 -- it had stopped reasoning. A behavioural gate cannot
-        # see that; only a length comparison against the teacher can.
-        if TEACHER_TL > 0 and stl is not None:
-            checks.append(("think_len/teacher", stl / TEACHER_TL, ">=", THINK_FLOOR))
+        # see that; only a length comparison against the teacher can. It is only DEFINED when the
+        # model closed at least once; when it did not, say so out loud rather than omitting the line,
+        # and let scored_closed_rate carry the failure.
+        if TEACHER_TL > 0:
+            if stl is not None:
+                checks.append(("think_len/teacher", stl / TEACHER_TL, ">=", THINK_FLOOR))
+            else:
+                print(f"  N/A   think_len/teacher      undefined - zero closers "
+                      f"(failure carried by scored_closed_rate)")
     ok_all = all((v <= b) if op == "<=" else (v >= b) for _, v, op, b in checks)
     for name, v, op, b in checks:
         good = (v <= b) if op == "<=" else (v >= b)
@@ -344,6 +362,9 @@ if __name__ == "__main__":
             res["dry_base"] = float(os.environ.get("DRY_BASE", "1.75"))
             res["dry_allowed"] = int(os.environ.get("DRY_ALLOWED", "2"))
         json.dump(res, open(os.environ["GATE_OUT"], "w"), indent=1)
+        if os.environ.get("SCORE_ROWS"):
+            json.dump(sc["rows"], open(os.environ["SCORE_ROWS"], "w"), indent=1)
+            print("wrote", os.environ["SCORE_ROWS"])
         print("wrote", os.environ["GATE_OUT"])
     if SAMPLES is not None:
         json.dump(sample_rows, open(SAMPLES, "w"), indent=1)
