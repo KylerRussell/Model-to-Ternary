@@ -3765,3 +3765,109 @@ justifies a 28 h campaign.
 3. **Measure the 27B.** 13am-i flagged this as the real prerequisite and it has still never been done;
    the 4B is a known-catastrophic testbed (-62% rel MMLU vs the 27B's -18%).
 4. Do NOT spend further GPU on samplers, head bpw, or candidates premised on error accumulation.
+
+### 13aq. GATE B FIXED: it can no longer report PASS without checking correctness
+
+13am/13aj: `commit_rate` scored whether an answer was EMITTED, never whether it was RIGHT, so every
+commit gain this project recorded (OPSA +0.083, DRY's, the row gain's +0.097) measured the rate of
+CONFIDENTLY-WRONG completions, and c=1.40 passed every bar at 2.2% accuracy. Changes:
+
+* **Scored GSM8K subset** (`N_SCORE`, default 24) runs AFTER the main prompts, in its own batches
+  with its own budget (`SCORE_MAXNEW`), so loop/trunc/commit/comp are computed over exactly the same
+  rollouts as before and stay comparable to history.
+* **New bar `commit_correct_rate`** — committed AND correct.
+* **`think_len/teacher` guard** (`TEACHER_THINK_LEN`, floor 0.75). 13aj's collapse was invisible to
+  every behavioural metric; only a length comparison against the teacher catches it.
+* **`N_SCORE=0` yields verdict `UNSCORED`, explicitly NOT a pass.** This is the structural part: the
+  gate cannot be gamed the way c=1.40 gamed it, because it cannot return PASS without a correctness
+  measurement at all.
+* The scored pass reuses the existing padding trim, so 13ap-i cannot reappear there.
+
+### 13aq-i. The 8x landed, and the refactor is REGRESSION-CLEAN
+
+`DRYLogitsProcessor` -> `src/dry.py`, GSM8K scoring -> `src/answer_score.py` (both side-effect free);
+loop_gate's script body now sits under `if __name__ == "__main__":`. The body was INDENTED rather than
+moved into a function, so every name stays at module scope and the gate's semantics cannot shift.
+
+Verified: importing loop_gate now consumes **no RNG**, builds **no model**, and still exports
+`DRYLogitsProcessor`. And run as a script it reproduces the pre-refactor numbers EXACTLY:
+
+| | pre-refactor | refactored |
+|---|---|---|
+| counts | loop=3 trunc=5 commit=37 | **loop=3 trunc=5 commit=37** |
+| loop / commit / comp / think_len | 6.2% / 77.1% / 2.26 / 492 | **6.2% / 77.1% / 2.26 / 492** |
+
+So only the IMPORT path changed. Every `math_correct.py` run now does one generation sweep, not two.
+
+### 13aq-ii. densify: bit-identical math, and the SECOND RNG leak
+
+DENSE_INFER diverged from the packed path twice. Both times the math was innocent:
+
+    H(a) logit delta max=0.000e+00  exact=True  argmax flips 0/128
+    H(b) RNG consumed by densify:   cpu=False  cuda=TRUE     <- the actual cause
+
+`nn.Linear.__init__` runs `kaiming_uniform_` ON THE TARGET DEVICE before the real weight is assigned
+— 249 times — consuming CUDA RNG and shifting the sampling stream. The first fix (13an-iii) only
+covered the selftest's CPU generator and missed this entirely. Both entry points are now wrapped in a
+`_frozen_rng()` context that saves and restores CPU and CUDA state, which is robust to whatever gets
+added later. Confirmed after: `cpu_changed=False cuda_changed=False`, logits still exact.
+
+**THE RULE: setup and instrumentation must be INVISIBLE to the thing they prepare.** Two separate
+bugs of this exact shape in one day. Symptom to recognise: every sequence diverging at an early
+position with identical lengths and near-identical aggregate metrics — that is a perturbed sample
+stream, never wrong arithmetic. Diagnose it by comparing LOGITS (should be exact) and RNG STATE
+(should be unchanged), not by staring at outputs.
+
+### 13ar. SCREEN: OneBit AI, "Scaling Post-Training Ternarization to Qwen3-8B" (arXiv:2609.09240)
+
+A close sibling: post-training ternarization of Qwen3-8B, weight-only A16, single 12 GB card.
+Pipeline KOTMS rotation -> E2M-ATQ -> GPTQ -> W1.58A16 -> lattice packing -> packed kernel.
+
+**REPRESENTATION: not adoptable. Three independent §0 fails.** `W = (mu + a0*T0 + a1*T1) (*) M`:
+
+| needs to vary | TQ1_64 |
+|---|---|
+| `mu = rowmean(W)`, **mu != 0** | no zero-point — this is an offset |
+| second plane `a1*T1` for 3.6% of blocks | ONE scale, no per-weight side code (the QUASAR failure) |
+| 4 disjoint salience masks, orders [2,2,1,1] | uniform superblock layout; ggml requires it |
+| embed / LM head / norms / KV cache stay FP16 | we ternarize embed+head for footprint parity |
+
+Their 1.64 bpw covers **linear projections only** (252 of them). The artifact is **8.24 GiB for an 8B
+= ~8.85 bits/parameter**. They say so themselves ("Avoid: *the whole model is 1.64 bits/parameter*").
+Our 1.7812 bpw counts everything. **We are not behind them on size; we are measuring a different
+thing.**
+
+**WHAT IS WORTH TAKING:**
+
+1. **Their §12 failure mode does NOT reach us — verified, not assumed.** Their first 8B checkpoint was
+   fake-quantized (low-bit values in FP16 tensors, 16.9 GB) and post-hoc lattice fitting gave **50.5%
+   relative error, PPL ~18,477**, because "the quantizer's discrete supports and activation-domain
+   scales are not uniquely recoverable from the final floating reconstruction." **Our checkpoint is
+   the same shape of artifact** (10.6 GB of on-grid values in dense tensors), so the TQ1_64 export
+   could have had this bug. Round-tripped six tensors: **max error 0.000e+00, exactly 3 trit levels,
+   ~45.6% zeros.** One scale, no offset, no masks, no second plane => uniquely recoverable.
+2. **Independent confirmation of densify.** Their 4096x2560 GEMV microbenchmark: FP16 cuBLAS
+   **0.0451 ms**, packed Triton **0.2082 ms**, **chunk-unpack + cuBLAS 0.8924 ms (19.8x)**. That last
+   is exactly what `TernaryScaleLinear.forward` does. Also prices the future: a good packed kernel
+   still lands ~4.6x off cuBLAS.
+3. **ADOPT chance-corrected retention** `R = (A_s - B)/(A_t - B)`, B = max(chance, majority floor).
+   They rejected raw accuracy ratios "because chance floors differ." This is the principled version
+   of 13ao's teacher-solvable denominator, and it is comparable across papers.
+4. **The strongest external support yet for prioritising the 27B.** Their §9 is *"Mathematics:
+   Degraded, Not Destroyed"*: they pre-registered that math would be at/below chance because **their
+   4B math tasks had approached chance** — our exact situation at 0/18. The 8B contradicted it, all
+   six subjects above chance. Verbatim: *"increasing model size changes several low-bit failures from
+   near-destruction to measurable residual capability."* Matched 4B->8B retention **69.6% -> 78.5%
+   (+8.9)**, MMLU +10.8, ARC-Easy +29.2. Independent pipeline, independent quantizer, same direction
+   as 13am-i — and our target is well past 8B.
+5. **Convergent failure modes** (§15): wrong model identifiers producing plausible numbers (our zeroed
+   teacher), artifacts that "looked low-bit but had never been ternarized" (our nnz/uniq check), a
+   misplaced `no_grad` inflating memory 1.99 -> 10.45 GiB (our 146 GB retention).
+
+**Method to steal:** they had to re-benchmark the 4B under the 8B protocol (`percdamp=0.01`, n=500)
+because the original comparison was confounded. Any 4B-vs-27B claim of ours needs the same treatment.
+
+**Open discrepancy found while checking:** `config.py:117` sets `BLOCK_SIZE=256`, but `tq164.py` says
+GROUP=64 is "the scale granularity the model is trained at". Re-deriving per-64 scales from a
+g256-trained on-grid model is safe (assignments do not move, granularity only gets finer) but it is an
+UNVERIFIED assumption sitting in the export path. Check before exporting.

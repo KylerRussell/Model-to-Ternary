@@ -26,7 +26,8 @@ torch.cuda.manual_seed_all(SEED)
 
 from transformers import AutoModelForCausalLM, AutoTokenizer, LogitsProcessorList
 from e2e_qp_distill import build_student, BLOCK_SIZE
-from loop_gate import DRYLogitsProcessor          # identical penalty to the gate
+from dry import DRYLogitsProcessor                # identical penalty; side-effect-free
+from answer_score import gold, pred, same         # extracted verbatim; see answer_score.py
 from datasets import load_dataset
 
 ORIG = os.environ.get("ORIG", "output_4b/untied_4b")
@@ -38,43 +39,6 @@ TEMP = float(os.environ.get("TEMP", "0.6"))
 BATCH = int(os.environ.get("BATCH", "8"))
 TRS = float(os.environ.get("THINK_ROW_SCALE", "1.0"))
 THINK_CLOSE = 248069
-
-NUM = re.compile(r"-?\d[\d,]*\.?\d*")
-
-
-def gold(ans):
-    return ans.split("####")[-1].strip().replace(",", "")
-
-
-def pred(text):
-    """Answer = last \\boxed{} if present, else the last number AFTER </think> (the answer block),
-    else the last number anywhere. Matching the gate's convention that the committed answer is what
-    follows the close tag."""
-    b = text.rfind(r"\boxed")
-    if b >= 0:
-        j = text.find("{", b)
-        if j >= 0:
-            depth, k = 0, j
-            for k in range(j, len(text)):
-                depth += (text[k] == "{") - (text[k] == "}")
-                if depth == 0:
-                    break
-            m = NUM.findall(text[j:k + 1])
-            if m:
-                return m[-1].replace(",", "").rstrip(".")
-    tail = text.split("</think>")[-1] if "</think>" in text else text
-    m = NUM.findall(tail) or NUM.findall(text)
-    return m[-1].replace(",", "").rstrip(".") if m else None   # "42." -> "42"
-
-
-def same(a, b):
-    if a is None:
-        return False
-    try:
-        return abs(float(a) - float(b)) < 1e-6
-    except ValueError:
-        return a.strip() == b.strip()
-
 
 def main():
     tok = AutoTokenizer.from_pretrained(ORIG, trust_remote_code=True)

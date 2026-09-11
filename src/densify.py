@@ -24,8 +24,33 @@ gradient reaches `scale` any more. Never densify a model that is about to be tra
 ORDER MATTERS: apply THINK_ROW_SCALE (or any other scale edit) BEFORE densifying, or the edit is
 silently discarded -- densify snapshots the scales as they stand.
 """
+import contextlib
+
 import torch
 import torch.nn as nn
+
+
+@contextlib.contextmanager
+def _frozen_rng():
+    """Make a block invisible to the global RNG.
+
+    densify constructs nn.Linear modules, whose __init__ runs kaiming_uniform_ ON THE TARGET DEVICE
+    before the real weight is assigned -- 249 times. That consumed CUDA RNG and shifted the sampling
+    stream, so DENSE_INFER produced different tokens from the packed path despite the logits being
+    BIT-IDENTICAL (verified: max delta 0.0, 0 argmax flips over 128 positions). The first fix only
+    covered the selftest's CPU generator and missed this. Restoring state around the whole operation
+    is robust to whatever else gets added here later.
+
+    The rule this enforces: SETUP AND INSTRUMENTATION MUST BE INVISIBLE TO THE THING THEY PREPARE.
+    """
+    cpu = torch.get_rng_state()
+    cuda = torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None
+    try:
+        yield
+    finally:
+        torch.set_rng_state(cpu)
+        if cuda is not None:
+            torch.cuda.set_rng_state_all(cuda)
 
 
 def _is_tsl(m):
@@ -35,6 +60,12 @@ def _is_tsl(m):
 @torch.no_grad()
 def densify(model, dtype=torch.bfloat16, verbose=True):
     """Replace every TernaryScaleLinear with an equivalent dense nn.Linear. Returns (n, bytes)."""
+    with _frozen_rng():
+        return _densify(model, dtype, verbose)
+
+
+@torch.no_grad()
+def _densify(model, dtype, verbose):
     targets = [(n, m) for n, m in model.named_modules() if _is_tsl(m)]
     n_done = n_bytes = 0
     for name, m in targets:
@@ -63,6 +94,12 @@ def densify_selftest(model, n_test=3, tol=0):
     tol=0 means bit-identical outputs. That is the correct bar: densify claims to be an algebraic
     hoist, not an approximation, so any nonzero difference means a branch of dequant() was not
     reproduced and the run must not proceed."""
+    with _frozen_rng():
+        return _selftest(model, n_test, tol)
+
+
+@torch.no_grad()
+def _selftest(model, n_test, tol):
     targets = [(n, m) for n, m in model.named_modules() if _is_tsl(m)][:n_test]
     assert targets, "no TernaryScaleLinear modules found — wrong model kind?"
     # Draw the probe inputs from a PRIVATE generator. Using the global one consumes RNG and shifts
