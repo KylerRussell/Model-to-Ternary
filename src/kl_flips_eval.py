@@ -50,6 +50,18 @@ print("loading ternary E2E...", flush=True)
 st, _ = build_student(E2E, ORIG, BLOCK_SIZE, T_DEV); st.eval()
 st.config.use_cache = False
 
+if os.environ.get("HEAD_MODE"):                                # see head_swap.py; 'fp' = upper bound
+    from head_swap import swap_head
+    swap_head(st, os.environ.get("HEAD_SRC", "output_4bpipe/rotbase/modified_model"),
+              os.environ["HEAD_MODE"])
+if os.environ.get("EMBED_MODE"):
+    from head_swap import swap_embed
+    swap_embed(st, os.environ.get("HEAD_SRC", "output_4bpipe/rotbase/modified_model"),
+               os.environ["EMBED_MODE"])
+if float(os.environ.get("THINK_ROW_SCALE", "1.0")) != 1.0:
+    from head_swap import apply_think_gain
+    apply_think_gain(st, float(os.environ["THINK_ROW_SCALE"]), 248069)
+
 SQB = int(os.environ.get("SCALE_QBITS", "0"))                  # Test 1a: POST-HOC scale quantization —
 if SQB > 0:                                                    # round trained per-256 scales to an n-bit
     from e2e_qp_distill import TernaryScaleLinear              # log-uniform grid (per linear), then eval.

@@ -89,14 +89,19 @@ def main():
         st.eval()
     st.config.use_cache = True
 
-    if TRS != 1.0:                      # identical to loop_gate: scale the </think> row's block-scales
-        for _n, _m in st.named_modules():
-            if _n.endswith("lm_head") and hasattr(_m, "scale") and hasattr(_m, "block_size"):
-                bpr = _m.in_features // _m.block_size
-                with torch.no_grad():
-                    _m.scale[THINK_CLOSE * bpr:(THINK_CLOSE + 1) * bpr] *= TRS
-                print(f"THINK_ROW_SCALE={TRS} applied", flush=True)
-                break
+    # HEAD_MODE=fp|q4 swaps the ternary lm_head for a dense one (see head_swap.py). 'fp' is the
+    # UPPER BOUND arm, not a deployable config: int4 is strictly worse than bf16, so a null result
+    # there kills the head hypothesis without building the q4 arm.
+    if os.environ.get("HEAD_MODE"):
+        from head_swap import swap_head
+        swap_head(st, os.environ.get("HEAD_SRC", "output_4bpipe/rotbase/modified_model"),
+                  os.environ["HEAD_MODE"])
+    if os.environ.get("EMBED_MODE"):        # the other half of the 24% (embed+head)
+        from head_swap import swap_embed
+        swap_embed(st, os.environ.get("HEAD_SRC", "output_4bpipe/rotbase/modified_model"),
+                   os.environ["EMBED_MODE"])
+    from head_swap import apply_think_gain      # identical on a ternary head (block scales) and a
+    apply_think_gain(st, TRS, THINK_CLOSE)      # dense one (row weights) -- fold_think_scale.py
 
     if os.environ.get("DENSE_INFER", "0") == "1" and os.environ.get("MODEL_KIND", "tern") != "fp":
         from densify import densify, densify_selftest   # AFTER the TRS edit above -- densify
