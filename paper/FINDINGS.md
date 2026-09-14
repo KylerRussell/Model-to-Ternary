@@ -50,7 +50,7 @@ At batch 1 the activation sums are computed once per token and reused across row
 evidence, facts about TQ1_64 rather than about hardware. The claim must be stated against a format
 class, with the class named.
 
-## F3. IQ1_S is smaller and finer-grained than TQ1_64 · HOLDS (comparison OPEN)
+## F3. IQ1_S is smaller and finer-grained than TQ1_64 — and loses on reconstruction · PROVISIONAL
 
 | | bpw | scale granularity | alphabet |
 |---|---|---|---|
@@ -58,17 +58,53 @@ class, with the class named.
 | `TQ1_0` | 1.6875 | g256 | full ternary |
 | **`IQ1_S`** | **1.5625** | **g32**, 3-bit sub-scale + fp16 super | **2048 of 6561** 8-D vectors |
 
-`IQ1_S` is **12.3% smaller** than TQ1_64 with **finer** scale granularity. The published
-justification for TQ1_64 (`TQ1_64_SPEC.md`) is that granularity matters — 79.31 / 80.62 / **82.06** %
-eval2k agreement at g256 / g128 / g64 — and IQ1_S goes further in that direction at lower cost,
-paying by discarding 68.8% of the 8-dimensional ternary alphabet and compensating with a one-bit
-±0.125 grid displacement.
+`IQ1_S` is 12.3% smaller with finer granularity, so the census predicted it would win. **Measured, it
+loses** — matched tensor sets, same weights, same objective, RTN all arms:
 
-**The open question is narrow: does finer scaling on a restricted alphabet beat coarser scaling on
-the full alphabet?** We argued one half of it and never tested the other. The census asserts IQ1_S
-wins but attaches no measurement.
+| mean relative reconstruction error | rotated | unrotated |
+|---|---|---|
+| `TQ1_0` | 0.43800 | 0.44160 |
+| **TQ1_64** | **0.43228** (3/3) | **0.43527** (3/3) |
+| `IQ1_S` | 0.44631 | 0.44826 |
 
-*Test: `src/format_sim.py` + `src/fmt_recon.py`, T0.8.*
+Ordering is identical in both regimes: **TQ1_64 < TQ1_0 < IQ1_S.**
+
+**What this does and does not establish.** It does *not* show TQ1_64 is better end-to-end —
+reconstruction error is the metric this project has documented as never once catching a real failure
+(block-MSE improved 99.8% on a collapsed residual stream). Claiming victory on it would be the exact
+error we criticise in others. What it does establish is narrower and still useful: **the census's
+claim that IQ1_S delivers "superior perplexity recovery" is unsupported**, it attached no
+measurement, and the one measurement that now exists points the other way.
+
+**A caveat that cuts against us.** TQ1_64 beats TQ1_0 by **1.3% relative error for 5.6% more bits**.
+Per bit, that is not a clear win. The real case for g64 rests on the end-to-end agreement measurement
+(82.06% vs 79.31%, `TQ1_64_SPEC.md`), not on reconstruction — and that measurement has no IQ1_S
+counterpart yet.
+
+**Lower bound for IQ1_S, not a verdict.** All arms are unweighted RTN; IQ1_S is designed around
+`imatrix` importance weighting and is understated without it. F3a is the part that survives weighting.
+
+*Test: `src/format_sim.py`, `src/fmt_recon.py`, `experiments/sweep/fmt_matched.sh`.*
+
+## F3a. IQ1_S cannot represent exact zero · HOLDS
+
+Reconstruction is `x = dl·(g + δ)` with `δ = ±0.125`, so a grid **zero** dequantizes to `±0.125·dl`,
+never 0. Our ternary weights are **~45.6% exact zeros**, so nearly half of all weights carry a
+systematic error the format cannot avoid at any scale setting.
+
+This is an alphabet-level property, independent of search quality or importance weighting, and it is
+the structural explanation for F3's ordering.
+
+## F3b. RETRACTED — "rotation flips the IQ1_S/TQ1_0 ordering"
+
+I hypothesised that QuaRot, by removing channel outliers, would remove the local variance that fine
+scales exist to capture, and so make coarse-scale ternary artificially competitive. An initial run
+appeared to confirm it: IQ1_S beat TQ1_0 unrotated (0.45673 vs 0.46140) and lost rotated.
+
+**Matched tensor sets falsify it.** The ordering is identical in both regimes. The apparent flip was a
+sampling artifact — the unrotated draw was 3/4 tiny `(32, 2560)` projections while the rotated draw
+included a `9216×2560`. *A format comparison across different tensors measures the tensors.*
+`fmt_recon.py` now takes an explicit tensor list so both arms are scored on the same weights.
 
 ## F4. Our IQ1_S simulation is faithful, not an approximation · HOLDS
 
@@ -163,7 +199,10 @@ holds it is the paper's thesis one level up — the literature optimises away fr
 
 ## Open
 
-* **F3 head-to-head** — TQ1_64 vs TQ1_0 vs IQ1_S reconstruction error on real weights, running.
-  End-to-end agreement to follow if the reconstruction result is close.
+* **F3 end-to-end** — the reconstruction screen is done and does not settle the question. An
+  end-to-end agreement comparison (the metric that produced 82.06 vs 79.31 for g64 vs g256) is what
+  would, and IQ1_S has no such number yet.
+* **F3 with imatrix** — the present comparison is a matched *unweighted* lower bound. IQ1_S is
+  designed around importance weighting; re-run with it before the margin is quoted anywhere.
 * **F10 count** — published methods targeting IQ formats.
 * Re-derivation of every method-census percentage over published work only (F7).

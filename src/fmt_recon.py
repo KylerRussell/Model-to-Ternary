@@ -20,31 +20,43 @@ from format_sim import quant_ternary, quant_iq1s, rel_err, verify_iq1s
 
 SRC = os.environ.get("FMT_SRC", "output_4bpipe/rotbase/modified_model")
 N_T = int(os.environ.get("N_TENSORS", "12"))
+# Cap tensor size: the IQ1_S search is 192 (d x s x delta) passes over a [N,2048] score matrix, so
+# lm_head (2.5M blocks) dominates wall time without adding signal about LINEAR-PROJECTION format
+# capacity. The embedding/head question is separate (they are 29.1% of the 4B) and is measured on
+# its own, not folded in here.
+MAXEL = int(os.environ.get("MAX_ELEMS", str(40 * 1024 * 1024)))
 DEV = "cuda:0" if torch.cuda.is_available() else "cpu"
 
 verify_iq1s(n=32, device="cpu")          # refuse to run on an unfaithful simulator
 
 wm = _shard_map(SRC)
-names = [k for k in wm if k.endswith(".weight") and ("proj" in k or "lm_head" in k)]
-names.sort()
-step = max(1, len(names) // N_T)
-names = names[::step][:N_T]
+# An EXPLICIT tensor list, so the rotated and unrotated arms are scored on the SAME tensors.
+# Sampling each model independently produced non-comparable sets (the unrotated draw was 3/4 tiny
+# (32,2560) projections), and a format comparison across different tensors measures the tensors.
+names = [n for n in (os.environ.get("TENSORS", "").split(",")) if n]
+if not names:
+    names = [k for k in wm if k.endswith(".weight") and "proj" in k]
+    names.sort()
+    step = max(1, len(names) // N_T)
+    names = names[::step][:N_T]
+missing = [n for n in names if n not in wm]
+assert not missing, f"tensors absent from {SRC}: {missing[:3]}"
 print(f"\n{len(names)} tensors from {SRC}\n")
 
 rows = []
 print(f"{'tensor':46s} {'shape':>16s} {'TQ1_0':>9s} {'TQ1_64':>9s} {'IQ1_S':>9s}  winner")
-for n in names:
+for ti, n in enumerate(names):
     W = _get_tensor(SRC, wm, n).float().to(DEV)
-    if W.ndim != 2 or W.shape[1] % 256:
-        continue
+    if W.ndim != 2 or W.shape[1] % 256 or W.numel() > MAXEL:
+        del W; continue
     e = {}
     e["TQ1_0"] = rel_err(quant_ternary(W, group=256), W)
     e["TQ1_64"] = rel_err(quant_ternary(W, group=64), W)
     e["IQ1_S"] = rel_err(quant_iq1s(W, device=DEV), W)
     win = min(e, key=e.get)
     rows.append({"tensor": n, "shape": list(W.shape), **e, "winner": win})
-    print(f"{n[-46:]:46s} {str(tuple(W.shape)):>16s} "
-          f"{e['TQ1_0']:9.5f} {e['TQ1_64']:9.5f} {e['IQ1_S']:9.5f}  {win}")
+    print(f"[{ti+1}/{len(names)}] {n[-40:]:40s} {str(tuple(W.shape)):>16s} "
+          f"{e['TQ1_0']:9.5f} {e['TQ1_64']:9.5f} {e['IQ1_S']:9.5f}  {win}", flush=True)
     del W
     torch.cuda.empty_cache()
 
