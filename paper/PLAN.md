@@ -149,8 +149,62 @@ answer because almost nobody runs the same method at more than one scale. The cl
 (arXiv:2609.09240) ran two points and correctly declined to call it a scaling law. **Three points can
 at least separate monotone from non-monotone.**
 
-| rung | checkpoint | layers | hidden | vocab | embed+head | status |
+| rung | checkpoint | layers | hidden | intermediate | vocab | ~params | embed+head | status |
+|---|---|---|---|---|---|---|---|---|
+| 4B | `Qwen3.5-4B` | 32 | 2560 | 9216 | 248,320 | 4.4B | **29.1%** | cached, pipeline validated |
+| 9B | `Qwen3.5-9B` | 32 | 4096 | 12288 | 248,320 | 9.0B | **22.6%** | to download (4 shards) |
+| 27B | `Qwen3.5-27B` | 64 | 5120 | 17408 | 248,320 | 26.4B | **9.6%** | to download (11 shards) |
+
+Geometry above is **read from the real `config.json` of each repo** (2026-09-14), not estimated.
+All three are `model_type: qwen3_5` with identical vocabulary.
+
+#### RESOLVED: the generation confound
+
+The original pair confounded scale with model generation — the cached 4B is **Qwen3.5** and the
+cached 27B is **Qwen3.6**. Resolution: **run the ladder entirely within Qwen3.5**. All three rungs
+exist and no re-anchoring of the 4B is needed, so every 4B result already in the log survives as the
+ladder's bottom rung.
+
+#### The generation control: `Qwen3.8-27B`
+
+If we spend an arm outside the 3.5 generation it should be the **newest** available, because the
+control's job is to bound how much *generation* moves results at fixed scale — and the widest gap is
+the stronger probe. A single-step 3.5→3.6 comparison could read small and prove nothing either way.
+
+This turns out to be unusually clean. The three 27B checkpoints are **architecturally identical**:
+
+| | layers | hidden | intermediate | vocab | ~params | embed+head |
 |---|---|---|---|---|---|---|
+| `Qwen3.5-27B` | 64 | 5120 | 17408 | 248,320 | 26.4B | 9.6% |
+| `Qwen3.6-27B` | 64 | 5120 | 17408 | 248,320 | 26.4B | 9.6% |
+| `Qwen3.8-27B` | 64 | 5120 | 17408 | 248,320 | 26.4B | 9.6% |
+
+Differing shard counts (11 / 15 / 18) are packaging, not architecture. **Training is therefore the
+only thing that varies**, which is exactly what a generation control requires — anything the arm
+measures is attributable to the checkpoint's training, not to its shape. `Qwen3.7-27B`, `Qwen3.5-14B`
+and `Qwen3.5-32B` do not exist.
+
+#### The ladder's two steps are not the same kind of step
+
+State this before a reviewer does:
+
+* **4B → 9B** is a *width* increase at constant depth (H 2560→4096, L=32 both)
+* **9B → 27B** changes *both* (L 32→64, H 4096→5120)
+
+So "scale" is not a single axis here. This is usable rather than merely awkward: an effect that
+appears at 4B→9B is width/superposition-related, while one appearing only at 9B→27B implicates depth.
+It does mean no result may be reported as a function of parameter count alone.
+
+#### A free experiment hiding in the vocabulary
+
+Vocabulary is fixed at 248,320 across the family, so the embed+head share falls **29.1% → 22.6% →
+9.6%** as pure arithmetic in width and depth — three clean points. **Part of any "scale helps" effect
+is the embedding fraction shrinking, not representation superposition.** The two are separable with
+machinery that already exists (`src/head_swap.py`, under an hour per rung): run the head/embed swap
+arms at each rung and decompose the scale benefit into *fixed-vocabulary dilution* vs *everything
+else*. No prior ternary paper has done this.
+
+---|---|---|---|---|---|---|
 | 4B | `Qwen3.5-4B` | 32 | 2560 | 248,320 | **29.1%** | cached, pipeline validated |
 | 9B | `Qwen3.5-9B` | — | — | — | ~18% (est.) | **to download** |
 | 27B | `Qwen3.5-27B` | — | — | — | ~10% (est.) | **to download** |
@@ -293,7 +347,7 @@ groups will reuse, and it costs nothing extra to write because the incidents are
 | **T0.0** | **Systematic search + method register** (§A) | — | defines the candidate pool; everything downstream inherits its denominator. Desk work, no GPU. |
 | ~~**T0.1**~~ | ~~Track the experiment drivers~~ **DONE 2026-09-14** | — | 69 drivers moved to `experiments/sweep/` (tracked) with cross-references rewritten; outputs stay in the ignored `output_sweep/`. `tools/capture_env.sh` snapshots repo commit, host, GPU, package versions, and **HF dataset/model revision hashes** to `paper/env/`. |
 | **T0.2** | External reproduction gate | T0.1 | a reviewer cannot otherwise distinguish "these methods don't work" from "your pipeline is broken" — and this project has shipped a silently zeroed FP teacher that passed three sanity checks. Target: within ~0.05 pts of a published number. |
-| **T0.3** | Acquire the Qwen3.5 9B and 27B rungs | — | ladder decided (§B.1); remaining work is download + re-derive real geometry + one generation-control arm |
+| **T0.3** | Download `Qwen3.5-9B` and `Qwen3.5-27B` | — | ladder decided and geometry verified (§B.1). ~18 GB + ~54 GB bf16 against 1.5 TB free. Optional 4th: `Qwen3.8-27B` as the generation control. |
 | **T0.4** | Stand up the benchmark suite | T0.1 | §D; every existing result is scored at n=24–48, which cannot resolve anything |
 | **T0.5** | Pre-register screen verdicts | T0.0 | §A.7; without a timestamped commit, §7 carries no weight |
 | **T0.6** | Re-baseline headline claims | T0.1, T0.4 | the harness changed materially (a discarded generation sweep was removed from the import path, moving the RNG stream). Pre-fix and post-fix numbers are not comparable by construction. |
