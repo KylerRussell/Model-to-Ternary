@@ -240,7 +240,36 @@ A method class that fails under **every** shipping format is a genuine result ab
 One that fails only under TQ1_64 is a fact about our design choice. The paper must not report the
 second as the first — which, on present evidence, the census does.
 
-Driving prompt: `research_prompts/format_space_prompt.md`.
+Driving prompt: `research_prompts/format_space_prompt.md`. **Returned and screened** —
+`paper/format_review.md`. Block sizes verified independently against the installed `gguf` package:
+8 of 9 exact.
+
+#### The census came back against us
+
+| | bpw | scale granularity | alphabet |
+|---|---|---|---|
+| **TQ1_64 (ours)** | **1.7812** | g64, 8-bit sub-scales | full ternary |
+| `TQ1_0` | 1.6875 | g256 | full ternary |
+| **`IQ1_S`** | **1.5625** | **g32** + g256 super | **2048 of 6561** 8-D ternary vectors |
+
+**`IQ1_S` is 12.3% smaller than TQ1_64 with finer scale granularity.** Our whole justification for
+TQ1_64 is that granularity matters (79.31% → 80.62% → 82.06% for g256/g128/g64). IQ1_S goes further
+in the direction we argued for, at lower cost — trading alphabet coverage (it discards 68.8% of the
+8-D ternary space, compensating with a ±0.125 grid displacement) for finer scales.
+
+The open question is therefore empirical and narrow: **does finer scaling on a restricted alphabet
+beat coarser scaling on the full alphabet?** We have argued one half and never tested the other. The
+census asserts IQ1_S wins on perplexity but **attaches no measurement**, so it settles nothing.
+
+**T0.8 is now the IQ1_S comparison, not just TQ1_0.** Simulate IQ1_S the way `src/sim_tq164.py`
+simulates our format, same model, same harness. One trap: IQ1_S depends on llama.cpp's `imatrix`
+importance weighting (`H_ii ≈ Σ X_ik²`), so a naive simulation without it would understate IQ1_S and
+hand us a flattering false result. Match the importance weighting across both arms or the comparison
+is rigged.
+
+If IQ1_S wins, the cost is real and should be priced before committing: our pipeline trains ternary
+*assignments* by STE with per-block scales, and targeting IQ1_S turns that into "choose one of 2048
+codebook entries per 8 weights" — a different optimisation problem, not a re-parameterisation.
 
 ### B.1 The scale ladder
 
@@ -448,7 +477,7 @@ groups will reuse, and it costs nothing extra to write because the incidents are
 | ~~**T0.1**~~ | ~~Track the experiment drivers~~ **DONE 2026-09-14** | — | 69 drivers moved to `experiments/sweep/` (tracked) with cross-references rewritten; outputs stay in the ignored `output_sweep/`. `tools/capture_env.sh` snapshots repo commit, host, GPU, package versions, and **HF dataset/model revision hashes** to `paper/env/`. |
 | **T0.2** | External reproduction gate | T0.1 | a reviewer cannot otherwise distinguish "these methods don't work" from "your pipeline is broken" — and this project has shipped a silently zeroed FP teacher that passed three sanity checks. Target: within ~0.05 pts of a published number. |
 | **T0.9** | **Format-space census** (§B.0b) | — | desk work; the method verdicts are a function of format and that dependency is currently unmeasured. Blocks any claim of the form "method class X is undeployable". |
-| **T0.8** | **TQ1_0 vs TQ1_64 head-to-head** (§B.0) | T0.4 | the paper's premise. One extra 4B pipeline run targeting g256, exported to stock TQ1_0, scored against the g64/TQ1_64 arm on the real suite. Until this exists, "our format" is an assumption. |
+| **T0.8** | **Format head-to-head: TQ1_64 vs TQ1_0 vs IQ1_S** (§B.0, §B.0b) | T0.4 | the paper's premise, and `IQ1_S` is both smaller (1.5625 bpw) and finer-grained (g32) than ours. Simulate in PyTorch on the same model and harness, with matched importance weighting. Until this exists, "our format" is an assumption — and the census says it is a weak baseline. |
 | **T0.3** | Download `Qwen3.5-9B` and `Qwen3.5-27B` | — | ladder decided and geometry verified (§B.1). ~18 GB + ~54 GB bf16 against 1.5 TB free. Optional 4th: `Qwen3.8-27B` as the generation control. |
 | **T0.4** | Stand up the benchmark suite | T0.1 | §D; every existing result is scored at n=24–48, which cannot resolve anything |
 | **T0.5** | Pre-register screen verdicts | T0.0 | §A.7; without a timestamped commit, §7 carries no weight |
