@@ -196,6 +196,52 @@ tensors, of which stock TQ1_0 is the canonical member**, and TQ1_64 becomes an i
 rather than a premise. The head-to-head above then supports a secondary, narrower claim about
 granularity.
 
+### B.0b The format axis — do NOT build the study around one format
+
+**Scope change (2026-09-14).** The study must not commit to TQ1 alone. It covers the sub-2-bit
+*format space* — ternary (`TQ1_0`/`TQ2_0`/TQ1_64), native W1.58/BitNet deployment, 1-bit, and the
+codebook formats — because the previous census's method verdicts are a function of the format they
+were screened against, and that dependency was invisible while only one format was in play.
+
+#### The error that forced this
+
+The census justified most FAIL verdicts with hardware claims: vector quantization "breaks down on
+consumer GPUs due to indirect memory dereferencing and cache thrashing"; asymmetric offsets "destroy
+the addition-only GEMV pipeline". **Both are falsified by shipping code.** The `gguf` package in this
+repo enumerates, all with working llama.cpp CUDA kernels:
+
+| type | what it proves |
+|---|---|
+| `IQ1_S`, `IQ1_M` | **sub-2-bit formats built on codebook/grid lookups**, deployed and fast |
+| `IQ2_XXS`, `IQ2_XS`, `IQ2_S` | codebook quantization at ~2–2.5 bpw |
+| `Q2_K` | 2-bit k-quant carrying scales **and mins** — i.e. zero-points |
+| `TQ1_0`, `TQ2_0` | scalar ternary at g256 |
+
+Codebooks and zero-points are therefore **not** unexecutable on commodity hardware. They are
+unexecutable *in TQ1_64*. Any verdict resting on the general claim has to be re-derived.
+
+#### What this changes about the paper
+
+The screen's question moves from *"does the method fit TQ1_64"* to:
+
+> **Which format class does the method require, and does a deployable format in that class exist?**
+
+That is a stronger and more durable contribution — a lookup against a format-capability matrix rather
+than a judgement against one design choice. It also fixes the reviewer objection in §B.0 completely:
+we are no longer defending a bespoke format, we are mapping the space.
+
+And it carries a real risk we should want to discover: `IQ1_S` is ~1.56 bpw against `TQ1_0`'s 1.6875.
+**If a codebook format is both smaller and shipping, the case for scalar ternary must be made on
+quality, not size.** Better to find that now than after building a study on the wrong baseline.
+
+#### Consequence for the claim
+
+A method class that fails under **every** shipping format is a genuine result about deployability.
+One that fails only under TQ1_64 is a fact about our design choice. The paper must not report the
+second as the first — which, on present evidence, the census does.
+
+Driving prompt: `research_prompts/format_space_prompt.md`.
+
 ### B.1 The scale ladder
 
 Methods that help at 4B and vanish at 27B would be a genuinely novel finding; the literature has no
@@ -401,6 +447,7 @@ groups will reuse, and it costs nothing extra to write because the incidents are
 | **T0.0** | **Systematic search + method register** (§A) | — | defines the candidate pool; everything downstream inherits its denominator. Desk work, no GPU. |
 | ~~**T0.1**~~ | ~~Track the experiment drivers~~ **DONE 2026-09-14** | — | 69 drivers moved to `experiments/sweep/` (tracked) with cross-references rewritten; outputs stay in the ignored `output_sweep/`. `tools/capture_env.sh` snapshots repo commit, host, GPU, package versions, and **HF dataset/model revision hashes** to `paper/env/`. |
 | **T0.2** | External reproduction gate | T0.1 | a reviewer cannot otherwise distinguish "these methods don't work" from "your pipeline is broken" — and this project has shipped a silently zeroed FP teacher that passed three sanity checks. Target: within ~0.05 pts of a published number. |
+| **T0.9** | **Format-space census** (§B.0b) | — | desk work; the method verdicts are a function of format and that dependency is currently unmeasured. Blocks any claim of the form "method class X is undeployable". |
 | **T0.8** | **TQ1_0 vs TQ1_64 head-to-head** (§B.0) | T0.4 | the paper's premise. One extra 4B pipeline run targeting g256, exported to stock TQ1_0, scored against the g64/TQ1_64 arm on the real suite. Until this exists, "our format" is an assumption. |
 | **T0.3** | Download `Qwen3.5-9B` and `Qwen3.5-27B` | — | ladder decided and geometry verified (§B.1). ~18 GB + ~54 GB bf16 against 1.5 TB free. Optional 4th: `Qwen3.8-27B` as the generation control. |
 | **T0.4** | Stand up the benchmark suite | T0.1 | §D; every existing result is scored at n=24–48, which cannot resolve anything |
