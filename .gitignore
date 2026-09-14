@@ -3,6 +3,8 @@
 
 # Generated output trees (rotation, recovery, distillation, experiments) — ANY output-prefixed dir
 output*/
+# NOTE: experiment DRIVERS are tracked in experiments/sweep/ — only OUTPUTS are ignored here.
+# See experiments/sweep/README.md; they were untracked until 2026-09-14 (T0.1).
 *.gguf
 
 # Logs (pipeline + diagnostics). logs/*.txt and logs/RESULTS_SUMMARY.md ARE tracked — they are the

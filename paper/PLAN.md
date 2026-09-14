@@ -151,16 +151,25 @@ at least separate monotone from non-monotone.**
 
 | rung | checkpoint | layers | hidden | vocab | embed+head | status |
 |---|---|---|---|---|---|---|
-| 4B | `Qwen3.5-4B` | 32 | 2560 | 248,320 | **29.1%** | cached |
-| ~9B | *to be chosen* | — | — | — | ~18% | **missing** |
-| 27B | `Qwen3.6-27B` | 64 | 5120 | 248,320 | **9.6%** | cached, never run |
+| 4B | `Qwen3.5-4B` | 32 | 2560 | 248,320 | **29.1%** | cached, pipeline validated |
+| 9B | `Qwen3.5-9B` | — | — | — | ~18% (est.) | **to download** |
+| 27B | `Qwen3.5-27B` | — | — | — | ~10% (est.) | **to download** |
 
-#### BLOCKER: the generation confound
+#### RESOLVED: the generation confound
 
-**The cached 4B is Qwen3.5; the 27B is Qwen3.6.** Any scale claim from that pair confounds scale with
-model generation. The mid-size rung is the opportunity to fix it — choose all three rungs from one
-generation, re-anchoring the 4B if necessary. Discovering this after the runs would invalidate the
-paper's central matrix.
+The original pair confounded scale with model generation — the cached 4B is **Qwen3.5** and the
+cached 27B is **Qwen3.6**. Resolution (2026-09-14): **run the ladder entirely within Qwen3.5**, using
+4B / 9B / 27B from that one generation. No re-anchoring of the 4B is needed, which preserves every
+4B result already in the log as the ladder's bottom rung.
+
+Consequences to carry:
+
+* `Qwen3.5-9B` and `Qwen3.5-27B` must be downloaded; only `Qwen3.5-4B` and `Qwen3.6-27B` are cached.
+* The geometry above for 9B/27B is **estimated** and must be re-derived from the real configs before
+  any claim rests on it — the 29.1%/9.6% figures for the original pair were computed, not assumed.
+* `Qwen3.6-27B` remains useful as a **generation control**: running one arm on both 3.5-27B and
+  3.6-27B measures the generation effect directly, which is the cheapest way to show the confound
+  we avoided was real rather than hypothetical. Worth one arm.
 
 #### A free experiment hiding in the vocabulary
 
@@ -282,9 +291,9 @@ groups will reuse, and it costs nothing extra to write because the incidents are
 | id | task | depends on | why |
 |---|---|---|---|
 | **T0.0** | **Systematic search + method register** (§A) | — | defines the candidate pool; everything downstream inherits its denominator. Desk work, no GPU. |
-| **T0.1** | **Track the experiment drivers** | — | `output_sweep/` is caught by the `output*/` ignore rule, so **0 driver scripts are versioned** against 54 tracked source files. Every experiment is currently unreproducible by anyone, including us after a disk failure. |
+| ~~**T0.1**~~ | ~~Track the experiment drivers~~ **DONE 2026-09-14** | — | 69 drivers moved to `experiments/sweep/` (tracked) with cross-references rewritten; outputs stay in the ignored `output_sweep/`. `tools/capture_env.sh` snapshots repo commit, host, GPU, package versions, and **HF dataset/model revision hashes** to `paper/env/`. |
 | **T0.2** | External reproduction gate | T0.1 | a reviewer cannot otherwise distinguish "these methods don't work" from "your pipeline is broken" — and this project has shipped a silently zeroed FP teacher that passed three sanity checks. Target: within ~0.05 pts of a published number. |
-| **T0.3** | Fix the ladder's generation confound | — | blocks §6; discovering it later invalidates the central matrix |
+| **T0.3** | Acquire the Qwen3.5 9B and 27B rungs | — | ladder decided (§B.1); remaining work is download + re-derive real geometry + one generation-control arm |
 | **T0.4** | Stand up the benchmark suite | T0.1 | §D; every existing result is scored at n=24–48, which cannot resolve anything |
 | **T0.5** | Pre-register screen verdicts | T0.0 | §A.7; without a timestamped commit, §7 carries no weight |
 | **T0.6** | Re-baseline headline claims | T0.1, T0.4 | the harness changed materially (a discarded generation sweep was removed from the import path, moving the RNG stream). Pre-fix and post-fix numbers are not comparable by construction. |
