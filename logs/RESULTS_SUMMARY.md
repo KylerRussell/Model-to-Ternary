@@ -3936,3 +3936,44 @@ think_len). Without them 13ao's teacher-solvable denominator cannot be applied o
 accuracy overstates capability — every ternary "hit" checked so far has landed on a problem the FP
 teacher itself fails. **The single 1/24 in both arms above should be treated as unverified** until
 re-run with row dumps.
+
+### 13at. ROW-GAIN CALIBRATION — TABLED. c=1.25 does not survive a second seed
+
+Sweep of the `</think>` row gain under the fixed gate, DRY off, to find a DRY-free operating point.
+Criterion: maximise `commit_correct_rate` s.t. `think_len/teacher >= 0.75` and `closed_rate >= 0.10`.
+
+| c | scored closed | scored think_len | ratio | commit_correct | verdict |
+|---|---|---|---|---|---|
+| 1.00 / 1.10 / 1.20 | **0%** | undefined | — | 0% | FAIL (never closes) |
+| **1.25 (seed 0)** | 12.5% | 1202 | **1.279 PASS** | **8.3%** | FAIL (loop/commit/comp) |
+| **1.25 (seed 1)** | 37.5% | 607 | **0.646 FAIL** | **8.3%** | FAIL |
+| 1.30 | 41.7% | 594 | 0.631 FAIL | 0% | FAIL |
+| 1.35 | 62.5% | 398 | 0.424 FAIL | 4.2% | FAIL |
+
+**Closure on GSM8K is a STEP FUNCTION in c, not a gradient.** On the easier main prompt set closers
+rise smoothly (23/23/28/39 for c=1.00/1.10/1.20/1.30) and think_len falls smoothly (813/776/688/461).
+On the scored GSM8K subset closure is flat ZERO through c=1.20, then jumps. Hard prompts have a
+threshold the easy ones do not.
+
+**Past c=1.25 the gain buys PREMATURE commitment, not commitment.** 1.25 -> 1.30 nearly quadruples
+closure while halving think_len and driving commit_correct to zero. `commit_correct_rate` and the
+think_len guard flag the same arms independently — the first time those two channels have corroborated
+each other, and a POSITIVE control for the guard (previously it had only ever fired on failures).
+
+**CORRECTION to the single-seed read.** I called c=1.25 "the operating point" as the only c passing
+both constraints. It does not survive seed 1: `think_len/teacher` reads **1.279 (PASS) at seed 0 and
+0.646 (FAIL) at seed 1**. The cause was visible at the time and flagged — seed 0 had only **3 closers**
+with think_lens [199, 1376, 2032], so the mean was carried by two long rollouts. `commit_correct_rate`
+DID replicate (8.3%, 2/24, both seeds). **No c satisfies the gate across seeds.** The honest summary:
+the row gain controls WHEN the model closes, not whether it loops, and no setting of it recovers what
+removing DRY costs.
+
+**One genuine improvement, on the matched denominator.** Re-ran the teacher WITH `SCORE_ROWS` (it
+reproduced exactly: 14/24, think_len 940 — determinism confirmed). Against that matched set, every
+hit at c=1.25 and c=1.35 is on a teacher-solvable problem: **2/2, 2/2, 1/1**, versus 13ao's **0/2** for
+the old baseline. Small n, but it is the first ternary configuration whose correct answers are
+problems the teacher can also solve.
+
+**TABLED.** Any resumption needs >=3 seeds for `think_len` (its cross-seed spread is ~0.63x the mean
+at low closure counts) and should treat `closed_rate` as the primary constraint, since it is the
+quantity with a usable threshold.
