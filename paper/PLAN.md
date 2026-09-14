@@ -142,6 +142,60 @@ the same PTQ papers we have already resolved.
 
 ## B. Scope
 
+### B.0 Why TQ1_64 and not stock TQ1_0 — the premise a reviewer attacks first
+
+If the paper screens methods against a format we invented, the result reads as "methods fail against
+our bespoke format," which is a much weaker claim than it looks. This has to be settled before §3 is
+written.
+
+#### What we already have (`TQ1_64_SPEC.md`)
+
+Stock `TQ1_0` (1.6875 bpw) and `TQ2_0` (2.0625 bpw) both use QK_K=256 with **one scale per 256-weight
+block (g256)**. Our model is trained at **g64**, and granularity measurably matters:
+
+| granularity | eval2k agreement |
+|---|---|
+| g256 (= what TQ1_0 / TQ2_0 can express) | 79.31% |
+| g128 @ 8-bit scales | 80.62% |
+| **g64 @ 8-bit scales** | **82.06%** |
+| g32 @ 4-bit scales | 73.56% |
+
+So TQ1_64 buys **+2.75 pp agreement for +0.0937 bpw (+5.6% size)** over TQ1_0. That is a real and
+defensible trade — and it is the argument the paper should make.
+
+#### The gap in that argument — state it ourselves
+
+The spec also records that exporting the g64 model to TQ2_0 destroys it (MMLU-Pro 25.7% → 10.6%,
+i.e. random; GPQA 30.3% → 16.8%). **That number is not evidence for TQ1_64 over TQ1_0.** It measures
+a *mismatched export*: a model trained at g64 re-quantized to g256. A model trained at g256 and
+exported to TQ1_0 would not be destroyed. Using it as a format comparison would be the same error as
+scoring a method against a baseline it was never fitted to.
+
+The honest comparison is **train-to-format, end to end**:
+
+| arm | pipeline target | export | bpw |
+|---|---|---|---|
+| A | g256 throughout | stock `TQ1_0` | 1.6875 |
+| B | g64 throughout | `TQ1_64` | 1.7812 |
+
+Same model, same data, same seeds, scored on the real benchmark suite (§D). Three outcomes, all
+publishable:
+
+* **A ≈ B** → use stock TQ1_0. The paper gets *stronger*: we screen against the established format.
+* **B > A by more than +5.6% size justifies** → we have an empirical answer, and "scale granularity
+  is worth more than bits at 1.7 bpw" is a finding in its own right.
+* **B < A** → we have been paying for a worse format, which we would need to know regardless.
+
+#### The claim does not actually depend on the outcome
+
+Every failure category in the census — zero-points, multi-plane superposition, VQ codebooks, sparse
+outlier tensors, entropy codes, coupled activation quantizers, tunable norm affines — fails **stock
+TQ1_0 identically**. Granularity changes none of the 30 FAIL verdicts (see `paper/census_review.md`
+§1). So state the paper's claim against **the class of formats with one scale per block and no side
+tensors, of which stock TQ1_0 is the canonical member**, and TQ1_64 becomes an implementation detail
+rather than a premise. The head-to-head above then supports a secondary, narrower claim about
+granularity.
+
 ### B.1 The scale ladder
 
 Methods that help at 4B and vanish at 27B would be a genuinely novel finding; the literature has no
@@ -347,6 +401,7 @@ groups will reuse, and it costs nothing extra to write because the incidents are
 | **T0.0** | **Systematic search + method register** (§A) | — | defines the candidate pool; everything downstream inherits its denominator. Desk work, no GPU. |
 | ~~**T0.1**~~ | ~~Track the experiment drivers~~ **DONE 2026-09-14** | — | 69 drivers moved to `experiments/sweep/` (tracked) with cross-references rewritten; outputs stay in the ignored `output_sweep/`. `tools/capture_env.sh` snapshots repo commit, host, GPU, package versions, and **HF dataset/model revision hashes** to `paper/env/`. |
 | **T0.2** | External reproduction gate | T0.1 | a reviewer cannot otherwise distinguish "these methods don't work" from "your pipeline is broken" — and this project has shipped a silently zeroed FP teacher that passed three sanity checks. Target: within ~0.05 pts of a published number. |
+| **T0.8** | **TQ1_0 vs TQ1_64 head-to-head** (§B.0) | T0.4 | the paper's premise. One extra 4B pipeline run targeting g256, exported to stock TQ1_0, scored against the g64/TQ1_64 arm on the real suite. Until this exists, "our format" is an assumption. |
 | **T0.3** | Download `Qwen3.5-9B` and `Qwen3.5-27B` | — | ladder decided and geometry verified (§B.1). ~18 GB + ~54 GB bf16 against 1.5 TB free. Optional 4th: `Qwen3.8-27B` as the generation control. |
 | **T0.4** | Stand up the benchmark suite | T0.1 | §D; every existing result is scored at n=24–48, which cannot resolve anything |
 | **T0.5** | Pre-register screen verdicts | T0.0 | §A.7; without a timestamped commit, §7 carries no weight |
