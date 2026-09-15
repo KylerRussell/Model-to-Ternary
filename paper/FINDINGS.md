@@ -106,6 +106,49 @@ sampling artifact — the unrotated draw was 3/4 tiny `(32, 2560)` projections w
 included a `9216×2560`. *A format comparison across different tensors measures the tensors.*
 `fmt_recon.py` now takes an explicit tensor list so both arms are scored on the same weights.
 
+## F3c. IQ1_M STRICTLY DOMINATES TQ1_64 — smaller *and* lower error · HOLDS
+
+The IQ1_S comparison asked the wrong question. Comparing error without holding bits fixed is
+meaningless, and correcting for that changes the answer completely.
+
+**First: the three scalar-ternary-ish formats sit on one rate-distortion line.** Fitting error
+against bpw across IQ1_S / TQ1_0 / TQ1_64 gives `err = -0.0643·bpw + 0.5467` with **r = -0.99972**
+and residuals of ±0.0002. None of them dominates any other — each buys error reduction at ~0.064 per
+bit. **TQ1_64 is not better than TQ1_0 or IQ1_S; it is further along the same curve.**
+
+**Then `IQ1_M` breaks the line.** At **1.75 bpw** it is the matched-rate comparison for our 1.7812:
+
+| format | bpw | err (rotated) | err (unrotated) | residual vs line |
+|---|---|---|---|---|
+| `IQ1_S` | 1.5625 | 0.44631 | 0.44826 | +0.00008 |
+| `TQ1_0` | 1.6875 | 0.43800 | 0.44160 | −0.00019 |
+| **`IQ1_M`** | **1.7500** | **0.41350** (3/3) | **0.41483** (3/3) | **−0.02068** |
+| TQ1_64 (ours) | 1.7812 | 0.43228 | 0.43527 | +0.00011 |
+
+**IQ1_M is 1.8% smaller AND 4.3% lower error than TQ1_64**, in both rotation regimes, on matched
+tensors. That is strict domination — not a trade. Its residual from the line is **100× the other
+three's**, so it is on a genuinely better rate-distortion curve rather than further along the same one.
+
+**Why.** IQ1_M carries g16 3-bit sub-scales (against our g64) *and* a delta sign per 8 weights — a
+one-bit offset at g8 granularity. Our format has g64 scales and no offset at all. At ~1.75 bpw,
+spending bits on fine scales plus a per-group sign beats spending them on a full ternary alphabet
+with coarse scales.
+
+**Strength of the conclusion.** Reconstruction error is a metric this project distrusts (F-series
+preamble), but **strict domination needs much less from the metric than a margin does**: when one
+option is better on both size and error, the conclusion survives unless the metric is
+*anti*-correlated with quality, not merely noisy. And the comparison is unweighted RTN, which
+*understates* IQ1_M — it is the arm designed around `imatrix` weighting.
+
+**Consequence: TQ1_64 is not defensible on present evidence.** The paper cannot claim it as a
+considered choice without either an end-to-end result overturning this, or a statement that we chose
+it before measuring. `IQ1_M` also ships in stock llama.cpp, while TQ1_64 lives in our fork
+(`TQ1_64_SPEC.md` still lists `LLAMA_FTYPE_MOSTLY_TQ1_64` as incomplete) — so it wins on
+deployability too.
+
+*Verified: `verify_iq1m()` packs our parameters into real 56-byte blocks — including the fp16 super
+split across four scale-word top nibbles — and matches gguf's dequantizer exactly (max |Δ| = 0).*
+
 ## F4. Our IQ1_S simulation is faithful, not an approximation · HOLDS
 
 `verify_iq1s()` packs our chosen `(d, s, δ, grid index)` into real 50-byte IQ1_S blocks and

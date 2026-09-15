@@ -16,7 +16,7 @@ end-to-end.
 import os, sys, json, torch
 sys.path.insert(0, os.path.dirname(__file__))
 from e2e_qp_distill import _shard_map, _get_tensor
-from format_sim import quant_ternary, quant_iq1s, rel_err, verify_iq1s
+from format_sim import quant_ternary, quant_iq1s, quant_iq1m, rel_err, verify_iq1s
 
 SRC = os.environ.get("FMT_SRC", "output_4bpipe/rotbase/modified_model")
 N_T = int(os.environ.get("N_TENSORS", "12"))
@@ -44,7 +44,7 @@ assert not missing, f"tensors absent from {SRC}: {missing[:3]}"
 print(f"\n{len(names)} tensors from {SRC}\n")
 
 rows = []
-print(f"{'tensor':46s} {'shape':>16s} {'TQ1_0':>9s} {'TQ1_64':>9s} {'IQ1_S':>9s}  winner")
+print(f"{'tensor':46s} {'shape':>16s} {'TQ1_0':>9s} {'TQ1_64':>9s} {'IQ1_S':>9s} {'IQ1_M':>9s}  winner")
 for ti, n in enumerate(names):
     W = _get_tensor(SRC, wm, n).float().to(DEV)
     if W.ndim != 2 or W.shape[1] % 256 or W.numel() > MAXEL:
@@ -53,19 +53,21 @@ for ti, n in enumerate(names):
     e["TQ1_0"] = rel_err(quant_ternary(W, group=256), W)
     e["TQ1_64"] = rel_err(quant_ternary(W, group=64), W)
     e["IQ1_S"] = rel_err(quant_iq1s(W, device=DEV), W)
+    e["IQ1_M"] = rel_err(quant_iq1m(W, device=DEV), W)
     win = min(e, key=e.get)
     rows.append({"tensor": n, "shape": list(W.shape), **e, "winner": win})
     print(f"[{ti+1}/{len(names)}] {n[-40:]:40s} {str(tuple(W.shape)):>16s} "
-          f"{e['TQ1_0']:9.5f} {e['TQ1_64']:9.5f} {e['IQ1_S']:9.5f}  {win}", flush=True)
+          f"{e['TQ1_0']:9.5f} {e['TQ1_64']:9.5f} {e['IQ1_S']:9.5f} {e['IQ1_M']:9.5f}  {win}", flush=True)
     del W
     torch.cuda.empty_cache()
 
 print("\n" + "=" * 78)
-for k in ("TQ1_0", "TQ1_64", "IQ1_S"):
+for k in ("IQ1_S", "TQ1_0", "IQ1_M", "TQ1_64"):
     m = sum(r[k] for r in rows) / max(len(rows), 1)
     print(f"  mean rel reconstruction error  {k:7s} {m:.5f}   "
           f"wins {sum(1 for r in rows if r['winner']==k):2d}/{len(rows)}")
-print("  bpw:  TQ1_0 1.6875   TQ1_64 1.7812   IQ1_S 1.5625")
+print("  bpw:  IQ1_S 1.5625 < TQ1_0 1.6875 < IQ1_M 1.7500 < TQ1_64 1.7812")
+print("  IQ1_M vs TQ1_64 is the MATCHED-RATE pair (1.75 vs 1.7812, within 1.8%)")
 print("=" * 78)
 if os.environ.get("OUT"):
     json.dump(rows, open(os.environ["OUT"], "w"), indent=1)

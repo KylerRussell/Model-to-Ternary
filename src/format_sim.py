@@ -243,3 +243,158 @@ def rel_err(a, b, imp=None):
         w = imp.reshape(1, -1).to(d.device)
         d, r = d * w, r * w
     return (d.sum() / r.sum().clamp_min(1e-12)).sqrt().item()
+
+
+# ─────────────────────────── IQ1_M ───────────────────────────
+#
+# The matched-rate arm: 1.75 bpw against TQ1_64's 1.7812 -- within 1.8% on size, so it isolates
+# format quality from bit budget in a way the IQ1_S comparison cannot.
+#
+# Structure (from gguf's dequantize_blocks): 56 B / 256 weights.
+#   qs      32 B   low 8 bits of each of 32 grid indices (one per 8 weights)
+#   qh      16 B   per group: 3 bits index-high + 1 bit delta sign  -> delta is per-g8
+#   scales   8 B   four uint16, each packing four 3-bit sub-scales -> 16 sub-scales, one per g16,
+#                  plus the fp16 super-scale split across their top nibbles
+# So IQ1_M is finer than IQ1_S on BOTH axes: g16 scales (vs g32) and a per-group delta (vs per-g32).
+
+from gguf.quants import IQ1_M as _IQ1M
+
+_GRID_M = None
+
+
+def iq1m_grid(device="cpu"):
+    global _GRID_M
+    if _GRID_M is None:
+        _IQ1M.init_grid()
+        _GRID_M = torch.tensor(np.asarray(_IQ1M.grid, dtype=np.float32)).reshape(-1, 8)
+    return _GRID_M.to(device)
+
+
+@torch.no_grad()
+def _iq1m_chunk(w, i_full, grid, gsq, dvals, d_scan):
+    dev = w.device
+    nb = w.shape[0]
+    # [nb, 16 sub-blocks, 2 groups, 8]
+    ws = w.reshape(nb, 16, 2, 8)
+    isb = i_full.reshape(nb, 16, 2, 8)
+    wg, ig = ws.reshape(-1, 8), isb.reshape(-1, 8)
+    iwg = ig * wg
+    lin0 = iwg @ grid.T
+    rs = iwg.sum(-1, keepdim=True)
+    quad = {dv: ig @ gsq[dv].T for dv in dvals}
+
+    d0 = (ws.abs().amax(-1).amax(-1).amax(-1, keepdim=True) / 15.0).clamp_min(1e-12)
+    best_tot = torch.full((nb,), float("inf"), device=dev)
+    best_rec = torch.zeros_like(w)
+    bp = {"d": torch.zeros(nb, device=dev), "s": torch.zeros(nb, 16, dtype=torch.long, device=dev),
+          "j": torch.zeros(nb, 16, 2, dtype=torch.long, device=dev),
+          "ds": torch.zeros(nb, 16, 2, dtype=torch.long, device=dev)}
+    for fi in range(d_scan):
+        f = 0.45 + 0.75 * fi / max(d_scan - 1, 1)
+        d = (d0 * f).half().float()                      # fp16 super, as the format stores it
+        sb_err = torch.full((nb, 16), float("inf"), device=dev)
+        sb_rec = torch.zeros(nb, 16, 2, 8, device=dev)
+        sb_s = torch.zeros(nb, 16, dtype=torch.long, device=dev)
+        sb_j = torch.zeros(nb, 16, 2, dtype=torch.long, device=dev)
+        sb_ds = torch.zeros(nb, 16, 2, dtype=torch.long, device=dev)
+        for s in range(8):
+            dlf = (d * (2 * s + 1)).reshape(nb, 1, 1, 1).expand(nb, 16, 2, 1).reshape(-1, 1)
+            # delta is per-GROUP in IQ1_M, so pick (delta, index) jointly per group
+            ge, gr, gj, gd = None, None, None, None
+            for di, dv in enumerate(dvals):
+                score = 2 * dlf * (lin0 + dv * rs) - (dlf ** 2) * quad[dv]
+                j = score.argmax(-1)
+                rec = dlf * (grid[j] + dv)
+                err = (ig * (rec - wg) ** 2).sum(-1)
+                if ge is None:
+                    ge, gr, gj, gd = err, rec, j, torch.full_like(j, di)
+                else:
+                    m = err < ge
+                    ge = torch.where(m, err, ge)
+                    gr = torch.where(m.unsqueeze(-1), rec, gr)
+                    gj = torch.where(m, j, gj)
+                    gd = torch.where(m, torch.full_like(j, di), gd)
+                del score, rec, err
+            e_sb = ge.reshape(nb, 16, 2).sum(-1)          # sub-block = 2 groups = g16
+            m = e_sb < sb_err
+            sb_err = torch.where(m, e_sb, sb_err)
+            sb_rec = torch.where(m.unsqueeze(-1).unsqueeze(-1), gr.reshape(nb, 16, 2, 8), sb_rec)
+            sb_s = torch.where(m, torch.full_like(sb_s, s), sb_s)
+            sb_j = torch.where(m.unsqueeze(-1), gj.reshape(nb, 16, 2), sb_j)
+            sb_ds = torch.where(m.unsqueeze(-1), gd.reshape(nb, 16, 2), sb_ds)
+        tot = sb_err.sum(-1)
+        m = tot < best_tot
+        best_tot = torch.where(m, tot, best_tot)
+        best_rec = torch.where(m.unsqueeze(-1), sb_rec.reshape(nb, QK_K), best_rec)
+        bp["d"] = torch.where(m, d.squeeze(-1), bp["d"])
+        bp["s"] = torch.where(m.unsqueeze(-1), sb_s, bp["s"])
+        bp["j"] = torch.where(m.unsqueeze(-1).unsqueeze(-1), sb_j, bp["j"])
+        bp["ds"] = torch.where(m.unsqueeze(-1).unsqueeze(-1), sb_ds, bp["ds"])
+    return best_rec, bp
+
+
+@torch.no_grad()
+def quant_iq1m(W, imp=None, d_scan=12, chunk=4096, device=None, return_params=False):
+    """IQ1_M: same 2048-entry grid, g16 3-bit sub-scales, per-g8 delta sign, fp16 super. 1.75 bpw."""
+    dev = device or W.device
+    out, inp = W.shape
+    assert inp % QK_K == 0
+    grid = iq1m_grid(dev)
+    dvals = (float(_IQ1M.delta), -float(_IQ1M.delta))
+    gsq = {dv: ((grid + dv) ** 2) for dv in dvals}
+    w_all = W.reshape(-1, QK_K).float()
+    recs, ps = [], []
+    for a in range(0, w_all.shape[0], chunk):
+        b = min(a + chunk, w_all.shape[0])
+        wc = w_all[a:b].to(dev)
+        ic = (torch.ones_like(wc) if imp is None else
+              imp.reshape(1, -1).expand(out, -1).reshape(-1, QK_K)[a:b].to(dev).float())
+        r, p = _iq1m_chunk(wc, ic, grid, gsq, dvals, d_scan)
+        recs.append(r.cpu())
+        ps.append({k: v.cpu() for k, v in p.items()})
+        del wc, ic
+        if dev != "cpu":
+            torch.cuda.empty_cache()
+    rec = torch.cat(recs, 0).reshape(out, inp).to(W.dtype).to(W.device)
+    if not return_params:
+        return rec
+    return rec, {k: torch.cat([p[k] for p in ps], 0) for k in ps[0]}
+
+
+def pack_iq1m(d, s, j, ds):
+    """Pack IQ1_M parameters into real 56-byte blocks (qs | qh | scales).
+
+    The super-scale is NOT stored contiguously: its four fp16 nibbles live in the TOP nibble of each
+    of the four uint16 scale words. Getting that wrong would make our reconstruction disagree with
+    the shipped dequantizer, which is precisely what verify_iq1m() exists to catch.
+    """
+    nb = d.shape[0]
+    jn = j.cpu().numpy().astype(np.uint16).reshape(nb, 32)
+    dsn = ds.cpu().numpy().astype(np.uint8).reshape(nb, 32)
+    qs = (jn & 0xFF).astype(np.uint8)                                  # [nb,32]
+    hi = ((jn >> 8) & 0x7).astype(np.uint8)
+    lo_g, hi_g = hi[:, 0::2], hi[:, 1::2]
+    lo_d, hi_d = dsn[:, 0::2], dsn[:, 1::2]
+    qh = (lo_g | (lo_d << 3) | (hi_g << 4) | (hi_d << 7)).astype(np.uint8)   # [nb,16]
+    sc = np.zeros((nb, 4), dtype=np.uint16)
+    sn = s.cpu().numpy().astype(np.uint16).reshape(nb, 16)
+    for k in range(16):
+        sc[:, k // 4] |= (sn[:, k] & 0x7) << (3 * (k % 4))
+    du = d.cpu().numpy().astype(np.float16).view(np.uint16).reshape(nb)
+    for m in range(4):
+        sc[:, m] |= (((du >> (4 * m)) & 0xF) << 12).astype(np.uint16)
+    return np.concatenate([qs, qh, sc.view(np.uint8).reshape(nb, 8)], axis=1)
+
+
+def verify_iq1m(n=64, seed=0, device="cpu"):
+    """IQ1_M reconstruction must equal gguf's own dequantizer on the same packed bytes."""
+    torch.manual_seed(seed)
+    W = (torch.randn(n, QK_K, device=device) * 0.02)
+    rec, p = quant_iq1m(W, return_params=True, device=device)
+    blocks = pack_iq1m(p["d"], p["s"], p["j"], p["ds"])
+    ref = _IQ1M.dequantize_blocks(blocks).reshape(n, QK_K)
+    err = np.abs(ref - rec.cpu().numpy().astype(np.float32)).max()
+    assert err == 0.0, f"IQ1_M simulation does NOT match gguf dequantize: max|delta|={err:.3e}"
+    print(f"verify_iq1m: reconstruction matches gguf.dequantize_blocks exactly "
+          f"({n} blocks, max|delta|=0)")
+    return True
