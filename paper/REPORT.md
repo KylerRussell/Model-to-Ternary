@@ -204,9 +204,15 @@ other people's work and exempts its own is not worth reading.
 
 ## 6. Limits
 
-* **RTN only.** No arm receives GPTQ, calibration, or recovery training. This measures format
-  *capacity*, not the ceiling each format reaches after recovery. A format that collapses under RTN
-  may still be recoverable, and the ranking after recovery is not established here.
+* **RTN only, and this is the survey's weakest joint.** No arm receives GPTQ, calibration, or
+  recovery training, so this measures formats at *our encoder's* competence rather than at their
+  ceiling. The distortion is not uniform across families: measured against the Shannon bound
+  `D(R) = sigma^2 2^(-2R)`, trellis reaches **92.8% of optimal** while scalar ternary reaches
+  **64.8%** and int3 **55.1%**. For trellis, Viterbi is already a near-optimal encoder, so little is
+  left on the table; for the scalar families most of the gap is plausibly *encoder* inefficiency that
+  a Hessian-aware or learned-rounding method could close. **The families ranked lowest here are
+  exactly those with the most to gain from a better method**, so §5.2's band B and C picks are
+  provisional pending the (format × method) literature review.
 * **Perplexity is a screen, not capability.** This project has separately shown a model can pass
   teacher-forced metrics at 78.5% agreement while solving 0/18 arithmetic problems its teacher
   solves. No capability benchmark was run on these formats.

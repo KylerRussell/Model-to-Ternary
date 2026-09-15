@@ -368,6 +368,39 @@ behaviour is scale-invariant: the 27B has 64 layers against the 4B's 32, so erro
 twice the depth and the F15 slope could steepen. The 27B end-to-end run needs all 11 shards and has
 not been done.
 
+## F17. Distance from the Shannon bound explains the ranking · HOLDS
+
+For a memoryless Gaussian source, `D(R) = sigma^2 * 2^(-2R)`, so the minimum achievable RELATIVE
+error at rate R is `2^-R`. Weights are near-Gaussian here (excess kurtosis 0.18-1.24 across roles and
+scales, F13/F16), making this the right reference. Measured against it, under RTN:
+
+| format | bpw | measured | bound | % of optimal |
+|---|---|---|---|---|
+| **trellis k2 L12** | 2.062 | 0.25798 | 0.23948 | **92.8%** |
+| trellis k1 L10 | 1.062 | 0.52779 | 0.47897 | 90.7% |
+| VQ k4096 d8 | 1.562 | 0.42082 | 0.33868 | 80.5% |
+| VQ k8192 d8 | 1.688 | 0.38767 | 0.31036 | 80.1% |
+| VQ k256 d4 | 2.062 | 0.31934 | 0.23948 | 75.0% |
+| ternary g256 | 1.647 | 0.43894 | 0.31930 | 72.7% |
+| **ternary g64** | 1.835 | 0.43256 | 0.28029 | **64.8%** |
+| lattice E8 g256 | 2.252 | 0.33679 | 0.20993 | 62.3% |
+| int3 g256 | 3.062 | 0.21751 | 0.11974 | 55.1% |
+
+**This explains F11/F13's ranking rather than merely restating it.** Trellis wins because
+trellis-coded quantization is *designed* to approach the rate-distortion bound — Viterbi over a
+long-constraint trellis is a near-optimal encoder — and scalar ternary's ~65% is the classic granular
+gap of scalar quantization. The ordering is not an empirical accident; it is the theory.
+
+**The load-bearing caveat.** A format's gap to the bound under RTN conflates two things: structural
+inefficiency (irreducible for that representation) and *encoder* inefficiency (RTN is a poor encoder).
+For trellis the two are nearly the same, since Viterbi is already optimal for it — 92.8% is close to
+that format's ceiling. For int3 at 55.1% and ternary at 64.8%, most of the gap is plausibly encoder
+inefficiency that GPTQ-class methods could close.
+
+**Therefore RTN cannot settle the band choices.** It measures formats at *our* encoder's competence,
+and the families furthest from the bound are exactly those with the most to gain from a better one.
+Driving prompt for the literature: `research_prompts/format_method_crossproduct_prompt.md`.
+
 ## F12. The first taxonomy was chosen by implementation convenience · HOLDS (method)
 
 The first family sweep contained exactly three families — symmetric scalar, asymmetric scalar, vector
