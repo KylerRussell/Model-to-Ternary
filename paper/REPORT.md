@@ -171,16 +171,31 @@ sharpest result. At every rate where ternary competes, a codebook format reaches
 or lower bpw. Ternary's appeal is that log₂3 = 1.585 is a natural-looking target and that packing is
 simple; neither is an argument about quality.
 
-### 5.3 What the two lower bands actually are
+### 5.3 What the bands look like with a real encoder
 
-Under RTN, **every sub-2-bpw format tested lands on the destroyed side** — perplexity 658 to 20,060
-against fp16's 4.34. The ~1.7 and ~1.56 picks are therefore **the best starting points for a recovery
-pipeline, not deployable configurations**. That is a materially weaker claim than "best format at
-1.5 bpw" and it is the one the evidence supports. Only the ~2.06 pick is usable as-is.
+An earlier draft of this section claimed that under RTN every sub-2-bpw format lands on the destroyed
+side, and that bands B and C are therefore starting points for a recovery pipeline rather than
+deployable configurations. **Model-wide GPTQ shows that framing understated what a post-training
+encoder achieves on its own.**
 
-This also explains, retrospectively, why this project needed GPTQ plus block-AP plus assignment
-training to reach a working ternary model: it was operating a full 0.17 in reconstruction error
-beyond where RTN produces anything usable, and the entire pipeline exists to close that gap.
+| format | bpw | RTN ppl | GPTQ ppl | vs fp16 (4.34) |
+|---|---|---|---|---|
+| **trellis k2** | 2.062 | 11.83 | **6.53** | **1.51×** |
+| ternary g64 | 1.835 | 2962.68 | **57.84** | 13.34× |
+
+**Band A is deployable today.** Trellis + GPTQ at 2.062 bpw reaches 1.51× fp16 perplexity, and beats
+int3 + RTN at 3.062 bpw (6.53 vs 7.06) — **33% fewer bits and better quality**.
+
+**GPTQ narrows the format gap 28× (250× → 8.9×) without closing it.** Reconstruction error rose by a
+similar proportion in both formats under GPTQ (+39% trellis, +42% ternary), so the encoder favours
+neither; the residual 8.9× is the sphere-packing deficit of §4.4, structural and not recoverable by
+encoding. This is the measurement that decides the band picks, and it decides them for the non-scalar
+formats.
+
+**Bands B and C remain provisional for a different reason than before.** Not because sub-2 bpw is
+unusable — ternary at 57.84 is a working if degraded model — but because **the band B and C picks
+(VQ k8192, VQ k4096) have no end-to-end GPTQ number**. They were selected on RTN reconstruction, and
+VQ sits structurally between the two formats that were measured. That is the gap to close next.
 
 ### 5.4 Design decisions in this survey, and what was wrong with them
 

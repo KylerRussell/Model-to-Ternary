@@ -439,6 +439,54 @@ GPTQ closing most of ternary's gap — did not occur.
 verdict needs perplexity with GPTQ applied model-wide, which is not yet run. One-shot Hessians from
 the FP model, not sequentially propagated as production GPTQ does. Three tensors, one model.
 
+## F19. End-to-end with GPTQ: trellis at 2.06 bpw reaches ppl 6.53 · HOLDS
+
+Model-wide sequential GPTQ (Hessians captured from the partially quantized model, so each layer
+compensates for its predecessors; embeddings RTN in both arms since a lookup has no input covariance):
+
+| format | bpw | RTN ppl | **GPTQ ppl** | gain | vs fp16 (4.34) |
+|---|---|---|---|---|---|
+| **trellis k2** | 2.062 | 11.83 | **6.53** | 1.8x | **1.51x** |
+| ternary g64 | 1.835 | 2962.68 | **57.84** | **51.2x** | 13.34x |
+
+**Headline: trellis + GPTQ at 2.062 bpw beats int3 + RTN at 3.062 bpw (6.53 vs 7.06)** — 33% fewer
+bits *and* better quality. At 1.51x fp16 perplexity this is a genuinely deployable model, not a
+survivor.
+
+**GPTQ narrows the format gap 28x — from 250x to 8.9x — and does not close it.** Both formats moved
+the same direction and by similar proportions in reconstruction error (+39% trellis, +42% ternary),
+so the encoder is not advantaging either; the residual 8.9x is the structural sphere-packing deficit
+(F17), exactly as theory predicts.
+
+**Correction to my own prediction, stated in advance.** I predicted from F18's proxy-loss gap (1.58x)
+that "trellis should retain roughly its 1.5x advantage". The actual perplexity gap is **8.9x** —
+direction right, magnitude badly wrong. Proxy loss is a squared-error surrogate and perplexity is
+exponential in error, so a 1.58x proxy gap maps to a far larger perplexity gap. **Proxy loss ranks
+formats; it does not size the difference between them.**
+
+### F19a. RETRACTION — the sub-2-bpw regime is not "unusable"
+
+`REPORT.md` §5.3 stated that under RTN every sub-2-bpw format lands on the destroyed side, and called
+bands B and C "starting points for a recovery pipeline, not deployable configurations". Ternary at
+1.835 bpw with **GPTQ alone** — no QAT, no distillation, no assignment training — reaches **57.84**,
+four orders of magnitude from "destroyed". The RTN-only framing understated what a post-training
+encoder achieves by itself. Corrected in the report.
+
+### F19b. SCOPING — F15 is encoder-specific, not a law
+
+`log(ppl) = 27.31·recon − 4.20` (r = 0.996) was fitted on RTN points, where reconstruction error is
+the quantity being minimised. Applied to GPTQ weights it **over-predicts by 4,794x** (ternary GPTQ:
+predicts 277,295, actual 57.84), because GPTQ deliberately buys lower activation-weighted error with
+*higher* weight error.
+
+**Correct statement: reconstruction error predicts perplexity WITHIN a fixed encoder. Comparisons
+across encoders must use the encoder's own objective.** This is the second finding this session I
+recorded too broadly — the first being "reconstruction metrics never predict anything". Both errors
+have the same shape: a relationship measured under one condition, written down as general.
+
+**Limits.** One model, one calibration set (16 sequences), perplexity not capability. VQ — the band B
+and C picks — has no end-to-end GPTQ number yet, which is now the gap that matters most.
+
 ## F12. The first taxonomy was chosen by implementation convenience · HOLDS (method)
 
 The first family sweep contained exactly three families — symmetric scalar, asymmetric scalar, vector
