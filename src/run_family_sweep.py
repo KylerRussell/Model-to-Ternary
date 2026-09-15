@@ -5,7 +5,7 @@ from e2e_qp_distill import _shard_map, _get_tensor
 from family_sweep import (LOG2_3, bpw_sym, bpw_asym, bpw_vq, bpw_microfloat, bpw_multiplane,
                           bpw_lowrank, bpw_sparse_hybrid, bpw_trellis, q_sym, q_asym, q_vq,
                           q_nonuniform, q_microfloat, q_lattice_e8, q_multiplane, q_lowrank,
-                          q_sparse_hybrid, q_trellis, nf_levels, entropy_bpw, rel_err)
+                          q_sparse_hybrid, q_trellis, q_mixed, bpw_mixed, nf_levels, entropy_bpw, rel_err)
 
 SRC = os.environ.get("SRC") or glob.glob(
     "/home/kasm-user/.cache/huggingface/hub/models--Qwen--Qwen3.5-4B/snapshots/*")[0]
@@ -17,12 +17,15 @@ wm = _shard_map(SRC)
 # comparison only ten g256 groups per row to work with. The families must be scored on the tensors
 # that carry the model's parameters.
 KINDS = os.environ.get("KINDS", "down_proj,gate_proj,up_proj,in_proj_qkv,out_proj").split(",")
+EMB = os.environ.get("EMB", "")          # e.g. model.language_model.embed_tokens.weight
 names = []
 for kind in KINDS:
     c = sorted(k for k in wm if k.endswith(f"{kind}.weight"))
     if c:
         names.append(c[len(c) // 2])            # a mid-depth layer of each kind
-names = names[:int(os.environ.get("N_T", "5"))]
+names = names[:int(os.environ.get('N_T', '5'))]
+if EMB and EMB in wm:
+    names.append(EMB)
 print(f"STOCK model: {SRC}\ntensors: {len(names)}\n", flush=True)
 
 ARMS = []
@@ -58,8 +61,13 @@ for kb, L in ((1, 10), (2, 10), (2, 12), (3, 10)):
 
 rows = []
 for n in names:
-    W = _get_tensor(SRC, wm, n).float().to(DEV)
-    if W.ndim != 2 or W.shape[1] % 256 or W.numel() > 40 * 1024 * 1024 or min(W.shape) < 256:
+    W = _get_tensor(SRC, wm, n).float()
+    if "embed" in n and W.shape[0] > 16384:      # sample rows: a full 248320x2560 embedding is 636M
+        g0 = torch.Generator().manual_seed(0)    # params, and row-sampling is statistically sound
+        W = W[torch.randperm(W.shape[0], generator=g0)[:16384]]
+        print(f"   (embedding row-sampled to {tuple(W.shape)})", flush=True)
+    W = W.to(DEV)
+    if W.ndim != 2 or W.shape[1] % 256 or W.numel() > 45 * 1024 * 1024 or min(W.shape) < 256:
         del W
         continue
     print(f"--- {n}  {tuple(W.shape)}", flush=True)
@@ -70,6 +78,13 @@ for n in names:
             print(f"   {label:26s} {bpw:6.3f} bpw   {e:.5f}", flush=True)
         except Exception as ex:
             print(f"   {label:26s} SKIP ({type(ex).__name__})", flush=True)
+    for blo, bhi, fr in ((1.0, LOG2_3, 0.25), (1.0, LOG2_3, 0.5), (LOG2_3, 3.0, 0.25),
+                         (LOG2_3, 3.0, 0.5)):    # L: mixed precision, rate depends on shape
+        bp = bpw_mixed(W.shape, blo, bhi, fr, 64)
+        e = rel_err(q_mixed(W, blo, bhi, fr, 64), W)
+        lab = f"L mixed {blo:.2f}/{bhi:.2f} {int(fr*100)}%"
+        rows.append({"tensor": n, "arm": lab, "bpw": bp, "err": e})
+        print(f"   {lab:26s} {bp:6.3f} bpw   {e:.5f}", flush=True)
     for r in (16, 32, 64):                       # I: low-rank -- bpw depends on tensor shape
         if r >= min(W.shape) // 2:               # rank near full rank is an identity, not compression
             print(f"   I lowrank r{r}: SKIP (rank {r} >= half of min_dim {min(W.shape)})", flush=True)

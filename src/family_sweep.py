@@ -456,3 +456,37 @@ def q_trellis(W, k_bits=2, L=10, group=256, device=None, chunk=4096, n_scan=9):
 
 def bpw_trellis(k_bits, group, scale_bits=16):
     return k_bits + scale_bits / group
+
+
+# ═══════════════ L. MIXED PRECISION / per-channel bit allocation  (EXL2, PTQ1.61, AWSRC) ═══════════
+
+@torch.no_grad()
+def q_mixed(W, b_lo=1.0, b_hi=LOG2_3, frac_hi=0.25, group=64, axis=0):
+    """Allocate b_hi to the `frac_hi` most error-prone channels and b_lo to the rest.
+
+    Sensitivity is measured, not guessed: quantize everything at b_lo, rank channels by the error
+    they actually incur, and promote the worst. That is greedy-optimal for this objective and is what
+    EXL2 does in spirit. Using a heuristic proxy (row norm, kurtosis) would understate the family,
+    since the family's whole claim is that it spends bits where they are needed.
+    """
+    Wf = W.float()
+    lo = q_sym(Wf, b_lo, group).float()
+    err = ((lo - Wf) ** 2).sum(dim=1 - axis)                      # per-channel error at the low rate
+    k = max(int(round(frac_hi * err.numel())), 1)
+    idx = err.topk(k).indices
+    hi = q_sym(Wf, b_hi, group).float()
+    out = lo.clone()
+    if axis == 0:
+        out[idx, :] = hi[idx, :]
+    else:
+        out[:, idx] = hi[:, idx]
+    return out.to(W.dtype)
+
+
+def bpw_mixed(shape, b_lo, b_hi, frac_hi, group, axis=0, scale_bits=16):
+    """Average rate, plus the per-channel allocation MAP, which is not free."""
+    n_ch = shape[0] if axis == 0 else shape[1]
+    per_ch = shape[1] if axis == 0 else shape[0]
+    avg = frac_hi * b_hi + (1 - frac_hi) * b_lo
+    map_bits = 1.0 / per_ch                                       # 1 bit per channel, amortised
+    return avg + scale_bits / group + map_bits

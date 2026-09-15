@@ -247,6 +247,51 @@ format work specifically, the rule is now: stratify by tensor kind, never by nam
 score a compression family on tensors small enough for its side structures to be degenerate — the
 low-rank arm at rank 32 on `min_dim` 32 was reconstructing an identity and reporting it as a result.
 
+## F13. The format frontier is ROLE-INVARIANT · HOLDS
+
+F11c showed the tensor sample decides the answer, so the sweep was re-run split by tensor role rather
+than pooled. Sub-2.3 bpw, stock Qwen3.5-4B:
+
+| rank | MLP | attention | embedding |
+|---|---|---|---|
+| 1 | **G trellis k2 L12** 0.25798 | **G trellis k2 L12** 0.25886 | **G trellis k2 L12** 0.25872 |
+| 2 | G trellis k2 L10 0.26441 | G trellis k2 L10 0.26551 | G trellis k2 L10 0.26548 |
+| 3 | E vq k256 d4 0.31934 | E vq k256 d4 0.32173 | E vq k256 d4 0.32218 |
+| 4 | F lattice E8 0.33679 | F lattice E8 0.34534 | F lattice E8 0.35649 |
+| 5 | H plane x2 binary 0.34786 | H plane x2 binary 0.35180 | H plane x2 binary 0.35662 |
+
+**The ordering is identical in all three roles and the values agree to within 1–5%.** Frontier family
+membership is identical too — A(7), B(1), C(5), E(4), G(4), I(1), J(1) — with embedding differing only
+by dropping J.
+
+**Mechanism, checked rather than assumed.** Identical rankings across roles are suspicious, so the
+distributions were measured: excess kurtosis **0.803** (mlp.down_proj), **0.845** (attn.in_proj_qkv),
+**1.335** (attn.out_proj), **0.647** (embed_tokens). All four roles are mildly heavy-tailed and close
+to Gaussian. The frontier is role-invariant **because the source is effectively the same**, not
+because format choice is magically independent of what it encodes.
+
+**Consequences.** Applying one format uniformly across the model is justified — per-role format
+selection buys essentially nothing, which is worth stating because it is the implicit assumption in
+every published sub-2-bit method and had never been checked here. It also yields a falsifiable
+prediction: a model whose roles have *genuinely* different distributions (extreme outlier channels, a
+MoE router, a quantization-hostile embedding) should break role-invariance. Our 4B does not, so the
+claim is scoped to near-Gaussian weight distributions and must be re-checked before transfer.
+
+## F14. Mixed-precision (family L) never reaches the frontier · HOLDS
+
+Per-channel bit allocation, with sensitivity **measured** rather than proxied — quantize at the low
+rate, rank channels by the error they actually incur, promote the worst fraction, which is
+greedy-optimal for this objective and is what EXL2 does in spirit. Rate charges the allocation map
+(1 bit/channel, amortised), because omitting it is the same error as sparse-hybrid omitting indices.
+
+Result: **0.373 (MLP) / 0.379 (attn) / 0.384 (embed) at 2.189 bpw**, against trellis's **0.258 at
+2.062 bpw** — dominated on both axes in every role. Mixed precision spends bits moving channels
+between two coarse grids; trellis spends the same bits buying a *continuous* effective codebook.
+
+Together with F13 this closes the family sweep at **ten families measured, three never reaching the
+frontier in any role: D (micro-float), H (multi-plane), L (mixed-precision)**, plus F (lattice) which
+reaches it only on MLP.
+
 ## F12. The first taxonomy was chosen by implementation convenience · HOLDS (method)
 
 The first family sweep contained exactly three families — symmetric scalar, asymmetric scalar, vector
