@@ -188,6 +188,75 @@ weights that round to zero, so the third ternary symbol is worth far more than t
 
 *Draft section: `paper/sec_format_choice.md`.*
 
+## F11. NO scalar-ternary configuration is Pareto-optimal at any bit rate · HOLDS
+
+The earlier comparisons sampled named ggml types and fitted the reference line through the ternary
+family — a taxonomy chosen by implementation convenience, which made our own family the origin of the
+coordinate system. Re-run as a **family sweep on stock Qwen3.5-4B** (no untying, no rotation), 40
+configurations across six structural families, bpw computed honestly including every side structure:
+
+**Pareto frontier, sub-2.2 bpw band — entirely families E and F:**
+
+| bpw | config | rel_err |
+|---|---|---|
+| 1.881 | **F lattice E8 g64** | **0.30228** |
+| 2.062 | E vq k256 d4 g256 | 0.31512 |
+| 1.736 | **F lattice E8 g128** | **0.33296** |
+| 1.625 | E vq k2048 d8 g64 | 0.35339 |
+| 1.438 | E vq k2048 d8 g256 | 0.35798 |
+| 1.651 | F lattice E8 g256 | 0.37104 |
+| 2.085 | *A sym ternary g32* | *0.43456* |
+| 1.835 | *A sym ternary g64* | *0.44447* |
+| 1.710 | *A sym ternary g128* | *0.44969* |
+| 1.647 | *A sym ternary g256* | *0.45522* |
+
+**All four scalar-ternary configurations are dominated. None reaches the frontier at any rate.** E8
+lattice at **1.651 bpw** (0.371) beats ternary at **2.085 bpw** (0.435): 21% fewer bits *and* 15%
+lower error.
+
+Where each family reaches the frontier:
+
+| family | frontier points | bpw range |
+|---|---|---|
+| **E** vector quantization | 3 | **1.06 – 1.62** |
+| **F** lattice | 2 | **1.74 – 1.88** |
+| A uniform scalar | 6 | 1.06 (binary only), then **3.06+** |
+| B asymmetric scalar | 4 | 3.25 – 5.00 |
+| C non-uniform scalar | 5 | 4.12 – 4.50 |
+
+**Below ~2 bpw the frontier is vector and lattice quantization. Scalar families do not appear again
+until ~3 bpw.** The two families that own the sub-2-bit regime are precisely the two the method
+census declared undeployable on hardware grounds — a claim F2 already falsified.
+
+**Second result, at the other end:** non-uniform scalar (family C) beats uniform int4 by **~15% at
+identical bits** (NF4 0.0933 / IQ4_NL 0.0959 vs int4 0.1153 at 4.125 bpw). A uniform grid is
+MSE-optimal only for a uniform source, and LLM weights are not uniform. This family was absent from
+the first pass entirely despite `IQ4_NL` and NF4 both shipping.
+
+*Method: `src/family_sweep.py`, `src/run_family_sweep.py`, taxonomy in `paper/format_taxonomy.md`.
+Lattice rate is MEASURED (distinct lattice points used → log₂ per 8 weights), not assumed, because
+rounding to the infinite E8 lattice has no bounded index and quoting a nominal rate would credit the
+family with error achievable only at unbounded rate.*
+
+**Limits.** 3 tensors, one model, reconstruction only. Families G (trellis), H (multi-plane),
+I (low-rank residual), J (sparse-hybrid), L (mixed-precision) are not yet measured and are declared
+as such in the taxonomy — their absence is a hole in this frontier, not evidence against them.
+
+## F12. The first taxonomy was chosen by implementation convenience · HOLDS (method)
+
+The first family sweep contained exactly three families — symmetric scalar, asymmetric scalar, vector
+quantization — which are the three things implementable in an afternoon. Enumerating the space from
+structural axes instead (level geometry · quantization unit · decomposition · code length · decode
+dependency · bit allocation) yields **thirteen** populated families.
+
+The omitted ten included **lattice quantization, which turns out to own the 1.7–1.9 bpw frontier**,
+and **non-uniform scalar, which wins the 4-bit band** — so the omission was not cosmetic; it excluded
+both winners. A taxonomy assembled from what tooling makes easy will reliably conclude that the
+easy thing is best.
+
+*Recorded as a method finding because it is the same failure as F3b's family-bounded search, one
+level up: there, searching within a family; here, choosing the families by convenience.*
+
 ## F4. Our IQ1_S simulation is faithful, not an approximation · HOLDS
 
 `verify_iq1s()` packs our chosen `(d, s, δ, grid index)` into real 50-byte IQ1_S blocks and
