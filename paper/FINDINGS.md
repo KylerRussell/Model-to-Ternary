@@ -401,6 +401,44 @@ inefficiency that GPTQ-class methods could close.
 and the families furthest from the bound are exactly those with the most to gain from a better one.
 Driving prompt for the literature: `research_prompts/format_method_crossproduct_prompt.md`.
 
+## F18. Hessian-aware encoding helps every family ~equally; it does NOT close the structural gap · HOLDS
+
+Answers the cross-product report's unsourced claim (that second-order PTQ moves scalar ternary from
+64.8% to ~71.5% of the Shannon bound) with our own measurement. Real calibration Hessians
+`H = E[xx^T]` from 16 sequences, block-wise GPTQ generalised so a format encodes a column block
+jointly (reduces exactly to textbook GPTQ at block size 1). Mean over 3 stratified MLP tensors:
+
+| format | bpw | recon RTN | recon GPTQ | **proxy RTN** | **proxy GPTQ** | proxy gain |
+|---|---|---|---|---|---|---|
+| ternary g64 | 1.835 | 0.4326 | 0.6296 | 0.3760 | 0.2153 | **42.7%** |
+| ternary g256 | 1.647 | 0.4389 | 0.6304 | 0.3907 | 0.2522 | 35.4% |
+| vq k4096 d8 | 1.562 | 0.4208 | 0.5683 | 0.3551 | 0.2131 | 40.0% |
+| **trellis k2** | 2.062 | 0.2655 | 0.3874 | **0.2221** | **0.1362** | 38.7% |
+
+**GPTQ raises plain reconstruction error while cutting proxy loss by 35–43%.** That is not a bug: GPTQ
+minimises `Tr(dW H dW^T)`, the second-order term of the task loss, *not* `||dW||_F`. It deliberately
+accepts larger weight error where the activations do not care. Two consequences:
+
+* **Shannon efficiency is not defined for a GPTQ-encoded weight.** The bound is a statement about
+  reconstruction error; GPTQ optimises a different objective. The report's "64.8% -> 71.5%" compares
+  quantities that are not comparable, and our own F17 efficiencies apply to RTN only.
+* **The report's conclusion survives its broken framing.** On the metric GPTQ actually optimises, the
+  ternary-to-trellis gap narrows only from **1.69x to 1.58x**. Every family gains ~35–43%; the
+  ordering is untouched.
+
+**The cleanest way to state it:** ternary+GPTQ (proxy 0.2153) lands almost exactly on trellis+RTN
+(0.2221). **A good encoder buys scalar ternary roughly what the better format gave away for free** —
+and trellis+GPTQ then moves on to 0.1362, so the format advantage compounds rather than being
+absorbed. This is the sphere-packing deficit behaving as theory predicts: it is structural, and
+encoding cannot recover it.
+
+**Decision consequence:** bands B and C stay non-scalar. The result that would have overturned them —
+GPTQ closing most of ternary's gap — did not occur.
+
+**Limits.** Proxy loss is a better predictor than reconstruction but is still not end-to-end; the
+verdict needs perplexity with GPTQ applied model-wide, which is not yet run. One-shot Hessians from
+the FP model, not sequentially propagated as production GPTQ does. Three tensors, one model.
+
 ## F12. The first taxonomy was chosen by implementation convenience · HOLDS (method)
 
 The first family sweep contained exactly three families — symmetric scalar, asymmetric scalar, vector
