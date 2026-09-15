@@ -10,6 +10,9 @@ from family_sweep import (LOG2_3, bpw_sym, bpw_asym, bpw_vq, bpw_microfloat, bpw
 SRC = os.environ.get("SRC") or glob.glob(
     "/home/kasm-user/.cache/huggingface/hub/models--Qwen--Qwen3.5-4B/snapshots/*")[0]
 DEV = "cuda:0" if torch.cuda.is_available() else "cpu"
+# element budget per tensor; 27B tensors are row-sliced down to this so the per-tensor workload
+# is comparable across scales (see the slicing note below).
+MAXEL = int(os.environ.get("MAX_ELEMS", str(45 * 1024 * 1024)))
 wm = _shard_map(SRC)
 # STRATIFIED by tensor KIND, not by alphabetical position. A strided slice of sorted names picked
 # three (32, 2560) `in_proj_a` tensors -- identical tiny shapes -- which made the low-rank arm
@@ -67,9 +70,19 @@ for n in names:
         W = W[torch.randperm(W.shape[0], generator=g0)[:16384]]
         print(f"   (embedding row-sampled to {tuple(W.shape)})", flush=True)
     W = W.to(DEV)
-    if W.ndim != 2 or W.shape[1] % 256 or W.numel() > 45 * 1024 * 1024 or min(W.shape) < 256:
+    if W.ndim != 2 or W.shape[1] % 256 or min(W.shape) < 256:
+        print(f"   SKIP {n}: shape {tuple(W.shape)} unsuitable", flush=True)
         del W
         continue
+    # 27B tensors are ~4x the 4B's (down_proj is 5120x17408 = 89M), and a flat element cap silently
+    # skipped every one of them -- the sweep "completed" with zero rows. Slice ROWS instead, which
+    # keeps the full input dimension so group structure along the quantization axis is unchanged,
+    # and makes the per-tensor workload comparable across scales.
+    if W.numel() > MAXEL:
+        keep = max(MAXEL // W.shape[1], 256)
+        print(f"   row-sliced {tuple(W.shape)} -> ({keep}, {W.shape[1]}) to match the 4B workload",
+              flush=True)
+        W = W[:keep].contiguous()
     print(f"--- {n}  {tuple(W.shape)}", flush=True)
     for label, bpw, fn in ARMS:
         try:
@@ -103,5 +116,8 @@ for n in names:
     del W
     torch.cuda.empty_cache()
 
+if not rows:
+    raise SystemExit("FATAL: 0 rows -- every tensor was skipped. A sweep that measures "
+                     "nothing must not exit successfully.")
 json.dump(rows, open(os.environ.get("OUT", "output_sweep/family_sweep.json"), "w"), indent=1)
 print(f"\nwrote {os.environ.get('OUT','output_sweep/family_sweep.json')}  ({len(rows)} rows)")

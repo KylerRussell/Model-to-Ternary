@@ -339,6 +339,35 @@ than a measure of it. The 0.258–0.388 interval is unsampled, so the boundary's
 not a number. The slope is fitted on formats from four different families, which is what makes it
 interesting — but it has not been checked at another scale, and F16 is that check.
 
+## F16. The format frontier is SCALE-invariant (4B -> 27B) · HOLDS
+
+The same 57 configurations on stock Qwen3.5-4B and Qwen3.5-27B MLP tensors:
+
+| bpw | config | 4B err | 27B err | delta |
+|---|---|---|---|---|
+| 2.062 | trellis k2 L12 | 0.25798 | 0.25801 | **+0.00003** |
+| 2.062 | trellis k2 L10 | 0.26441 | 0.26448 | +0.00007 |
+| 2.062 | vq k256 d4 | 0.31934 | 0.31973 | +0.00040 |
+| 1.835 | ternary g64 | 0.43256 | 0.43363 | +0.00107 |
+| 2.252 | lattice E8 g256 | 0.33679 | 0.33940 | +0.00261 |
+
+All deltas are **+0.00003 to +0.009**, mostly under +0.002, and rank order is unchanged. **A format
+decision made at 4B transfers to 27B.**
+
+This is the *opposite* of this project's experience with METHODS, where the 4B is a
+known-catastrophic testbed (-62% relative MMLU against the 27B's -18%, §13am-i). Formats and methods
+do not share that scale sensitivity, and conflating them would have led us to distrust a
+transferable measurement.
+
+**Role-invariance also survives at 27B**: MLP and embedding give identical rankings, and excess
+kurtosis is 0.18-1.24 across all roles at both scales — every role remains mildly heavy-tailed and
+close to Gaussian, which is the mechanism F13 identified.
+
+**Limit that matters.** This is reconstruction-only. It does NOT establish that *end-to-end*
+behaviour is scale-invariant: the 27B has 64 layers against the 4B's 32, so error compounds through
+twice the depth and the F15 slope could steepen. The 27B end-to-end run needs all 11 shards and has
+not been done.
+
 ## F12. The first taxonomy was chosen by implementation convenience · HOLDS (method)
 
 The first family sweep contained exactly three families — symmetric scalar, asymmetric scalar, vector
