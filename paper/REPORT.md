@@ -198,6 +198,42 @@ bpw). Extrapolating the VQ curve to ternary's rate gives ppl ≈ 16.5 against it
 **None of the three is scalar ternary**, which remains the survey's sharpest result and now rests on
 end-to-end evidence under two different encoders rather than on reconstruction error.
 
+### 5.2b The four encoders carried forward, and why
+
+The survey measured fifteen configurations across ten families. Four are carried into the method
+sweep. They are not the four best by error alone — each answers a different question.
+
+| # | encoder | bpw | why this one |
+|---|---|---|---|
+| **E1** | **Trellis-coded** (k=2, L=12, g256) | **2.062** | Pareto-optimal at every rate it was measured, and **92.8% of the Shannon bound** — near the ceiling for *any* format at this rate. Viterbi is already a near-optimal encoder for it, so little is left for a better method to recover, which makes it the band-A pick and a hard target for the others. |
+| **E2** | **VQ** (k=8192, d=8, g256) | **1.688** | Best measured at the largest budget that still fits an 8 GB card. Beats scalar ternary on *both* axes under both encoders tried — better perplexity at 0.147 fewer bpw. |
+| **E3** | **VQ** (k=4096, d=8, g256) | **1.562** | Same family as E2 at a lower rate, giving the 8 GB card headroom for longer context. Including both isolates **rate** from **family**: E2 and E3 differ only in codebook size, so any E2-vs-E3 difference is rate, not structure. |
+| **E4** | **Bonsai Q2** (2-bit codes, g64, fp16 scale) | **2.125 / 2.250** | **The external anchor, and not ours.** A shipped, widely-downloaded production ternary 27B. Without it every comparison in this survey is internal. |
+
+Scalar ternary (g64 at 1.835 bpw, g256 at 1.647) is carried as a **reference, not a candidate**: it is
+what most sub-2-bit work uses and what this project originally built, and our measurements place it
+off the Pareto frontier under both encoders tested. Reporting it keeps the comparison legible to
+readers whose baseline it is.
+
+#### Why E4 must be measured as an encoder, not as a model
+
+The published Bonsai 27B was trained with **30B tokens of QAT**. Comparing its released perplexity
+against our post-training numbers would measure its training budget, not its format. So **E4 enters
+the sweep as a format only** — its encoder re-implemented and run through the identical method ladder
+as E1–E3, at the identical (much smaller) budget. If another encoder beats it at lower bpw under
+matched conditions, that is evidence about the encoder; it says nothing about what Bonsai achieves
+with 30B tokens, and the report must not imply otherwise.
+
+Two facts about E4 are already established from its GGUF header, independent of any measurement:
+**2-bit codes with fp16 scales at g64** (68 B / 256 weights for `Q2_0`, 72 B / 256 for `Q2_g64`), and
+**100% of the weight in one custom type** — embeddings and output head included, as in our own format.
+Its g64 granularity independently matches the choice TQ1_64 was designed around.
+
+**The 27B ships at 2.13–2.26 bpw whole-model, not the 1.78 bpw this project adopted as its target.**
+That target was taken as a competitive anchor from Bonsai's release; the whole-model rate of the
+deployed artifact is higher. It is the same accounting gap §4 documents in the literature, appearing
+in this project's own motivating decision.
+
 ### 5.3 What the bands look like with a real encoder
 
 An earlier draft of this section claimed that under RTN every sub-2-bpw format lands on the destroyed
