@@ -292,6 +292,53 @@ Together with F13 this closes the family sweep at **ten families measured, three
 frontier in any role: D (micro-float), H (multi-plane), L (mixed-precision)**, plus F (lattice) which
 reaches it only on MLP.
 
+## F15. Weight reconstruction error predicts perplexity EXPONENTIALLY (r = 0.996) · HOLDS
+
+Six formats quantized end-to-end on the stock 4B (every quantizable 2D tensor replaced by its
+dequantized form, RTN, no recovery), evaluated on 49,104 held-out tokens:
+
+| bpw | format | recon err | perplexity |
+|---|---|---|---|
+| 16.000 | fp16 | — | **4.34** |
+| 3.062 | int3 g256 | 0.220 | **7.06** |
+| **2.062** | **trellis k2** | **0.258** | **11.83** |
+| 1.835 | ternary g64 | 0.435 | 2962.68 |
+| 1.688 | vq k8192 | 0.388 | 657.80 |
+| 1.562 | vq k4096 | 0.420 | 1677.12 |
+| 1.062 | trellis k1 | 0.528 | 20060.11 |
+
+    log(ppl) = 27.31 · recon_err − 4.20        r = 0.99610
+
+**A 0.01 absolute change in reconstruction error multiplies perplexity by 1.31×.**
+
+### This forces a correction to how we have read our own history
+
+The project's standing position (`RESULTS_SUMMARY` §13 batch, F-series preamble) is that local
+reconstruction metrics "never once caught a real failure". Reconstruction error is in fact an
+excellent predictor — r = 0.996 across formats spanning 1.06–3.06 bpw and four orders of magnitude of
+perplexity. Two things reconcile that, and both are needed:
+
+1. **The mapping is exponential, and we were comparing inside the destroyed regime.** Every ternary
+   variant this project ever compared sits at recon 0.43–0.46, where perplexity is already 2000–5000.
+   Differences there are real and predictive — and irrelevant, because the model is gone either way.
+   Reconstruction was answering "still broken?" correctly every time.
+2. **The metric we distrusted was not this one.** §13's block-MSE is *hidden-state* MSE per block
+   during block-AP, a different quantity from final *weight* reconstruction error. The old finding
+   stands for block-MSE; it does not license distrusting weight reconstruction, and we generalised
+   it too far.
+
+### Consequence
+
+The 57-config family sweep can now be read as *predicted perplexity*, not just relative error, which
+is what makes a reconstruction-only sweep worth running at all. The practical rule: **~0.30 recon
+error is the usable boundary** under RTN (0.258 → ppl 11.8; 0.388 → ppl 658), and no sub-2-bpw format
+measured reaches it.
+
+**Limits.** Six points, one model, RTN only, and perplexity is itself a screen for capability rather
+than a measure of it. The 0.258–0.388 interval is unsampled, so the boundary's *position* is a range,
+not a number. The slope is fitted on formats from four different families, which is what makes it
+interesting — but it has not been checked at another scale, and F16 is that check.
+
 ## F12. The first taxonomy was chosen by implementation convenience · HOLDS (method)
 
 The first family sweep contained exactly three families — symmetric scalar, asymmetric scalar, vector

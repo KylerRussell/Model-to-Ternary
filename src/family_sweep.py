@@ -118,8 +118,12 @@ def q_vq(W, k, dim, group, iters=12, sample=200_000, seed=0, device=None):
         raise ValueError(f"k={k} exceeds {S.shape[0]} available sub-vectors -- the codebook would be "
                          f"larger than the data, which measures nothing")
     C = S[torch.randperm(S.shape[0], generator=g)[:k].to(dev)].clone()     # k-means++ is overkill here
+    # the k-means assignment is [n_sample, k] and must be chunked for the same reason the final
+    # assignment is: at k=8192 a 200k sample is 6.5 GB in one shot.
+    AB = max(1 << 12, min(S.shape[0], (1 << 27) // max(k, 1)))
     for _ in range(iters):
-        a = (S @ C.T * 2 - (C * C).sum(-1)).argmax(-1)
+        a = torch.cat([(S[i:i + AB] @ C.T * 2 - (C * C).sum(-1)).argmax(-1)
+                       for i in range(0, S.shape[0], AB)], 0)
         for _pass in range(1):
             Cn = torch.zeros_like(C)
             cnt = torch.zeros(k, device=dev)
@@ -128,7 +132,9 @@ def q_vq(W, k, dim, group, iters=12, sample=200_000, seed=0, device=None):
             m = cnt > 0
             C[m] = Cn[m] / cnt[m].unsqueeze(-1)
     out_chunks = []
-    CB = 1 << 20
+    # the assignment matrix is [CB, k], so the chunk must scale INVERSELY with codebook size:
+    # a fixed 1M-vector chunk is 17 GB at k=4096.
+    CB = max(1 << 13, min(1 << 20, (1 << 28) // max(k, 1)))
     for i in range(0, v.shape[0], CB):
         vv = v[i:i + CB]
         j = (vv @ C.T * 2 - (C * C).sum(-1)).argmax(-1)
