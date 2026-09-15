@@ -16,7 +16,7 @@ import os, sys, glob, json, math, gc, torch
 sys.path.insert(0, os.path.dirname(__file__))
 import torch.nn.functional as F
 from transformers import AutoModelForCausalLM
-from family_sweep import LOG2_3, q_sym, q_trellis, q_vq, rel_err
+from family_sweep import LOG2_3, q_sym, q_trellis, q_vq, fit_vq_codebook, rel_err
 from gptq_encode import gptq_quantize
 
 SRC = os.environ.get("SRC") or glob.glob(
@@ -31,7 +31,10 @@ SEQ = int(os.environ.get("SEQ", "1024"))
 FORMATS = {
     "ternary64": (1.835, 64,  lambda W: q_sym(W, LOG2_3, 64)),
     "trellis2":  (2.062, 256, lambda W: q_trellis(W, 2, 10, 256, device=DEV, n_scan=5)),
-    "vq4096":    (1.562, 256, lambda W: q_vq(W, 4096, 8, 256, device=DEV)),
+    # VQ carries ONE codebook per tensor, so it is fit per tensor and blocks only assign against
+    # it (see fit_vq_codebook). A per-block codebook would be a different, more expensive format.
+    "vq4096":    (1.562, 256, ("vq", 4096, 8)),
+    "vq8192":    (1.688, 256, ("vq", 8192, 8)),
 }
 bpw, GROUP, QFN = FORMATS[FMT]
 
@@ -80,7 +83,9 @@ for gi, (key, members) in enumerate(groups.items()):
         d = torch.diag(Hn).mean().clamp_min(1e-8)
         Hn += torch.eye(Hn.shape[0], device=DEV) * (0.01 * d)
         W = mod.weight.data.float()
-        Q = gptq_quantize(W, Hn, QFN, GROUP)
+        fn = (fit_vq_codebook(W, QFN[1], QFN[2], device=DEV)
+              if isinstance(QFN, tuple) else QFN)
+        Q = gptq_quantize(W, Hn, fn, GROUP)
         tot_err += rel_err(Q, W)
         mod.weight.data.copy_(Q.to(mod.weight.dtype))
         done += 1
@@ -95,7 +100,9 @@ for gi, (key, members) in enumerate(groups.items()):
 with torch.no_grad():
     for n, p in m.named_parameters():
         if "embed" in n and p.ndim == 2 and p.shape[1] % 256 == 0:
-            p.data.copy_(QFN(p.data.float()).to(p.dtype))
+            efn = (fit_vq_codebook(p.data.float(), QFN[1], QFN[2], device=DEV)
+                   if isinstance(QFN, tuple) else QFN)
+            p.data.copy_(efn(p.data.float()).to(p.dtype))
             print(f"   embedding {n} quantized RTN {tuple(p.shape)}", flush=True)
 
 toks = json.load(open("output_4b/eval2k.json"))[:NP]

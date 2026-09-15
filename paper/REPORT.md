@@ -160,16 +160,21 @@ wrong output for this survey. Each band is the best answer to a different hardwa
 
 ### 5.2 The three picks
 
-| band | pick | bpw | recon | ppl (RTN) | rationale |
+| band | pick | bpw | RTN ppl | **GPTQ ppl** | vs fp16 (4.34) |
 |---|---|---|---|---|---|
-| **~2.0** | **trellis k2 L12, g256** | 2.062 | 0.258 | **11.83** | the only sub-3-bpw format that survives RTN at all; 250× better perplexity than ternary for 12% more bits |
-| **~1.7** | **VQ k8192 d8, g256** | 1.688 | 0.388 | 657.80 | best in band; beats ternary g64 on **both** axes (4.5× perplexity at 8% fewer bits) |
-| **~1.56** | **VQ k4096 d8, g256** | 1.562 | 0.420 | 1677.12 | best at the ternary-equivalent rate; beats ternary g256-s8 (1.616 bpw, 0.4389) on both axes |
+| **~2.0** | **trellis k2 L12, g256** | 2.062 | 11.83 | **6.53** | **1.51×** |
+| **~1.7** | **VQ k8192 d8, g256** | 1.688 | 657.80 | **37.04** | 8.54× |
+| **~1.56** | **VQ k4096 d8, g256** | 1.562 | 1677.12 | **73.93** | 17.05× |
+| — | *scalar ternary g64* | 1.835 | 2962.68 | *57.84* | 13.34× |
 
-**None of the three is scalar ternary**, which was not the expected outcome and is the survey's
-sharpest result. At every rate where ternary competes, a codebook format reaches lower error at equal
-or lower bpw. Ternary's appeal is that log₂3 = 1.585 is a natural-looking target and that packing is
-simple; neither is an argument about quality.
+All three are confirmed end-to-end with model-wide sequential GPTQ, not selected on reconstruction
+error alone. **The Pareto frontier is identical under both encoders**, and scalar ternary is dominated
+under both — by both VQ arms under RTN, and by VQ k8192 under GPTQ (better perplexity at 0.147 *fewer*
+bpw). Extrapolating the VQ curve to ternary's rate gives ppl ≈ 16.5 against its actual 57.84, so
+**ternary sits ~250% above the frontier** rather than near it.
+
+**None of the three is scalar ternary**, which remains the survey's sharpest result and now rests on
+end-to-end evidence under two different encoders rather than on reconstruction error.
 
 ### 5.3 What the bands look like with a real encoder
 

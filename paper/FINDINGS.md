@@ -487,6 +487,51 @@ have the same shape: a relationship measured under one condition, written down a
 **Limits.** One model, one calibration set (16 sequences), perplexity not capability. VQ — the band B
 and C picks — has no end-to-end GPTQ number yet, which is now the gap that matters most.
 
+## F20. All three band picks confirmed end-to-end with GPTQ · HOLDS
+
+| band | format | bpw | RTN ppl | **GPTQ ppl** | vs fp16 (4.34) |
+|---|---|---|---|---|---|
+| **A** | trellis k2 | 2.062 | 11.83 | **6.53** | 1.51x |
+| **B** | vq k8192 d8 | 1.688 | 657.80 | **37.04** | 8.54x |
+| **C** | vq k4096 d8 | 1.562 | 1677.12 | **73.93** | 17.05x |
+| — | *ternary g64* | 1.835 | 2962.68 | *57.84* | 13.34x |
+
+**The Pareto frontier is IDENTICAL under both encoders: [vq k4096, vq k8192, trellis k2].** Scalar
+ternary is dominated under RTN (by both VQ arms) and under GPTQ (by vq k8192, which is better on
+perplexity at 0.147 FEWER bpw). Extrapolating the VQ curve — slope -5.49 log-ppl per bpw — puts VQ at
+ternary's 1.835 bpw at ppl 16.5 against ternary's actual 57.84: **ternary sits 250% above the VQ
+frontier**, not marginally off it.
+
+All three band picks, originally selected on RTN reconstruction error alone, are now confirmed with
+model-wide sequential GPTQ perplexity. **The band table is fully evidenced end-to-end.**
+
+### F20a. RETRACTION — "the encoder reverses the ranking" was wrong
+
+On seeing `vq k4096` alone (1.562 bpw, ppl 73.93 vs ternary's 57.84) I reported that GPTQ *reverses*
+the VQ-vs-ternary ranking and that the band-C pick had been made on backwards evidence. **That was a
+conclusion drawn from one arm while the second was still running, and it is false.** With `vq k8192`
+in place, VQ still dominates ternary under GPTQ.
+
+What is actually true is narrower: **the encoder NARROWS VQ's advantage without reversing it.** Under
+RTN ternary is dominated by *both* VQ arms; under GPTQ only by `vq k8192`, because `vq k4096` gives up
+more perplexity than its 0.273 bpw saving buys at that point on the curve.
+
+The error was mine and procedural, not a measurement fault: **a partial result was reported as a
+finding.** The correct move was to hold the analysis until both arms landed, which is what I had said
+I would do one message earlier and then did not. Recorded because it is the same class as the earlier
+generalisation failures — a conclusion stated past the evidence supporting it.
+
+### F20b. What survives about encoder-dependence
+
+The genuine encoder-dependent findings stand and are unaffected by F20a:
+
+* **F19b** — F15's `log(ppl) = 27.31·recon − 4.20` over-predicts by 4,794x on GPTQ weights; the
+  relationship is per-encoder.
+* **F18/F19** — GPTQ narrows the trellis-to-ternary gap 28x (250x -> 8.9x) without closing it.
+* The standing rule this implies: **every format claim must name its encoder.** Rankings, magnitudes
+  and the shape of the error-to-perplexity map are all encoder-relative; only the Pareto *membership*
+  proved stable here, and that was luck rather than a law.
+
 ## F12. The first taxonomy was chosen by implementation convenience · HOLDS (method)
 
 The first family sweep contained exactly three families — symmetric scalar, asymmetric scalar, vector

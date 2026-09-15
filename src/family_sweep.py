@@ -496,3 +496,49 @@ def bpw_mixed(shape, b_lo, b_hi, frac_hi, group, axis=0, scale_bits=16):
     avg = frac_hi * b_hi + (1 - frac_hi) * b_lo
     map_bits = 1.0 / per_ch                                       # 1 bit per channel, amortised
     return avg + scale_bits / group + map_bits
+
+
+@torch.no_grad()
+def fit_vq_codebook(W, k, dim, iters=12, sample=200_000, seed=0, device=None):
+    """Fit ONE codebook for a whole tensor, returning an assign-only closure.
+
+    WHY THIS EXISTS. Inside GPTQ the quantizer is invoked per column block. Calling `q_vq` there would
+    fit a FRESH k-means codebook per block, which is not the format: a deployed VQ tensor carries one
+    codebook. Charging it per block would add ~0.22 bpw at k=4096 (4096*8*16 bits over out*256
+    weights); not charging it would be a silent rate cheat. So the codebook is fit once, on the
+    original tensor, and blocks only assign against it -- which is also what a real encoder does.
+    """
+    dev = device or W.device
+    # NORMALISATION MUST MATCH `assign` BELOW. q_vq normalises by the GROUP amax and only then
+    # splits into dim-vectors. Fitting on per-dim-vector amax instead places every centroid near the
+    # unit sphere while queries arrive much smaller, and assignment degrades catastrophically -- it
+    # surfaced as reconstruction error 1.26, i.e. worse than zeroing the weight.
+    gfit = 256
+    wg = W.reshape(-1, gfit).float().to(dev)
+    s = wg.abs().amax(-1, keepdim=True).clamp_min(1e-12)
+    v = (wg / s).reshape(-1, dim)
+    g = torch.Generator(device="cpu").manual_seed(seed)
+    idx = torch.randperm(v.shape[0], generator=g)[:min(sample, v.shape[0])].to(dev)
+    S = v[idx]
+    if S.shape[0] < k:
+        raise ValueError(f"k={k} exceeds {S.shape[0]} sub-vectors")
+    C = S[torch.randperm(S.shape[0], generator=g)[:k].to(dev)].clone()
+    AB = max(1 << 12, min(S.shape[0], (1 << 27) // max(k, 1)))
+    for _ in range(iters):
+        a = torch.cat([(S[i:i+AB] @ C.T * 2 - (C*C).sum(-1)).argmax(-1)
+                       for i in range(0, S.shape[0], AB)], 0)
+        Cn = torch.zeros_like(C); cnt = torch.zeros(k, device=dev)
+        Cn.index_add_(0, a, S); cnt.index_add_(0, a, torch.ones_like(a, dtype=torch.float32))
+        m = cnt > 0
+        C[m] = Cn[m] / cnt[m].unsqueeze(-1)
+
+    def assign(Wblk, group=256):
+        out, inp = Wblk.shape
+        w = Wblk.reshape(-1, group).float().to(dev)
+        sc = w.abs().amax(-1, keepdim=True).clamp_min(1e-12).half().float()
+        vv = (w / sc).reshape(-1, dim)
+        CB = max(1 << 13, min(1 << 20, (1 << 28) // max(k, 1)))
+        j = torch.cat([(vv[i:i+CB] @ C.T * 2 - (C*C).sum(-1)).argmax(-1)
+                       for i in range(0, vv.shape[0], CB)], 0)
+        return (C[j].reshape(-1, group) * sc).reshape(out, inp).to(Wblk.dtype).to(Wblk.device)
+    return assign
