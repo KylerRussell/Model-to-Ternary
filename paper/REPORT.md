@@ -67,15 +67,15 @@ perplexity with every quantizable 2D tensor replaced by its dequantized form (ex
 
 ## 4. Results
 
-### 4.1 Reconstruction error predicts perplexity exponentially
+### 4.1 Reconstruction error predicts perplexity — within a fixed encoder
 
-Six formats spanning four families, 1.06–3.06 bpw:
+Six formats, RTN, every quantizable 2D tensor replaced, 49,104 held-out tokens:
 
 | bpw | format | recon err | perplexity |
 |---|---|---|---|
 | 16.000 | fp16 | — | **4.34** |
 | 3.062 | int3 g256 | 0.220 | **7.06** |
-| **2.062** | **trellis k2** | **0.258** | **11.83** |
+| 2.062 | trellis k2 | 0.258 | **11.83** |
 | 1.688 | vq k8192 | 0.388 | 657.80 |
 | 1.562 | vq k4096 | 0.420 | 1677.12 |
 | 1.835 | ternary g64 | 0.435 | 2962.68 |
@@ -83,15 +83,37 @@ Six formats spanning four families, 1.06–3.06 bpw:
 
     log(ppl) = 27.31 · recon_err − 4.20        r = 0.99610
 
-A 0.01 absolute change in reconstruction error multiplies perplexity by **1.31×**. This is the result
-that makes a reconstruction-only sweep worth running: 57 cheap measurements become predicted
-end-to-end quality.
+**This relationship is encoder-specific and does not generalise.** Applied to GPTQ-encoded weights it
+over-predicts by **4,794×** (ternary GPTQ: predicts 277,295, actual 57.84), because GPTQ minimises
+`Tr(ΔW H ΔWᵀ)` — the second-order term of the task loss — and deliberately buys lower
+activation-weighted error with *higher* weight error. The correct statement: **reconstruction error
+predicts perplexity within a fixed encoder; comparisons across encoders must use the encoder's own
+objective.**
 
-It also corrects a belief we held for most of this project — that local reconstruction metrics never
-predict anything. They predict very well. What misled us is that the mapping is *exponential* and
-every format we had compared sat at recon 0.43–0.46, where the model is already destroyed;
-reconstruction was correctly answering "still broken?" every time. (The metric we were right to
-distrust, block-MSE on hidden states, is a different quantity — we over-generalised from it.)
+An earlier draft of this section claimed reconstruction metrics predict end-to-end quality generally.
+They do not. A separate long-standing claim in this project — that they predict *nothing* — was also
+wrong, for the opposite reason: every format previously compared here sat at recon 0.43–0.46, where
+the model is already destroyed, so reconstruction was correctly answering "still broken?" every time.
+
+### 4.1b With a real encoder: model-wide GPTQ
+
+Sequential GPTQ (Hessians from the partially quantized model; embeddings RTN in every arm, since a
+lookup has no input covariance):
+
+| bpw | format | RTN ppl | **GPTQ ppl** | vs fp16 |
+|---|---|---|---|---|
+| 2.062 | **trellis k2** | 11.83 | **6.53** | **1.51×** |
+| 1.688 | VQ k8192 | 657.80 | **37.04** | 8.54× |
+| 1.835 | *ternary g64* | 2962.68 | *57.84* | 13.34× |
+| 1.562 | VQ k4096 | 1677.12 | **73.93** | 17.05× |
+
+**Trellis + GPTQ at 2.062 bpw beats int3 + RTN at 3.062 bpw (6.53 vs 7.06) — 33% fewer bits and
+better quality.** GPTQ narrows the trellis-to-ternary gap 28× (250× → 8.9×) without closing it:
+reconstruction error rose by similar proportions in both formats (+39%, +42%), so the encoder favours
+neither, and the residual is the sphere-packing deficit of §4.4.
+
+**The Pareto frontier is identical under both encoders.** Scalar ternary is dominated under RTN by
+both VQ arms, and under GPTQ by VQ k8192 — better perplexity at 0.147 *fewer* bpw.
 
 ### 4.2 The frontier is scale-invariant
 
