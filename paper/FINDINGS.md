@@ -188,59 +188,64 @@ weights that round to zero, so the third ternary symbol is worth far more than t
 
 *Draft section: `paper/sec_format_choice.md`.*
 
-## F11. NO scalar-ternary configuration is Pareto-optimal at any bit rate · HOLDS
+## F11. RETRACTED and replaced — the tensor sample drove the conclusion
 
-The earlier comparisons sampled named ggml types and fitted the reference line through the ternary
-family — a taxonomy chosen by implementation convenience, which made our own family the origin of the
-coordinate system. Re-run as a **family sweep on stock Qwen3.5-4B** (no untying, no rotation), 40
-configurations across six structural families, bpw computed honestly including every side structure:
+**F11 originally claimed "no scalar-ternary configuration is Pareto-optimal at any bit rate."** That
+is false. It was measured on three `(32, 2560)` `in_proj_a` tensors — a strided slice of
+alphabetically sorted names, which is the *same* sampling error already caught once in the earlier
+format comparison and repeated here in a new place. Re-run with a **stratified sample by tensor kind**
+(`down_proj`, `gate_proj`, `up_proj` — where the parameters actually live), two families change
+frontier status.
 
-**Pareto frontier, sub-2.2 bpw band — entirely families E and F:**
+### F11a. Corrected frontier, stratified MLP tensors, stock Qwen3.5-4B · HOLDS
 
-| bpw | config | rel_err |
+| bpw | family / config | rel_err |
 |---|---|---|
-| 1.881 | **F lattice E8 g64** | **0.30228** |
-| 2.062 | E vq k256 d4 g256 | 0.31512 |
-| 1.736 | **F lattice E8 g128** | **0.33296** |
-| 1.625 | E vq k2048 d8 g64 | 0.35339 |
-| 1.438 | E vq k2048 d8 g256 | 0.35798 |
-| 1.651 | F lattice E8 g256 | 0.37104 |
-| 2.085 | *A sym ternary g32* | *0.43456* |
-| 1.835 | *A sym ternary g64* | *0.44447* |
-| 1.710 | *A sym ternary g128* | *0.44969* |
-| 1.647 | *A sym ternary g256* | *0.45522* |
+| 1.062 | G trellis k1 L10 g256 | 0.52779 |
+| 1.438 | E vq k2048 d8 g256 | 0.45611 |
+| 1.625 | E vq k2048 d8 g64 | 0.45290 |
+| **1.647** | **A sym ternary g256** | **0.43894** |
+| **1.710** | **A sym ternary g128** | **0.43663** |
+| **1.835** | **A sym ternary g64** | **0.43256** |
+| 1.963 | I lowrank r16 tern g64 | 0.42541 |
+| 1.995 | J sparse 0.5% tern g64 | 0.40783 |
+| 2.062 | E vq k256 d4 g256 | 0.31934 |
+| **2.062** | **G trellis k2 L12 g256** | **0.25798** |
+| 3.062 | G trellis k3 L10 g256 | 0.13753 |
+| 4.125 | C nonunif NF4 g128 | 0.09034 |
+| 5.000 | B asym int4 g32 | 0.07593 |
 
-**All four scalar-ternary configurations are dominated. None reaches the frontier at any rate.** E8
-lattice at **1.651 bpw** (0.371) beats ternary at **2.085 bpw** (0.435): 21% fewer bits *and* 15%
-lower error.
+**Ternary IS on the frontier**, at 1.647–1.835 bpw. The original claim was an artifact.
 
-Where each family reaches the frontier:
+**But the frontier has a sharp knee at ~2.06 bpw.** Trellis k2 gives **0.258 against ternary g64's
+0.433 — a 40% error reduction for 12% more bits.** The right question is therefore not "is ternary
+Pareto-optimal" (it is, narrowly) but "is 0.23 bpw worth 40% of the error", and on this evidence it
+plainly is. Families reaching the frontier: **A(7), C(5), E(4), G(4), B(1), I(1), J(1)**. Never
+reaching it: **D (micro-float), F (lattice), H (multi-plane)**.
 
-| family | frontier points | bpw range |
-|---|---|---|
-| **E** vector quantization | 3 | **1.06 – 1.62** |
-| **F** lattice | 2 | **1.74 – 1.88** |
-| A uniform scalar | 6 | 1.06 (binary only), then **3.06+** |
-| B asymmetric scalar | 4 | 3.25 – 5.00 |
-| C non-uniform scalar | 5 | 4.12 – 4.50 |
+### F11b. Lattice rate is data-dependent, and a small sample understates it · HOLDS
 
-**Below ~2 bpw the frontier is vector and lattice quantization. Scalar families do not appear again
-until ~3 bpw.** The two families that own the sub-2-bit regime are precisely the two the method
-census declared undeployable on hardware grounds — a claim F2 already falsified.
+`F lattice E8` was 2 frontier points on the tiny tensors and is **absent** from the corrected
+frontier. Its error *improved* on real tensors (−0.016 to −0.034) while its **measured rate rose from
+1.65–1.88 to 2.25–2.55 bpw**, pushing it out of the sub-2 band entirely.
 
-**Second result, at the other end:** non-uniform scalar (family C) beats uniform int4 by **~15% at
-identical bits** (NF4 0.0933 / IQ4_NL 0.0959 vs int4 0.1153 at 4.125 bpw). A uniform grid is
-MSE-optimal only for a uniform source, and LLM weights are not uniform. This family was absent from
-the first pass entirely despite `IQ4_NL` and NF4 both shipping.
+The cause is the honest-rate accounting working as intended: rate is `log₂(distinct lattice points
+used)/8`, and a `(32, 2560)` tensor exercises far fewer points than a `(9216, 2560)` one. **Any family
+whose codebook adapts to the data has a data-dependent rate, and measuring it on unrepresentative
+tensors understates it.** Had the rate been quoted nominally, this error would have been invisible.
 
-*Method: `src/family_sweep.py`, `src/run_family_sweep.py`, taxonomy in `paper/format_taxonomy.md`.
-Lattice rate is MEASURED (distinct lattice points used → log₂ per 8 weights), not assumed, because
-rounding to the infinite E8 lattice has no bounded index and quoting a nominal rate would credit the
-family with error achievable only at unbounded rate.*
+### F11c. The sampling error changed two families' verdicts · HOLDS (method)
 
-**Limits.** 3 tensors, one model, reconstruction only. Families G (trellis), H (multi-plane),
-I (low-rank residual), J (sparse-hybrid), L (mixed-precision) are not yet measured and are declared
-as such in the taxonomy — their absence is a hole in this frontier, not evidence against them.
+Three `(32, 2560)` tensors versus three real MLP tensors flipped **ternary** (never-on-frontier →
+on-frontier) and **lattice** (frontier-owner → never-on-frontier). Neither direction was predictable
+from the other sample.
+
+Third instance of the same class in this project: family-bounded search (F3b), convenience-chosen
+taxonomy (F12), and now convenience-chosen tensors. **The generalisation: whenever a choice is made
+by what is nearest to hand rather than by what the question requires, it decides the answer.** For the
+format work specifically, the rule is now: stratify by tensor kind, never by name order, and never
+score a compression family on tensors small enough for its side structures to be degenerate — the
+low-rank arm at rank 32 on `min_dim` 32 was reconstructing an identity and reporting it as a result.
 
 ## F12. The first taxonomy was chosen by implementation convenience · HOLDS (method)
 
