@@ -84,20 +84,66 @@ hardware limit (§3).
 no zero state, so it cannot express the ~46% of weights that round to zero under ternary. The ternary
 alphabet's extra symbol is worth considerably more than the 0.43 bpw it costs over binary.
 
-## 2.4 Decision
+## 2.4 Decision, and how it was reached
 
 **On this evidence TQ1_64 is not the right deployment target.** It is Pareto-dominated by a format
 that ships in stock llama.cpp, whereas TQ1_64 requires the fork we maintain.
 
-The honest account of how it was chosen: TQ1_64 was designed to hold a **g64**-trained model, because
-finer scale granularity measurably improves end-to-end agreement (79.31% → 80.62% → 82.06% at g256 →
-g128 → g64) and stock `TQ1_0`/`TQ2_0` can only express g256. That reasoning was sound and the
-measurement behind it stands. What was never done was to compare against formats *outside* the scalar
-ternary family — and the comparison, once run, shows the g64/g256 axis was the wrong axis to optimise.
+### 2.4.1 The decision record
 
-Two things must happen before this decision is final, and both are listed in §2.5. We report the
-present state rather than defer, because the alternative is to present a format choice as considered
-when it was in fact made before measuring.
+TQ1_64 was specified on **2026-08-12**. Its stated rationale, quoted from the spec as written and
+unchanged since:
+
+> `TQ2_0` (2.0625 bpw) and `TQ1_0` (1.6875 bpw) both use **QK_K = 256 with a single scale per block
+> (g256)**. Our model is trained at **g64** because finer scale granularity measurably wins […]
+> Exporting a g64 model to TQ2_0 **requantizes it to g256 and destroys it**: MMLU-Pro 25.7% → 10.6%
+> (random) […] Hence a format that can hold g64.
+
+with the supporting measurement: eval2k agreement **79.31% (g256) → 80.62% (g128) → 82.06% (g64)**.
+
+The comparison in §2.3 was run on **2026-09-14/15**. `IQ1_S` and `IQ1_M` are not mentioned anywhere in
+this project's history until 2026-09-14 — **33 days after the format was fixed.** Both dates are
+recoverable from version control, which is why this account can be checked rather than taken on
+trust.
+
+### 2.4.2 What was wrong with it
+
+The reasoning was not sloppy and its measurement was not wrong. Scale granularity does improve
+agreement, by 2.75 points, and stock `TQ1_0`/`TQ2_0` genuinely cannot express g64. Every step
+follows.
+
+The error was the **scope of the comparison**: the search ran exhaustively *within* the scalar-ternary
+family — g256 → g128 → g64 → g32, four points on one axis — and never crossed to another family. §2.3
+shows that axis is movement *along* the rate-distortion line rather than off it, and that the axis
+which does move a format off the line, offset granularity, was excluded by an assumption ("no
+zero-point") never itself tested.
+
+One further fact belongs here rather than in a footnote, because it removes the most convenient
+excuse: **the information was available.** `IQ2_XXS` had been shipping in llama.cpp since early 2024
+and `IQ1_S`/`IQ1_M` well before this project began. Nothing had to be invented or awaited. We did not
+look outside the family we had chosen.
+
+### 2.4.3 Why this is reported rather than repaired quietly
+
+We name the error class as **family-bounded search**: optimising exhaustively within a representation
+family while treating the family boundary as given. It is the same failure this paper documents in
+the wider literature — methods evaluated against a format of the author's own choosing, so that a
+result about *a* format is reported as a result about a *bit budget* (§2.1).
+
+Reporting it has three concrete consequences for the rest of the paper:
+
+1. The screen in §3 must be stated against a **format class**, naming the class, never against
+   TQ1_64. A verdict of "method X is undeployable" is otherwise a statement about our design choice.
+2. The screen itself inherits the same risk. "No zero-point" disqualifies a large share of published
+   methods, and §2.3.2 shows it is the most expensive constraint in the design space while §3 shows
+   it is a choice, not a hardware limit. Both facts are required for the screen to be honest.
+3. Every format claim in this paper is now checked across families before it is made, and the
+   remaining unmeasured formats are listed as unmeasured (§2.5) rather than assumed comparable.
+
+A paper that applies a structural screen to other people's work and exempts its own is not worth
+reading. Being our own worked example is not a concession made reluctantly; it is the strongest
+available evidence that the screen finds real errors, since it found one that cost us the artifact we
+had built.
 
 ## 2.5 Limits
 
