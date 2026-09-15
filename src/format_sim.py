@@ -398,3 +398,76 @@ def verify_iq1m(n=64, seed=0, device="cpu"):
     print(f"verify_iq1m: reconstruction matches gguf.dequantize_blocks exactly "
           f"({n} blocks, max|delta|=0)")
     return True
+
+
+# ─────────────────────────── Q1_0 (binary) ───────────────────────────
+
+def quant_q1_0(W, imp=None, group=128, n_scan=24):
+    """Binary {-1,+1}, one fp16 scale per 128 weights. 1.125 bpw.
+
+    The point of including it: binary has NO ZERO STATE, so it cannot express the ~46% of weights
+    that round to zero under ternary. It anchors the low end of the rate-distortion curve and shows
+    what the third alphabet symbol is actually worth.
+    """
+    out, inp = W.shape
+    assert inp % group == 0
+    w = W.reshape(-1, group).float()
+    i = (torch.ones_like(w) if imp is None
+         else imp.reshape(1, -1).expand(out, -1).reshape(-1, group).float())
+    amax = w.abs().amax(-1, keepdim=True).clamp_min(1e-12)
+    best_e, best = None, None
+    for f in torch.linspace(0.3, 1.0, n_scan, device=w.device):
+        s = (amax * f).half().float()                  # fp16 scale, as stored
+        r = torch.sign(w) * s
+        r = torch.where(w == 0, s, r)                  # sign(0)=0 is not representable in binary
+        e = (i * (r - w) ** 2).sum(-1, keepdim=True)
+        if best_e is None:
+            best_e, best = e, r
+        else:
+            m = e < best_e
+            best_e, best = torch.where(m, e, best_e), torch.where(m, r, best)
+    return best.reshape(out, inp).to(W.dtype)
+
+
+# ─────────────────────────── Q2_K ───────────────────────────
+
+@torch.no_grad()
+def quant_q2_k(W, imp=None, device=None, chunk=2048):
+    """2-bit k-quant: q in {0,1,2,3}, 4-bit scale AND 4-bit min per 16 weights, fp16 super d/dmin.
+
+        x = d*sc*q - dmin*m
+
+    The only arm here carrying a genuine per-block ZERO-POINT, which is the capability the method
+    census claimed was undeployable. Its cost is visible in the rate: 2.625 bpw.
+    """
+    dev = device or W.device
+    out, inp = W.shape
+    assert inp % QK_K == 0
+    w_all = W.reshape(-1, QK_K).float()
+    recs = []
+    for a in range(0, w_all.shape[0], chunk):
+        b = min(a + chunk, w_all.shape[0])
+        w = w_all[a:b].to(dev)
+        nb = w.shape[0]
+        i = (torch.ones_like(w) if imp is None else
+             imp.reshape(1, -1).expand(out, -1).reshape(-1, QK_K)[a:b].to(dev).float())
+        g = w.reshape(nb, 16, 16)                       # 16 sub-blocks of 16 weights
+        ig = i.reshape(nb, 16, 16)
+        gmax = g.amax(-1)
+        gmin = g.amin(-1)
+        # per-sub-block affine over 4 levels, then quantise the scale/min onto their 4-bit grids
+        A = ((gmax - gmin) / 3.0).clamp_min(1e-12)      # step
+        B = -gmin                                       # offset: x = A*q - B
+        d = (A.amax(-1, keepdim=True) / 15.0).clamp_min(1e-12).half().float()
+        dmin = (B.abs().amax(-1, keepdim=True) / 15.0).clamp_min(1e-12).half().float()
+        sc = (A / d).round().clamp(0, 15)
+        m = (B / dmin).round().clamp(0, 15)
+        dl = (d * sc).unsqueeze(-1).clamp_min(1e-12)
+        ml = (dmin * m).unsqueeze(-1)
+        q = ((g + ml) / dl).round().clamp(0, 3)
+        rec = dl * q - ml
+        recs.append(rec.reshape(nb, QK_K).cpu())
+        del w, i, g, ig, rec
+        if dev != "cpu":
+            torch.cuda.empty_cache()
+    return torch.cat(recs, 0).reshape(out, inp).to(W.dtype).to(W.device)

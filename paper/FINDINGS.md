@@ -149,6 +149,45 @@ deployability too.
 *Verified: `verify_iq1m()` packs our parameters into real 56-byte blocks — including the fp16 super
 split across four scale-word top nibbles — and matches gguf's dequantizer exactly (max |Δ| = 0).*
 
+## F3d. Offset capability, not alphabet or granularity, sets position on the R-D line · HOLDS
+
+Seven formats measured on matched tensors. Residual is against `err = -0.0643·bpw + 0.5467`, fitted
+through the offset-free scalar formats (r = -0.99972, residuals ±0.0002):
+
+| format | bpw | offset | scale gran. | err (rot) | residual | Pareto |
+|---|---|---|---|---|---|---|
+| `Q1_0` | 1.1250 | none | g128 | 0.61838 | **+0.1440** | frontier |
+| `IQ1_S` | 1.5625 | 1-bit / g32 | g32+super | 0.44631 | +0.0001 | frontier |
+| `TQ1_0` | 1.6875 | none | g256 | 0.43800 | −0.0002 | frontier |
+| **`IQ1_M`** | 1.7500 | 1-bit / **g8** | g16+super | **0.41350** | **−0.0207** | frontier |
+| **TQ1_64** | 1.7812 | none | g64+super | 0.43228 | +0.0001 | **DOMINATED** |
+| `TQ2_0` | 2.0625 | none | g256 | 0.43800 | +0.0239 | **DOMINATED** |
+| `Q2_K` | 2.6250 | **4-bit / g16** | g16+super | **0.32970** | **−0.0482** | frontier |
+
+**Of seven formats, exactly two are Pareto-dominated — and one is ours.** Ordering is identical on
+the unrotated checkpoint.
+
+**The mechanism is offset granularity, and it is monotone:**
+
+| offset | residual |
+|---|---|
+| none (`TQ1_0`, TQ1_64, `TQ2_0`) | ≈ 0 |
+| 1 bit per 32 weights (`IQ1_S`) | ≈ 0 — too coarse to help |
+| 1 bit per 8 weights (`IQ1_M`) | −0.021 |
+| 4 bits per 16 weights (`Q2_K`) | −0.048 |
+
+Scale granularity alone does **not** move a format off the line: `TQ1_0` (g256) and TQ1_64 (g64) sit
+on the *same* line and differ only in position along it. **Our "no zero-point" format axiom — which
+disqualifies a large share of published methods in the screen — is the most expensive constraint in
+the design space, and F2 established it is a choice rather than a hardware limit.**
+
+Two corollaries: `TQ2_0` is the same alphabet and scale as `TQ1_0`, so its reconstruction is identical
+by construction at 22% more bits — it is a throughput format, never a compression point. And `Q1_0`
+(binary, +0.144, the largest residual measured) has no zero state and cannot express the ~46% of
+weights that round to zero, so the third ternary symbol is worth far more than the 0.43 bpw it costs.
+
+*Draft section: `paper/sec_format_choice.md`.*
+
 ## F4. Our IQ1_S simulation is faithful, not an approximation · HOLDS
 
 `verify_iq1s()` packs our chosen `(d, s, δ, grid index)` into real 50-byte IQ1_S blocks and

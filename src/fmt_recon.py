@@ -16,7 +16,8 @@ end-to-end.
 import os, sys, json, torch
 sys.path.insert(0, os.path.dirname(__file__))
 from e2e_qp_distill import _shard_map, _get_tensor
-from format_sim import quant_ternary, quant_iq1s, quant_iq1m, rel_err, verify_iq1s
+from format_sim import (quant_ternary, quant_iq1s, quant_iq1m, quant_q1_0, quant_q2_k,
+                        rel_err, verify_iq1s, verify_iq1m)
 
 SRC = os.environ.get("FMT_SRC", "output_4bpipe/rotbase/modified_model")
 N_T = int(os.environ.get("N_TENSORS", "12"))
@@ -28,6 +29,7 @@ MAXEL = int(os.environ.get("MAX_ELEMS", str(40 * 1024 * 1024)))
 DEV = "cuda:0" if torch.cuda.is_available() else "cpu"
 
 verify_iq1s(n=32, device="cpu")          # refuse to run on an unfaithful simulator
+verify_iq1m(n=32, device="cpu")
 
 wm = _shard_map(SRC)
 # An EXPLICIT tensor list, so the rotated and unrotated arms are scored on the SAME tensors.
@@ -44,30 +46,39 @@ assert not missing, f"tensors absent from {SRC}: {missing[:3]}"
 print(f"\n{len(names)} tensors from {SRC}\n")
 
 rows = []
-print(f"{'tensor':46s} {'shape':>16s} {'TQ1_0':>9s} {'TQ1_64':>9s} {'IQ1_S':>9s} {'IQ1_M':>9s}  winner")
+print(f"{'tensor':46s} {'shape':>16s} {'IQ1_S':>8s} {'TQ1_0':>8s} {'IQ1_M':>8s} {'TQ1_64':>8s} {'Q2_K':>8s}")
 for ti, n in enumerate(names):
     W = _get_tensor(SRC, wm, n).float().to(DEV)
     if W.ndim != 2 or W.shape[1] % 256 or W.numel() > MAXEL:
         del W; continue
     e = {}
-    e["TQ1_0"] = rel_err(quant_ternary(W, group=256), W)
-    e["TQ1_64"] = rel_err(quant_ternary(W, group=64), W)
+    e["Q1_0"] = rel_err(quant_q1_0(W), W)
     e["IQ1_S"] = rel_err(quant_iq1s(W, device=DEV), W)
+    e["TQ1_0"] = rel_err(quant_ternary(W, group=256), W)
     e["IQ1_M"] = rel_err(quant_iq1m(W, device=DEV), W)
+    e["TQ1_64"] = rel_err(quant_ternary(W, group=64), W)
+    # TQ2_0 is the SAME alphabet and the SAME g256 scale as TQ1_0 -- only the packing density
+    # differs (4 trits/byte vs 5). Its reconstruction is therefore identical by construction, and
+    # it sits at 2.0625 bpw instead of 1.6875: strictly dominated, and worth stating as such.
+    e["TQ2_0"] = e["TQ1_0"]
+    e["Q2_K"] = rel_err(quant_q2_k(W, device=DEV), W)
     win = min(e, key=e.get)
     rows.append({"tensor": n, "shape": list(W.shape), **e, "winner": win})
     print(f"[{ti+1}/{len(names)}] {n[-40:]:40s} {str(tuple(W.shape)):>16s} "
-          f"{e['TQ1_0']:9.5f} {e['TQ1_64']:9.5f} {e['IQ1_S']:9.5f} {e['IQ1_M']:9.5f}  {win}", flush=True)
+          f"{e['IQ1_S']:8.5f} {e['TQ1_0']:8.5f} {e['IQ1_M']:8.5f} {e['TQ1_64']:8.5f} {e['Q2_K']:8.5f}", flush=True)
     del W
     torch.cuda.empty_cache()
 
 print("\n" + "=" * 78)
-for k in ("IQ1_S", "TQ1_0", "IQ1_M", "TQ1_64"):
+for k in ("Q1_0","IQ1_S","TQ1_0","IQ1_M","TQ1_64","TQ2_0","Q2_K"):
     m = sum(r[k] for r in rows) / max(len(rows), 1)
     print(f"  mean rel reconstruction error  {k:7s} {m:.5f}   "
           f"wins {sum(1 for r in rows if r['winner']==k):2d}/{len(rows)}")
-print("  bpw:  IQ1_S 1.5625 < TQ1_0 1.6875 < IQ1_M 1.7500 < TQ1_64 1.7812")
-print("  IQ1_M vs TQ1_64 is the MATCHED-RATE pair (1.75 vs 1.7812, within 1.8%)")
+BPW = {"Q1_0":1.1250,"IQ1_S":1.5625,"TQ1_0":1.6875,"IQ1_M":1.7500,"TQ1_64":1.7812,"TQ2_0":2.0625,"Q2_K":2.6250}
+print("\n  format   bpw      mean_err")
+for k in sorted(BPW, key=BPW.get):
+    mm = sum(r[k] for r in rows)/max(len(rows),1)
+    print(f"  {k:7s} {BPW[k]:.4f}  {mm:.5f}")
 print("=" * 78)
 if os.environ.get("OUT"):
     json.dump(rows, open(os.environ["OUT"], "w"), indent=1)
